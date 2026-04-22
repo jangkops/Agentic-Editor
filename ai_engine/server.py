@@ -154,6 +154,8 @@ async def run_agent_stream(request: Request):
     open_file = body.get("openFile", "")
     open_file_content = body.get("openFileContent", "")
 
+    gw = _get_gw(aws_profile, bedrock_user)
+
     # RAG 컨텍스트 주입
     if project_path:
         from ai_engine.rag.context_builder import build_system_prompt
@@ -165,9 +167,9 @@ async def run_agent_stream(request: Request):
             base_system_prompt=system_prompt,
             aws_profile=aws_profile,
             bedrock_user=bedrock_user,
+            gateway_client=gw,
         )
 
-    gw = _get_gw(aws_profile, bedrock_user)
     messages = [{"role": "user", "content": [{"text": prompt}]}]
     try:
         result = await gw.converse(model_id=model, messages=messages, system_prompt=system_prompt)
@@ -223,6 +225,8 @@ async def run_agent_parallel(request: Request):
     open_file = body.get("openFile", "")
     open_file_content = body.get("openFileContent", "")
 
+    gw = _get_gw(aws_profile, bedrock_user)
+
     # RAG 컨텍스트 — 각 모델의 systemPrompt에 주입
     rag_context = ""
     if project_path:
@@ -234,9 +238,9 @@ async def run_agent_parallel(request: Request):
             open_file_content=open_file_content,
             aws_profile=aws_profile,
             bedrock_user=bedrock_user,
+            gateway_client=gw,
         )
 
-    gw = _get_gw(aws_profile, bedrock_user)
     messages = [{"role": "user", "content": [{"text": prompt}]}]
 
     async def parallel_stream():

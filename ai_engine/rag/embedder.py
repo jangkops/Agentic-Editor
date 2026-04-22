@@ -1,37 +1,40 @@
-"""Bedrock Titan 임베딩 + 로컬 벡터 저장소.
+"""Bedrock 임베딩 — Gateway SigV4 인증 재사용 + 로컬 벡터 저장소.
 
-amazon.titan-embed-text-v2:0 사용.
-numpy로 코사인 유사도 계산 — 외부 벡터 DB 불필요.
+Gateway의 자격증명(BedrockUser assume role)을 사용하여
+bedrock-runtime에 직접 임베딩 호출. 같은 IAM role이므로 같은 한도에 청구.
 """
 import json
 import os
-import hashlib
 import numpy as np
 from typing import List, Optional, Tuple
 
 
 class BedrockEmbedder:
-    """Bedrock Titan 임베딩 클라이언트."""
+    """Gateway 자격증명으로 Bedrock Runtime 임베딩 호출."""
 
     MODEL_ID = "amazon.titan-embed-text-v2:0"
-    DIMENSION = 1024  # Titan v2 기본 차원
+    DIMENSION = 1024
 
-    def __init__(self, aws_profile: str = "default", region: str = "us-west-2",
-                 bedrock_user: str = ""):
-        self.aws_profile = aws_profile
-        self.region = region
-        self.bedrock_user = bedrock_user
+    def __init__(self, gateway_client=None):
+        """gateway_client: GatewayClient 인스턴스 (SigV4 자격증명 재사용)."""
+        self._gw = gateway_client
         self._client = None
 
     def _get_client(self):
         if self._client:
             return self._client
+        if not self._gw:
+            raise RuntimeError("GatewayClient가 필요합니다")
+        # GatewayClient의 자격증명을 재사용하여 bedrock-runtime 클라이언트 생성
         import boto3
-        session = boto3.Session(
-            profile_name=self.aws_profile,
-            region_name=self.region,
+        creds = self._gw._get_creds()
+        self._client = boto3.client(
+            "bedrock-runtime",
+            aws_access_key_id=creds.access_key,
+            aws_secret_access_key=creds.secret_key,
+            aws_session_token=creds.token,
+            region_name=self._gw.region,
         )
-        self._client = session.client("bedrock-runtime")
         return self._client
 
     def embed(self, text: str) -> Optional[np.ndarray]:
@@ -39,7 +42,7 @@ class BedrockEmbedder:
         try:
             client = self._get_client()
             body = json.dumps({
-                "inputText": text[:8000],  # Titan 최대 8K 토큰
+                "inputText": text[:8000],
                 "dimensions": self.DIMENSION,
             })
             resp = client.invoke_model(

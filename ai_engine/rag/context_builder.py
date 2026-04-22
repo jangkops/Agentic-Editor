@@ -38,6 +38,7 @@ def get_searcher(
     project_path: str,
     aws_profile: str = "",
     bedrock_user: str = "",
+    gateway_client=None,
 ) -> HybridSearcher:
     """하이브리드 검색기를 가져오거나 생성."""
     idx = get_indexer(project_path)
@@ -48,11 +49,11 @@ def get_searcher(
 
         # 벡터 임베딩 시도
         try:
-            embedder = BedrockEmbedder(
-                aws_profile=aws_profile or "default",
-                region="us-west-2",
-                bedrock_user=bedrock_user,
-            )
+            if gateway_client:
+                embedder = BedrockEmbedder(gateway_client=gateway_client)
+            else:
+                # GatewayClient가 없으면 BM25만 사용
+                raise RuntimeError("GatewayClient 필요")
             # 캐시된 벡터 저장소 로드 시도
             cache_dir = os.path.join(project_path, ".rag_cache")
             store = VectorStore()
@@ -96,6 +97,7 @@ def build_context(
     open_file_content: Optional[str] = None,
     aws_profile: str = "",
     bedrock_user: str = "",
+    gateway_client=None,
     max_context_chars: int = 12000,
 ) -> str:
     """하이브리드 RAG 기반 컨텍스트 생성."""
@@ -103,7 +105,7 @@ def build_context(
         return ""
 
     idx = get_indexer(project_path)
-    searcher = get_searcher(project_path, aws_profile, bedrock_user)
+    searcher = get_searcher(project_path, aws_profile, bedrock_user, gateway_client)
     parts = []
 
     # 1. 프로젝트 개요
@@ -156,11 +158,12 @@ def build_system_prompt(
     base_system_prompt: str = "",
     aws_profile: str = "",
     bedrock_user: str = "",
+    gateway_client=None,
 ) -> str:
     """최종 시스템 프롬프트 생성."""
     context = build_context(
         project_path, query, open_file, open_file_content,
-        aws_profile, bedrock_user,
+        aws_profile, bedrock_user, gateway_client,
     )
     prompt_parts = []
     if base_system_prompt:
