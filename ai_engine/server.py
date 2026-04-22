@@ -163,6 +163,8 @@ async def run_agent_stream(request: Request):
             open_file=open_file,
             open_file_content=open_file_content,
             base_system_prompt=system_prompt,
+            aws_profile=aws_profile,
+            bedrock_user=bedrock_user,
         )
 
     gw = _get_gw(aws_profile, bedrock_user)
@@ -230,6 +232,8 @@ async def run_agent_parallel(request: Request):
             query=prompt,
             open_file=open_file,
             open_file_content=open_file_content,
+            aws_profile=aws_profile,
+            bedrock_user=bedrock_user,
         )
 
     gw = _get_gw(aws_profile, bedrock_user)

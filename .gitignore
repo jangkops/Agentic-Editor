@@ -8,3 +8,4 @@ build/
 스크린샷 복원/
 스크린샷_resized/
 node_modules
+.rag_cache/
