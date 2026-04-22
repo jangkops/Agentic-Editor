@@ -1,0 +1,25 @@
+appId: com.internal.ai-editor
+productName: AI Editor
+directories:
+  buildResources: build
+  output: dist_electron
+files:
+  - electron/**/*
+  - src/**/*
+  - package.json
+extraResources:
+  - from: ai_engine_dist/
+    to: ai_engine_dist
+    filter:
+      - "**/*"
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - dmg
+    - zip
+win:
+  target:
+    - nsis
+linux:
+  target:
+    - AppImage

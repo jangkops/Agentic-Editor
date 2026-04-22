@@ -1,0 +1,1 @@
+Use webapp-testing skill. Playwright test: - Mock SSO login by directly writing userData/settings/settings.json with test profile - Mock checkSSOStatus to return true - Assert: Monaco editor container (#editor-container) is rendered - Assert: window.monacoEditor is defined in page context - Screenshot to /tmp/editor.png

@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self' http://localhost:* https://raw.githubusercontent.com https://cdn.jsdelivr.net; img-src 'self' data:; worker-src 'self' blob: https://cdn.jsdelivr.net; font-src 'self' https://cdn.jsdelivr.net data:;">
+  <title>AI 에디터</title>
+  <link rel="stylesheet" href="styles/layout.css">
+  <link rel="stylesheet" href="styles/components.css">
+</head>
+<body>
+<div id="app">
+  <div class="topbar">
+    <span class="app-title">◆ AI 에디터</span>
+    <span style="flex:1"></span>
+    <span class="topbar-sep" id="topbar-model-count"></span>
+    <div class="topbar-gauge" id="topbar-quota-gauge" title="월간 사용량 로딩 중..." style="-webkit-app-region:no-drag;display:flex;align-items:center;gap:4px;cursor:default">
+      <span style="font-size:10px;color:var(--color-text-muted)">비용</span>
+      <div style="width:60px;height:3px;background:var(--color-bg-input);border-radius:2px;overflow:hidden"><div id="quota-fill" style="height:100%;background:var(--color-accent);border-radius:2px;width:0%;transition:width 300ms"></div></div>
+      <span id="quota-pct" style="font-size:10px;color:var(--color-text-muted);min-width:28px">0%</span>
+    </div>
+    <span class="topbar-session-info" id="topbar-session-info" style="font-size:10px;color:var(--color-text-muted);-webkit-app-region:no-drag"></span>
+    <div class="topbar-gauge" id="topbar-session-gauge" title="SSO 세션 잔여 시간" style="-webkit-app-region:no-drag;display:flex;align-items:center;gap:4px;cursor:default">
+      <span style="font-size:10px;color:var(--color-text-muted)">SSO</span>
+      <div style="width:60px;height:3px;background:var(--color-bg-input);border-radius:2px;overflow:hidden"><div id="session-bar-fill" style="height:100%;background:var(--color-error);border-radius:2px;width:0%;transition:width 300ms"></div></div>
+      <span id="session-bar-pct" style="font-size:10px;color:var(--color-text-muted);min-width:28px">0%</span>
+    </div>
+    <button class="topbar-btn" id="btn-usage">사용량</button>
+    <button class="topbar-btn" id="btn-terminal-toggle">터미널</button>
+    <button class="topbar-btn" id="btn-settings">설정</button>
+    <button class="topbar-btn" id="btn-about" style="font-size:10px">About</button>
+  </div>
+
+  <div class="main-row">
+  <div class="left-panel">
+    <div class="left-panel-header">
+      <button class="lp-btn active" id="btn-file-explorer">파일 탐색기</button>
+      <button class="lp-btn" id="btn-source-control">소스 제어</button>
+      <button class="lp-btn" id="btn-github-import">GitHub</button>
+    </div>
+    <div class="file-tree-path" id="file-tree-path" style="display:flex;align-items:center">
+      <button class="ft-action-btn" id="btn-open-folder" title="프로젝트 열기" style="flex-shrink:0;margin-right:4px;font-size:11px;padding:2px 6px">+</button>
+      <span id="file-tree-path-text" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer" title="클릭하여 다른 프로젝트 열기"></span>
+      <span id="file-tree-actions" style="display:none;flex-shrink:0;margin-left:4px">
+        <button class="ft-action-btn" id="ft-new-file" title="새 파일">+파일</button>
+        <button class="ft-action-btn" id="ft-new-folder" title="새 폴더">+폴더</button>
+      </span>
+    </div>
+    <div class="file-tree" id="file-tree"><div class="file-tree-drop" id="file-tree-drop-area" style="cursor:pointer"><div class="file-tree-drop-icon">+</div>프로젝트를 열어 시작하세요</div></div>
+    <!-- 소스 제어 패널 -->
+    <div class="file-tree" id="source-control-panel" style="display:none"></div>
+    <!-- 우클릭 컨텍스트 메뉴 -->
+    <div id="file-context-menu" class="context-menu" style="display:none"></div>
+    <div class="skills-section"></div>
+    <!-- 커밋 로그 미니 -->
+    <div class="commit-log-mini" id="commit-log-mini" style="border-top:1px solid var(--color-border);max-height:180px;overflow-y:auto;font-size:11px">
+      <div style="padding:6px 10px;font-size:10px;color:var(--color-text-muted);font-weight:600;text-transform:uppercase;letter-spacing:1px;display:flex;align-items:center;justify-content:space-between">
+        <span>커밋 로그</span>
+        <span id="commit-log-count" style="font-weight:400"></span>
+      </div>
+      <div id="commit-log-list"></div>
+    </div>
+  </div>
+
+  <div class="panel-resize-handle" id="resize-left" style="width:4px;cursor:col-resize;background:transparent;transition:background 150ms;flex-shrink:0" onmouseenter="this.style.background='var(--color-accent)'" onmouseleave="this.style.background='transparent'"></div>
+
+  <div class="center-panel">
+    <!-- 센터 패널 뷰 탭 -->
+    <div class="center-view-tabs" id="center-view-tabs">
+      <button class="cv-tab active" data-view="editor">에디터</button>
+      <button class="cv-tab" data-view="structure">구조</button>
+      <button class="cv-tab" data-view="dependencies">의존성</button>
+      <button class="cv-tab" data-view="stats">통계</button>
+      <button class="cv-tab" data-view="search">검색</button>
+      <button class="cv-tab" data-view="git">GIT</button>
+      <button class="cv-tab" data-view="review">AI 리뷰</button>
+      <button class="cv-tab" data-view="parallel" id="cv-tab-parallel" style="display:none">병렬 결과</button>
+      <button class="cv-tab" data-view="consensus" id="cv-tab-consensus" style="display:none">합의 결과</button>
+      <span style="flex:1"></span>
+      <span class="cv-tab-info" id="cv-tab-info"></span>
+    </div>
+    <div class="parallel-results" id="parallel-results">
+      <div class="parallel-header"><span id="parallel-count"></span><button class="sm-btn" id="parallel-expand-all">닫기</button></div>
+      <div class="parallel-grid" id="parallel-grid"></div>
+    </div>
+    <div class="editor-area" id="editor-area">
+      <div class="editor-tabs" id="editor-tabs"></div>
+      <div class="editor-content" id="editor-content"></div>
+    </div>
+    <!-- 구조 뷰 -->
+    <div class="center-view" id="view-structure" style="display:none"></div>
+    <!-- 의존성 뷰 -->
+    <div class="center-view" id="view-dependencies" style="display:none"></div>
+    <!-- 통계 뷰 -->
+    <div class="center-view" id="view-stats" style="display:none"></div>
+    <!-- 검색 뷰 -->
+    <div class="center-view" id="view-search" style="display:none"></div>
+    <!-- Git 뷰 -->
+    <div class="center-view" id="view-git" style="display:none"></div>
+    <!-- AI 코드 리뷰 뷰 -->
+    <div class="center-view" id="view-review" style="display:none"></div>
+    <!-- 합의 결과 뷰 -->
+    <div class="center-view" id="view-consensus" style="display:none"></div>
+    <!-- Terminal — 리사이즈 핸들 + 통합 입출력 -->
+    <div id="terminal-resize-handle" style="height:4px;cursor:ns-resize;background:transparent;transition:background 150ms" onmouseenter="this.style.background='var(--color-accent)'" onmouseleave="this.style.background='transparent'"></div>
+    <div class="terminal-area" id="terminal-area">
+      <div class="terminal-tabs" id="terminal-tabs-bar"></div>
+      <div class="terminal-content" id="terminal-content"></div>
+    </div>
+  </div>
+
+  <div class="panel-resize-handle" id="resize-right" style="width:4px;cursor:col-resize;background:transparent;transition:background 150ms;flex-shrink:0" onmouseenter="this.style.background='var(--color-accent)'" onmouseleave="this.style.background='transparent'"></div>
+
+  <div class="right-panel">
+    <!-- 우측 패널 탭: 채팅 | 실시간 -->
+    <div class="right-panel-tabs" id="right-panel-tabs">
+      <button class="rp-tab active" data-rp="chat">채팅</button>
+      <button class="rp-tab" data-rp="search-panel" style="display:none" id="rp-tab-search">검색</button>
+      <button class="rp-tab" data-rp="live">실시간</button>
+      <span style="flex:1"></span>
+    </div>
+    <!-- 채팅 뷰 -->
+    <div id="rp-chat-view">
+    <div class="ai-header">
+      <span class="ai-label">AI</span>
+      <div class="mode-toggle" id="mode-toggle">
+        <button class="mode-toggle-btn active" data-mode="single">단일</button>
+        <button class="mode-toggle-btn" data-mode="parallel">병렬</button>
+      </div>
+      <span style="flex:1"></span>
+    </div>
+    <div id="single-model-bar" class="model-bar">
+      <div class="model-dropdown-wrapper" id="model-dropdown-wrapper" style="width:100%">
+        <button class="model-dropdown-btn" id="model-dropdown-btn" style="width:100%;text-align:left">Claude 3.5 Sonnet v2 ▾</button>
+        <div class="model-dropdown-menu" id="model-dropdown-menu" style="display:none">
+          <input class="model-search" id="model-search" placeholder="모델 검색...">
+          <div class="model-dropdown-list" id="model-dropdown-list"></div>
+        </div>
+      </div>
+    </div>
+    <div id="parallel-model-bar" class="model-bar" style="display:none">
+      <div class="model-dropdown-wrapper" id="parallel-dropdown-wrapper" style="width:100%">
+        <button class="model-dropdown-btn" id="parallel-dropdown-btn" style="width:100%;text-align:left">0개 모델 선택 ▾</button>
+        <div class="model-dropdown-menu" id="parallel-dropdown-menu" style="display:none">
+          <input class="model-search" id="parallel-model-search" placeholder="모델 검색...">
+          <div class="model-dropdown-list" id="parallel-dropdown-list"></div>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;margin-top:6px">
+        <span style="font-size:11px;color:var(--color-text-muted)" id="parallel-count-label">0개 선택</span>
+      </div>
+      <!-- 합의 도출 영역 — 별도 행 -->
+      <div id="consensus-area" style="display:flex;flex-direction:column;gap:6px;margin-top:8px;padding-top:8px;border-top:1px solid var(--color-border)">
+        <div style="display:flex;align-items:center;gap:6px">
+          <span style="font-size:10px;color:var(--color-text-muted);font-weight:600;white-space:nowrap">합의</span>
+          <div class="model-dropdown-wrapper" id="consensus-dropdown-wrapper" style="flex:1">
+            <button class="model-dropdown-btn" id="consensus-dropdown-btn" style="width:100%;text-align:left;font-size:10px;padding:4px 8px">합의 모델 선택 ▾</button>
+            <div class="model-dropdown-menu" id="consensus-dropdown-menu" style="display:none;min-width:280px">
+              <input class="model-search" id="consensus-model-search" placeholder="합의 모델 검색...">
+              <div class="model-dropdown-list" id="consensus-dropdown-list"></div>
+            </div>
+          </div>
+          <button class="consensus-btn" id="consensus-btn" disabled style="font-size:10px;padding:4px 12px;white-space:nowrap">합의 도출</button>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px">
+          <span style="font-size:10px;color:var(--color-text-muted);font-weight:600;white-space:nowrap">스킬</span>
+          <select id="consensus-skill-select" style="flex:1;font-size:10px;padding:3px 6px;background:var(--color-bg-input);border:1px solid var(--color-border);border-radius:var(--radius-sm);color:var(--color-text-secondary);outline:none">
+            <option value="">스킬 없음</option>
+          </select>
+        </div>
+        <textarea id="consensus-custom-role" placeholder="커스텀 Role (선택사항)" style="font-size:10px;padding:4px 6px;background:var(--color-bg-input);border:1px solid var(--color-border);border-radius:var(--radius-sm);color:var(--color-text-secondary);outline:none;resize:vertical;min-height:28px;max-height:60px;font-family:var(--font-mono);display:none"></textarea>
+      </div>
+    </div>
+    <div id="parallel-selected-list" style="display:none;max-height:240px;overflow-y:auto;border-bottom:1px solid var(--color-border)">
+      <div id="model-checklist"></div>
+    </div>
+    <div id="chat-tabs-bar" style="display:flex;align-items:center;border-bottom:1px solid var(--color-border);height:30px;padding:0 8px;gap:2px;background:var(--color-bg-tertiary);overflow-x:auto"></div>
+    <span id="consensus-info" style="display:none"></span>
+    <div class="chat-messages" id="chat-messages"></div>
+    <div class="chat-input-area">
+      <div id="attached-files-area" class="attached-files"></div>
+      <div class="chat-input-row">
+        <button class="attach-btn" id="btn-attach" title="파일 첨부">+</button>
+        <input type="file" id="file-attach-input" accept=".pdf,.pptx,.xlsx,.png,.jpg,.jpeg" multiple style="display:none">
+        <textarea class="chat-textarea" id="chat-input" placeholder="무엇이든 물어보세요..." rows="1"></textarea>
+        <button class="send-btn" id="send-btn">전송</button>
+      </div>
+    </div>
+    </div>
+    <!-- 실시간 뷰 -->
+    <div id="rp-live-view" style="display:none;flex:1;flex-direction:column;overflow:hidden">
+      <div style="padding:10px 12px;border-bottom:1px solid var(--color-border);display:flex;align-items:center;gap:8px">
+        <span style="font-size:12px;font-weight:600;color:var(--color-text-primary)">실시간 모니터</span>
+        <span style="flex:1"></span>
+        <span id="live-backend-status" style="font-size:11px"></span>
+        <button class="sm-btn" id="live-refresh-btn" style="font-size:10px;padding:2px 8px">↻</button>
+      </div>
+      <div style="padding:10px 12px;display:grid;grid-template-columns:1fr 1fr;gap:8px;border-bottom:1px solid var(--color-border)">
+        <div style="background:var(--color-bg-tertiary);border:1px solid var(--color-border);border-radius:var(--radius-md);padding:10px;text-align:center">
+          <div id="live-req-count" style="font-size:20px;font-weight:800;color:var(--color-text-primary)">0</div>
+          <div style="font-size:10px;color:var(--color-text-muted)">요청 수</div>
+        </div>
+        <div style="background:var(--color-bg-tertiary);border:1px solid var(--color-border);border-radius:var(--radius-md);padding:10px;text-align:center">
+          <div id="live-cost" style="font-size:20px;font-weight:800;color:var(--color-success)">$0</div>
+          <div style="font-size:10px;color:var(--color-text-muted)">비용</div>
+        </div>
+        <div style="background:var(--color-bg-tertiary);border:1px solid var(--color-border);border-radius:var(--radius-md);padding:10px;text-align:center">
+          <div id="live-tokens" style="font-size:20px;font-weight:800;color:var(--color-text-primary)">0</div>
+          <div style="font-size:10px;color:var(--color-text-muted)">토큰</div>
+        </div>
+        <div style="background:var(--color-bg-tertiary);border:1px solid var(--color-border);border-radius:var(--radius-md);padding:10px;text-align:center">
+          <div id="live-session" style="font-size:20px;font-weight:800;color:var(--color-accent)">0m</div>
+          <div style="font-size:10px;color:var(--color-text-muted)">세션</div>
+        </div>
+      </div>
+      <div style="padding:8px 12px;font-size:10px;color:var(--color-text-muted);font-weight:600;text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid var(--color-border)">요청 로그</div>
+      <div id="live-log" style="flex:1;overflow-y:auto;font-size:11px;font-family:var(--font-mono)"></div>
+    </div>
+    <!-- 검색 결과 패널 (우측) -->
+    <div id="rp-search-view" style="display:none;flex:1;flex-direction:column;overflow:hidden">
+      <div style="padding:8px 12px;border-bottom:1px solid var(--color-border);font-size:12px;font-weight:600;color:var(--color-text-primary)">검색 결과</div>
+      <div id="rp-search-results" style="flex:1;overflow-y:auto;font-size:11px"></div>
+    </div>
+  </div>
+  </div><!-- main-row 닫기 -->
+
+  <div class="statusbar">
+    <span id="status-backend">● backend</span><span class="sep"></span>
+    <span id="status-model"></span><span class="sep"></span>
+    <span id="status-file-info" style="font-size:10px"></span>
+    <span style="flex:1"></span>
+    <span id="status-encoding" style="font-size:10px">UTF-8</span><span class="sep"></span>
+    <span id="status-cursor"></span>
+  </div>
+</div>
+<div id="sso-dialog" style="display:none"></div>
+<div id="usage-dashboard-overlay" style="display:none"></div>
+<script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.50.0/min/vs/loader.js"></script>
+<script src="center-views.js"></script>
+<script src="main.js"></script>
+</body>
+</html>

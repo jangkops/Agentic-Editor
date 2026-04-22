@@ -1,0 +1,27 @@
+{
+  "name": "ai-editor",
+  "version": "0.3.0",
+  "main": "electron/main.js",
+  "scripts": {
+    "predev": "node scripts/setup-venv.js",
+    "dev:python": "ai_engine/.venv/bin/python -m uvicorn ai_engine.server:app --reload --port 8765",
+    "dev:electron": "wait-on http://localhost:8765/health && electron .",
+    "dev": "concurrently \"npm:dev:python\" \"npm:dev:electron\"",
+    "setup:venv": "node scripts/setup-venv.js",
+    "build:python": "node scripts/build-python.js",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win",
+    "dist": "npm run build:python && electron-builder",
+    "test:unit": "node --test tests/unit/",
+    "test:e2e": "python -m pytest tests/e2e/ -v",
+    "test": "npm run test:unit && npm run test:e2e"
+  },
+  "dependencies": {
+    "electron": "^28.0.0"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.0",
+    "electron-builder": "^24.0.0",
+    "wait-on": "^7.0.0"
+  }
+}

@@ -1,0 +1,1 @@
+Use webapp-testing skill. Playwright test: - Launch Electron app (use subprocess to run npm run dev) - Wait for networkidle - Screenshot to /tmp/startup.png - Assert: #sso-overlay is visible - Assert: sso-login-dialog is in DOM - Assert: profile select has at least 1 option OR shows "No profiles" message

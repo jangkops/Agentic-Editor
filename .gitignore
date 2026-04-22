@@ -1,0 +1,10 @@
+node_modules/
+ai_engine/.venv/
+ai_engine/__pycache__/
+.DS_Store
+*.pyc
+dist/
+build/
+스크린샷 복원/
+스크린샷_resized/
+node_modules
