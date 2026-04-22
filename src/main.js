@@ -802,7 +802,24 @@ async function sendMessage() {
 function _apiBody(extra) {
   const profile = state.settings?.awsProfile || 'bedrock-gw';
   const user = state.settings?.bedrockUser || '';
-  return { awsProfile: profile, bedrockUser: user, ...extra };
+  const body = { awsProfile: profile, bedrockUser: user, ...extra };
+  // 프로젝트 컨텍스트 자동 주입
+  if (state.folderPath) {
+    body.projectPath = state.folderPath;
+  }
+  // 현재 열린 파일 정보
+  if (state.activeTab && monacoEditor) {
+    body.openFile = state.activeTab.replace(state.folderPath + '/', '');
+    try {
+      const model = monacoEditor.getModel();
+      if (model) {
+        const content = model.getValue();
+        // 최대 5000자까지 전달
+        body.openFileContent = content.substring(0, 5000);
+      }
+    } catch {}
+  }
+  return body;
 }
 
 // SSE 스트림 읽기 공통 함수
@@ -1535,6 +1552,8 @@ function initFileExplorer() {
         _projectStats = null; _projectDeps = null; _gitLog = []; _reviewResults = null;
         loadFileTree(p);
         loadCommitLogMini(p);
+        // RAG 인덱싱 트리거
+        indexProjectForRAG(p);
       }
     }
   };
@@ -2700,4 +2719,23 @@ function loadSavedConsensusHistory() {
       _consensusHistory = all[today].filter(h => h && h.content);
     }
   } catch {}
+}
+
+// ===== RAG 인덱싱 =====
+async function indexProjectForRAG(projectPath) {
+  try {
+    const r = await fetch('http://localhost:8765/api/rag/index', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectPath }),
+    });
+    const d = await r.json();
+    if (d.status === 'ok') {
+      addLiveLog('system', `RAG 인덱싱 완료: ${d.chunks}개 청크, ${d.files}개 파일`);
+      const info = document.getElementById('cv-tab-info');
+      if (info) info.textContent = `${projectPath.split('/').pop()} · ${d.chunks} chunks`;
+    }
+  } catch (e) {
+    addLiveLog('error', `RAG 인덱싱 실패: ${e.message}`);
+  }
 }

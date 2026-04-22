@@ -56,6 +56,32 @@ async def reset_cache():
     return {"status": "ok", "message": "all caches cleared"}
 
 
+@app.post("/api/rag/index")
+async def rag_index(request: Request):
+    """프로젝트 인덱싱 수동 트리거."""
+    body = await request.json()
+    project_path = body.get("projectPath", "")
+    if not project_path or not os.path.isdir(project_path):
+        return JSONResponse(content={"error": "Invalid project path"}, status_code=400)
+    from ai_engine.rag.context_builder import get_indexer
+    idx = get_indexer(project_path)
+    count = idx.index_project(project_path)
+    return {"status": "ok", "chunks": count, "files": len(set(c.file_path for c in idx.chunks))}
+
+
+@app.get("/api/rag/status")
+async def rag_status(request: Request):
+    """RAG 인덱싱 상태 조회."""
+    project_path = request.query_params.get("projectPath", "")
+    if not project_path:
+        return {"indexed": False, "chunks": 0}
+    from ai_engine.rag.context_builder import _indexer_cache
+    if project_path in _indexer_cache:
+        idx = _indexer_cache[project_path]
+        return {"indexed": True, "chunks": len(idx.chunks), "files": len(set(c.file_path for c in idx.chunks))}
+    return {"indexed": False, "chunks": 0}
+
+
 @app.get("/api/models")
 @app.post("/api/models")
 async def list_models(request: Request):
@@ -124,6 +150,20 @@ async def run_agent_stream(request: Request):
     system_prompt = body.get("systemPrompt", "")
     aws_profile = body.get("awsProfile", os.environ.get("AWS_PROFILE", "bedrock-gw"))
     bedrock_user = body.get("bedrockUser", os.environ.get("BEDROCK_USER", ""))
+    project_path = body.get("projectPath", "")
+    open_file = body.get("openFile", "")
+    open_file_content = body.get("openFileContent", "")
+
+    # RAG 컨텍스트 주입
+    if project_path:
+        from ai_engine.rag.context_builder import build_system_prompt
+        system_prompt = build_system_prompt(
+            project_path=project_path,
+            query=prompt,
+            open_file=open_file,
+            open_file_content=open_file_content,
+            base_system_prompt=system_prompt,
+        )
 
     gw = _get_gw(aws_profile, bedrock_user)
     messages = [{"role": "user", "content": [{"text": prompt}]}]
@@ -177,6 +217,20 @@ async def run_agent_parallel(request: Request):
     models = body.get("models", [])
     aws_profile = body.get("awsProfile", os.environ.get("AWS_PROFILE", "bedrock-gw"))
     bedrock_user = body.get("bedrockUser", os.environ.get("BEDROCK_USER", ""))
+    project_path = body.get("projectPath", "")
+    open_file = body.get("openFile", "")
+    open_file_content = body.get("openFileContent", "")
+
+    # RAG 컨텍스트 — 각 모델의 systemPrompt에 주입
+    rag_context = ""
+    if project_path:
+        from ai_engine.rag.context_builder import build_system_prompt
+        rag_context = build_system_prompt(
+            project_path=project_path,
+            query=prompt,
+            open_file=open_file,
+            open_file_content=open_file_content,
+        )
 
     gw = _get_gw(aws_profile, bedrock_user)
     messages = [{"role": "user", "content": [{"text": prompt}]}]
@@ -186,6 +240,9 @@ async def run_agent_parallel(request: Request):
             model_id = slot.get("modelId", "")
             slot_id = slot.get("slotId", "")
             sp = slot.get("systemPrompt", "")
+            # RAG 컨텍스트를 시스템 프롬프트에 추가
+            if rag_context:
+                sp = (sp + "\n\n" + rag_context) if sp else rag_context
             try:
                 result = await asyncio.wait_for(
                     gw.converse(model_id=model_id, messages=messages, system_prompt=sp),
