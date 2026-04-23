@@ -28,7 +28,6 @@ class GatewayClient:
         import time
         if self._creds and (time.time() - self._cred_time) < 300:
             return self._creds
-        # 외부에서 직접 주입된 자격증명이 있으면 사용 (SSO 토큰 캐시 우회)
         if hasattr(self, '_injected_creds') and self._injected_creds:
             self._creds = self._injected_creds
             self._cred_time = time.time()
@@ -48,6 +47,14 @@ class GatewayClient:
             self._creds = Credentials(fc.access_key, fc.secret_key, fc.token)
         self._cred_time = time.time()
         return self._creds
+
+    def force_refresh_creds(self):
+        """자격증명 강제 갱신 — 토큰 만료 시 호출."""
+        self._cred_time = 0
+        self._creds = None
+        if hasattr(self, '_injected_creds'):
+            self._injected_creds = None
+        print("[GW] 자격증명 강제 갱신")
 
     def inject_credentials(self, access_key: str, secret_key: str, session_token: str = ""):
         """Electron에서 가져온 자격증명을 직접 주입 — boto3 SSO 캐시 완전 우회."""
@@ -100,6 +107,14 @@ class GatewayClient:
                     return {"decision": "ERROR", "error": str(e)}
             result = await loop.run_in_executor(None, _call)
 
+            # 토큰 만료 → 자격증명 갱신 후 재시도
+            err_str = result.get("error", "")
+            if "expired" in err_str.lower() or "security token" in err_str.lower():
+                if attempt < 2:
+                    self.force_refresh_creds()
+                    body_bytes = json.dumps(payload).encode()
+                    continue
+
             # us. prefix로 실패하면 원본 ID로 재시도
             if result.get("decision") == "ERROR" and self._try_us_prefix and attempt == 0:
                 payload["modelId"] = model_id
@@ -123,11 +138,18 @@ class GatewayClient:
         return result
 
     async def converse_stream_live(self, model_id, messages, system_prompt=""):
-        """Lambda Function URL을 통한 실시간 스트리밍.
-        
-        기존 /converse (비동기 S3 폴링) 대신 직접 스트리밍.
-        SigV4로 서명하여 Lambda Function URL에 POST.
-        응답은 SSE 또는 chunked text로 옴.
+        """Lambda Function URL — 토큰 만료 시 자동 갱신 + 재시도."""
+        for _retry in range(2):
+            result = await self._converse_stream_live_once(model_id, messages, system_prompt)
+            err = result.get("error", "")
+            if "expired" in err.lower() or "security token" in err.lower():
+                self.force_refresh_creds()
+                continue
+            return result
+        return result
+
+    async def _converse_stream_live_once(self, model_id, messages, system_prompt=""):
+        """Lambda Function URL을 통한 실시간 스트리밍 (1회 시도)."""
         """
         url = self.STREAM_URL
         payload = self._build_payload(model_id, messages, system_prompt)

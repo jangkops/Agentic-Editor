@@ -928,7 +928,23 @@ async function runSimpleChat(prompt) {
         if (d === '[DONE]') continue;
         try {
           const p = JSON.parse(d);
-          if (p.error) { msg.content += `\n[오류: ${p.error}]`; continue; }
+          if (p.error) {
+            // 토큰 만료 → 자동 재로그인 시도
+            if (p.error.includes('expired') || p.error.includes('security token')) {
+              addLiveLog('system', '토큰 만료 감지 — 자격증명 갱신 중...');
+              try {
+                const creds = await window.electronAPI?.getCredentials(state.settings?.awsProfile || '');
+                if (creds) {
+                  await fetch('http://localhost:8765/api/reset-cache', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ profile: state.settings?.awsProfile, bedrockUser: state.settings?.bedrockUser, credentials: creds }),
+                  });
+                  addLiveLog('system', '자격증명 갱신 완료 — 다시 질문해주세요');
+                }
+              } catch {}
+            }
+            msg.content += `\n[오류: ${p.error}]`; continue;
+          }
           if (p.text) { msg.content += p.text; continue; }
         } catch {}
         msg.content += d;
