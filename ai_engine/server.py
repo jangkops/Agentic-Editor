@@ -27,6 +27,8 @@ def _is_code_related(prompt: str) -> bool:
         '파일', '모듈', '컴포넌트', '테스트', '배포', '빌드', '변수',
         'api', 'endpoint', 'database', 'query', 'schema', 'migration',
         'this file', 'this project', '이 파일', '이 프로젝트', '현재',
+        '경로', '폴더', '디렉토리', '열린', '오픈', 'path', 'directory',
+        '에디터', 'editor', 'project', '프로젝트',
         '.js', '.py', '.ts', '.css', '.html', '.json',
     ]
     for kw in code_keywords:
@@ -36,6 +38,38 @@ def _is_code_related(prompt: str) -> bool:
     if len(p) > 200:
         return True
     return False
+
+
+def _build_messages(chat_history: list, current_prompt: str) -> list:
+    """대화 히스토리 + 현재 프롬프트를 Bedrock messages 형식으로 변환."""
+    messages = []
+    # 최근 10개 메시지만 (토큰 절약)
+    recent = chat_history[-10:] if chat_history else []
+    for msg in recent:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        if not content or role == "system":
+            continue
+        # Bedrock는 user/assistant만 허용
+        if role not in ("user", "assistant"):
+            role = "user"
+        messages.append({"role": role, "content": [{"text": content[:3000]}]})
+    # 현재 질문 추가
+    messages.append({"role": "user", "content": [{"text": current_prompt}]})
+    # Bedrock 규칙: 첫 메시지는 user, user/assistant 교대
+    cleaned = []
+    last_role = None
+    for m in messages:
+        if m["role"] == last_role:
+            # 같은 role 연속이면 합치기
+            cleaned[-1]["content"][0]["text"] += "\n" + m["content"][0]["text"]
+        else:
+            cleaned.append(m)
+            last_role = m["role"]
+    # 첫 메시지가 assistant면 제거
+    if cleaned and cleaned[0]["role"] == "assistant":
+        cleaned = cleaned[1:]
+    return cleaned if cleaned else [{"role": "user", "content": [{"text": current_prompt}]}]
 
 def _get_gw(aws_profile, bedrock_user):
     key = f"{aws_profile}:{bedrock_user}"
@@ -178,6 +212,12 @@ async def run_agent_stream(request: Request):
 
     gw = _get_gw(aws_profile, bedrock_user)
 
+    # 기본 컨텍스트: 프로젝트 경로 + 열린 파일
+    if project_path and not system_prompt:
+        system_prompt = f"사용자의 프로젝트: {project_path}\n"
+        if open_file:
+            system_prompt += f"현재 열린 파일: {open_file}\n"
+
     # RAG 컨텍스트 주입 — 코드/프로젝트 관련 질문에만
     if project_path and _is_code_related(prompt):
         try:
@@ -195,7 +235,7 @@ async def run_agent_stream(request: Request):
         except Exception as e:
             print(f"[RAG] 컨텍스트 빌드 실패 (무시): {e}")
 
-    messages = [{"role": "user", "content": [{"text": prompt}]}]
+    messages = _build_messages(body.get("chatHistory", []), prompt)
     try:
         result = await gw.converse(model_id=model, messages=messages, system_prompt=system_prompt)
     except Exception as e:

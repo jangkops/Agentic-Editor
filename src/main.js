@@ -803,22 +803,24 @@ function _apiBody(extra) {
   const profile = state.settings?.awsProfile || 'bedrock-gw';
   const user = state.settings?.bedrockUser || '';
   const body = { awsProfile: profile, bedrockUser: user, ...extra };
-  // 프로젝트 컨텍스트 자동 주입
+  // 프로젝트 컨텍스트
   if (state.folderPath) {
     body.projectPath = state.folderPath;
   }
-  // 현재 열린 파일 정보
+  // 현재 열린 파일
   if (state.activeTab && monacoEditor) {
     body.openFile = state.activeTab.replace(state.folderPath + '/', '');
     try {
       const model = monacoEditor.getModel();
-      if (model) {
-        const content = model.getValue();
-        // 최대 5000자까지 전달
-        body.openFileContent = content.substring(0, 5000);
-      }
+      if (model) body.openFileContent = model.getValue().substring(0, 5000);
     } catch {}
   }
+  // 대화 히스토리 (최근 10개)
+  const history = (state.messages || [])
+    .filter(m => m.role === 'user' || (m.role === 'assistant' && m.content && !m.isConsensus))
+    .slice(-10)
+    .map(m => ({ role: m.role, content: (m.content || '').substring(0, 2000) }));
+  if (history.length) body.chatHistory = history;
   return body;
 }
 
