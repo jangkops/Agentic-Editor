@@ -891,6 +891,7 @@ async function runSimpleChat(prompt) {
   const msg = { role:'assistant', content:'' };
   state.messages.push(msg);
   renderMessages();
+  const _chatStartTime = Date.now();
   // 생각 중 경과 시간 표시 갱신
   const thinkingTimer = setInterval(() => { if (state.isStreaming && !msg.content) renderMessages(); }, 1000);
   try {
@@ -930,6 +931,7 @@ async function runSimpleChat(prompt) {
     msg.content += `\n[오류: ${errMsg}]`;
     addLiveLog('error', `채팅 실패: ${errMsg}`);
   }
+  msg._elapsed = Math.floor((Date.now() - _chatStartTime) / 1000);
   clearInterval(thinkingTimer);
   state.isStreaming = false;
   renderMessages();
@@ -1466,27 +1468,25 @@ function renderMessages(){
           const d=document.createElement('div');d.className='chat-msg assistant fade-in';
           const isError = msg.content.includes('[오류:') || msg.content.includes('[합의 오류:');
           if (isError) {
-            // 오류 메시지 — 축약 표시 + 접기
             const errorText = msg.content.match(/\[오류:\s*(.+?)\]/)?.[1] || msg.content;
-            d.innerHTML=`<div class="msg-content" style="border-left:3px solid var(--color-error);background:var(--color-error-subtle);max-height:80px;overflow:hidden;cursor:pointer" title="클릭하여 전체 보기">
-              <div style="font-size:11px;font-weight:600;color:var(--color-error);margin-bottom:4px">오류</div>
-              <div style="font-size:12px;color:var(--color-text-secondary)">${esc(errorText.substring(0, 150))}${errorText.length > 150 ? '...' : ''}</div>
+            d.innerHTML=`<div class="msg-content" style="border-left:2px solid var(--color-error);padding:6px 10px">
+              <div style="font-size:11px;color:var(--color-error);display:flex;align-items:center;gap:4px">
+                <span style="font-weight:600">Error</span>
+                ${msg._elapsed ? `<span style="color:var(--color-text-muted);font-weight:400">${fmtElapsed(msg._elapsed)}</span>` : ''}
+              </div>
+              <div style="font-size:11px;color:var(--color-text-secondary);margin-top:2px">${esc(errorText.substring(0, 200))}</div>
             </div>`;
-            d.querySelector('.msg-content').addEventListener('click', () => {
-              const mc = d.querySelector('.msg-content');
-              if (mc.style.maxHeight === '80px') { mc.style.maxHeight = 'none'; mc.style.overflow = 'auto'; }
-              else { mc.style.maxHeight = '80px'; mc.style.overflow = 'hidden'; }
-            });
           } else {
-            d.innerHTML=`<div class="msg-content">${fmtMd(msg.content)}</div>`;
+            const elapsedHtml = msg._elapsed ? `<div style="font-size:10px;color:var(--color-text-muted);margin-top:4px;text-align:right">${fmtElapsed(msg._elapsed)}</div>` : '';
+            d.innerHTML=`<div class="msg-content">${fmtMd(msg.content)}${elapsedHtml}</div>`;
           }
           addCopySupport(d, msg.content);
           c.appendChild(d);
         } else if(!msg.workflow && state.isStreaming) {
           const d=document.createElement('div');d.className='chat-msg assistant fade-in';
           const elapsed = Math.floor((Date.now() - (state._streamStartTime || Date.now())) / 1000);
-          const timeText = elapsed > 5 ? ` (${elapsed}초)` : '';
-          d.innerHTML=`<div class="msg-content thinking-indicator"><span class="thinking-dots"><span></span><span></span><span></span></span> 생각 중${timeText}</div>`;
+          const timeText = elapsed >= 3600 ? `${Math.floor(elapsed/3600)}h ${Math.floor((elapsed%3600)/60)}m` : elapsed >= 60 ? `${Math.floor(elapsed/60)}m ${elapsed%60}s` : `${elapsed}s`;
+          d.innerHTML=`<div class="msg-content thinking-indicator"><span class="thinking-dots"><span></span><span></span><span></span></span> thinking ${timeText}</div>`;
           c.appendChild(d);
         }
       }
@@ -1559,6 +1559,12 @@ function addCopySupport(el, text) {
 function renderWorkflow(c,wf){for(const s of wf.steps){const d=document.createElement('div');const sc={done:'step-done',running:'step-running',failed:'step-failed'}[s.status]||'';d.className=`workflow-step ${sc} fade-in`;const ic={done:'done',running:'running',failed:'failed'}[s.status]||'';const bc={done:'step-badge-done',running:'step-badge-running',failed:'step-badge-failed'}[s.status]||'';const bt={done:'완료',running:'진행 중',failed:'실패'}[s.status]||'';d.innerHTML=`<div class="workflow-step-header"><span class="step-indicator ${ic}"></span><span class="step-title">● ${s.name}</span>${bt?`<span class="step-badge ${bc}">${bt}</span>`:''}</div>${s.detail?`<div class="workflow-step-body">${esc(s.detail)}</div>`:''}`;c.appendChild(d);}}
 function renderToolUseCard(c,t){const card=document.createElement('div');card.className='tool-use-card fade-in';card.innerHTML=`<div class="tool-use-header"><span class="tool-badge">도구</span><span class="tool-label">파일 쓰기: ${esc(t.path||t.name||'')}</span></div><div class="tool-use-body">${esc(t.content||t.diff||JSON.stringify(t,null,2))}</div>`;c.appendChild(card);}
 function fmtMd(t){let h=esc(t);h=h.replace(/```(\w*)\n([\s\S]*?)```/g,'<pre><code>$2</code></pre>');h=h.replace(/`([^`]+)`/g,'<code style="background:var(--color-bg-input);padding:1px 4px;border-radius:3px;font-family:var(--font-mono);font-size:11px">$1</code>');h=h.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');return h;}
+function fmtElapsed(secs) {
+  if (!secs || secs < 1) return '';
+  if (secs >= 3600) return `${Math.floor(secs/3600)}h ${Math.floor((secs%3600)/60)}m`;
+  if (secs >= 60) return `${Math.floor(secs/60)}m ${secs%60}s`;
+  return `${secs}s`;
+}
 function esc(t){if(!t)return'';return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 
 // ===== File Explorer — 인라인 생성/수정/삭제 =====
