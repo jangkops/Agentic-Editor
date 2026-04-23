@@ -40,15 +40,7 @@ function rebuildModelList() {
 rebuildModelList();
 
 // ===== Fix 5: 기본 스킬도 편집 가능하게 =====
-let allSkills = [
-  { id:'senior-fe', name:'시니어 프론트엔드', role:'You are a senior frontend engineer.', color:'#2f81f7', builtin:true },
-  { id:'backend', name:'백엔드 엔지니어', role:'You are a senior backend engineer.', color:'#a371f7', builtin:true },
-  { id:'code-review', name:'코드 리뷰어', role:'You are a strict code reviewer.', color:'#f85149', builtin:true },
-  { id:'ux-designer', name:'UX 디자이너', role:'You are a UX designer.', color:'#39d353', builtin:true },
-  { id:'devops', name:'DevOps 엔지니어', role:'You are a DevOps engineer.', color:'#d29922', builtin:true },
-  { id:'security', name:'보안 감사관', role:'You are a security auditor.', color:'#f85149', builtin:true },
-  { id:'frontend-design', name:'frontend-design', role:'VS Code dark industrial aesthetic.', color:'#3fb950', builtin:false },
-];
+let allSkills = [];
 
 // ===== Fix 4: 대화 세션 탭 =====
 let chatSessions = [{ id:'s-'+Date.now(), name:'대화 1', messages:[] }];
@@ -103,12 +95,7 @@ async function initApp() {
     try {
       const saved = await window.electronAPI.loadSkills();
       if (saved && saved.length) {
-        // 저장된 커스텀 스킬을 기존 목록에 병합
-        for (const sk of saved) {
-          if (!sk.builtin && !allSkills.find(s => s.id === sk.id)) {
-            allSkills.push(sk);
-          }
-        }
+        allSkills = saved.map(sk => ({ ...sk, builtin: false }));
       }
     } catch {}
   }
@@ -405,8 +392,6 @@ function initSkills() { renderSkillsList(); }
 
 function renderSkillsList() {
   const s = document.querySelector('.skills-section'); if (!s) return;
-  const builtinSkills = allSkills.filter(sk => sk.builtin);
-  const customSkills = allSkills.filter(sk => !sk.builtin);
 
   s.innerHTML = `
     <div class="skills-header"><span>스킬</span>
@@ -415,25 +400,14 @@ function renderSkillsList() {
         <button class="skills-add-btn" id="btn-add-skill">추가</button>
       </div>
     </div>
-    <div class="skills-group"><div class="skills-group-title">기본</div>
-      ${builtinSkills.map(sk => `
-        <div class="skill-item" data-id="${sk.id}">
-          <span class="skill-dot" style="background:${sk.color}"></span>
-          <span style="flex:1" title="${sk.role}">${sk.name}</span>
-          <span class="sk-action" data-action="edit" data-id="${sk.id}">편집</span>
-        </div>
-      `).join('')}
-    </div>
-    <div class="skills-group"><div class="skills-group-title">내 스킬</div>
-      ${customSkills.map(sk => `
-        <div class="skill-item" data-id="${sk.id}">
-          <span class="skill-dot" style="background:${sk.color}"></span>
-          <span style="flex:1" title="${sk.role}">${sk.name}</span>
-          <span class="sk-action" data-action="edit" data-id="${sk.id}">편집</span>
-          <span class="sk-action sk-action-del" data-action="delete" data-id="${sk.id}">삭제</span>
-        </div>
-      `).join('')}
-    </div>`;
+    ${allSkills.length ? allSkills.map(sk => `
+      <div class="skill-item" data-id="${sk.id}">
+        <span class="skill-dot" style="background:${sk.color}"></span>
+        <span style="flex:1" title="${sk.role}">${sk.name}</span>
+        <span class="sk-action" data-action="edit" data-id="${sk.id}">편집</span>
+        <span class="sk-action sk-action-del" data-action="delete" data-id="${sk.id}">삭제</span>
+      </div>
+    `).join('') : '<div style="padding:8px;font-size:11px;color:var(--color-text-muted);text-align:center">스킬을 추가하세요</div>'}`;
 
   // 이벤트 바인딩
   s.querySelectorAll('.sk-action').forEach(el => {
@@ -471,7 +445,7 @@ function showSkillEditor(ex) {
     if (!n || !r) return;
     if (isE) {
       ex.name = n; ex.role = r; ex.color = c;
-      if (!ex.builtin) window.electronAPI?.saveSkill?.({ id: ex.id, name: n, role: r, color: c, builtin: false });
+      window.electronAPI?.saveSkill?.({ id: ex.id, name: n, role: r, color: c, builtin: false });
     } else {
       const newSkill = { id:'c-'+Date.now(), name:n, role:r, color:c, builtin:false };
       allSkills.push(newSkill);
@@ -488,8 +462,8 @@ function showGithubMdImport() {
     <div class="dialog" style="text-align:left;position:relative">
     <button class="sm-btn" onclick="document.getElementById('sso-dialog').style.display='none'" style="position:absolute;top:12px;right:12px">닫기</button>
     <h2 style="text-align:center;margin-bottom:16px">GitHub MD 스킬 가져오기</h2>
-    <label>GitHub Raw URL (.md 파일)</label>
-    <input type="text" id="md-url" placeholder="https://raw.githubusercontent.com/user/repo/main/skill.md">
+    <label>GitHub URL (.md 파일)</label>
+    <input type="text" id="md-url" placeholder="https://github.com/user/repo/blob/main/skill.md">
     <label style="margin-top:12px">스킬 이름</label>
     <input type="text" id="md-name" placeholder="가져올 스킬 이름">
     <button class="btn-primary" id="md-import-btn">가져오기</button>
@@ -499,9 +473,14 @@ function showGithubMdImport() {
     const name = o.querySelector('#md-name').value.trim();
     const st = o.querySelector('#md-status');
     if (!url || !name) { st.textContent = 'URL과 이름을 입력하세요'; st.className='status-text error'; return; }
+    // GitHub 페이지 URL → raw URL 자동 변환
+    let rawUrl = url;
+    if (rawUrl.includes('github.com') && rawUrl.includes('/blob/')) {
+      rawUrl = rawUrl.replace('github.com', 'raw.githubusercontent.com').replace('/blob/', '/');
+    }
     st.textContent = '가져오는 중...'; st.className='status-text';
     try {
-      const resp = await fetch(url);
+      const resp = await fetch(rawUrl);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const mdContent = await resp.text();
       const ghSkill = { id:'gh-'+Date.now(), name, role:mdContent, color:'#58a6ff', builtin:false };
@@ -812,7 +791,7 @@ async function sendMessage() {
 // 모델별 예상 응답 속도
 function _modelSpeed(modelId) {
   const id = (modelId || '').toLowerCase();
-  if (id.includes('opus')) return { label: '~30s async', color: 'var(--color-warning)' };
+  if (id.includes('opus')) return { label: '~15s', color: 'var(--color-warning)' };
   if (id.includes('haiku')) return { label: '~3s', color: 'var(--color-success)' };
   if (id.includes('sonnet')) return { label: '~5s', color: 'var(--color-success)' };
   if (id.includes('r1')) return { label: '~20s', color: 'var(--color-warning)' };
@@ -882,17 +861,17 @@ async function readSSEStream(resp, onData, onError) {
 // 간단한 질문인지 판단
 function isSimpleQuery(prompt) {
   const p = prompt.trim().toLowerCase();
-  // 코드 작성/수정/생성/리팩토링 등 복잡한 작업 키워드
-  const complexKeywords = [
-    '구현', '작성', '만들어', '생성', '코드', '리팩토링', '수정해', '변경해', '추가해',
-    '삭제해', '파일을', '함수를', '클래스를', '컴포넌트', '테스트', '디버그', '배포',
-    'implement', 'create', 'build', 'refactor', 'write code', 'fix bug', 'deploy',
-    'generate', 'develop', 'design', 'architect',
+  // 복잡한 작업 — 명시적 코드 작업 요청만
+  const complexPatterns = [
+    '구현해', '작성해', '만들어줘', '생성해', '코드를 ', '리팩토링해', '수정해줘', '변경해줘',
+    '추가해줘', '삭제해줘', '파일을 만', '함수를 만', '클래스를 만', '컴포넌트를 만',
+    '디버그해', '배포해', '빌드해',
+    'implement ', 'create a ', 'build a ', 'refactor ', 'write code', 'fix the bug',
+    'deploy ', 'generate ', 'develop a ', 'design a ',
   ];
-  // 200자 이상이면 복잡한 작업
-  if (p.length > 200) return false;
-  // 복잡한 키워드가 있으면 에이전트 워크플로우
-  for (const kw of complexKeywords) {
+  // 500자 이상이면 복잡한 작업
+  if (p.length > 500) return false;
+  for (const kw of complexPatterns) {
     if (p.includes(kw)) return false;
   }
   return true;
@@ -924,8 +903,7 @@ async function runSimpleChat(prompt) {
     if (el) {
       const elapsed = Math.floor((Date.now() - _chatStartTime) / 1000);
       const timeText = elapsed >= 3600 ? `${Math.floor(elapsed/3600)}h ${Math.floor((elapsed%3600)/60)}m` : elapsed >= 60 ? `${Math.floor(elapsed/60)}m ${elapsed%60}s` : `${elapsed}s`;
-      const asyncTag = state.selectedModel && state.selectedModel.id?.toLowerCase().includes('opus') ? ' (async)' : '';
-      el.innerHTML = `<span class="thinking-dots"><span></span><span></span><span></span></span> thinking ${timeText}${asyncTag}`;
+      el.innerHTML = `<span class="thinking-dots"><span></span><span></span><span></span></span> thinking ${timeText}`;
     }
   }, 1000);
   try {
@@ -1520,8 +1498,7 @@ function renderMessages(){
           const d=document.createElement('div');d.className='chat-msg assistant fade-in';
           const elapsed = Math.floor((Date.now() - (state._streamStartTime || Date.now())) / 1000);
           const timeText = elapsed >= 3600 ? `${Math.floor(elapsed/3600)}h ${Math.floor((elapsed%3600)/60)}m` : elapsed >= 60 ? `${Math.floor(elapsed/60)}m ${elapsed%60}s` : `${elapsed}s`;
-          const asyncTag = state.selectedModel && state.selectedModel.id?.toLowerCase().includes('opus') ? ' (async)' : '';
-          d.innerHTML=`<div class="msg-content thinking-indicator"><span class="thinking-dots"><span></span><span></span><span></span></span> thinking ${timeText}${asyncTag}</div>`;
+          d.innerHTML=`<div class="msg-content thinking-indicator"><span class="thinking-dots"><span></span><span></span><span></span></span> thinking ${timeText}</div>`;
           c.appendChild(d);
         }
       }

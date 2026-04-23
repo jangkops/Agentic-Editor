@@ -276,9 +276,11 @@ async def run_agent_stream(request: Request):
 
     messages = _build_messages(body.get("chatHistory", []), prompt, body.get("sessionId", "default"))
     try:
-        # 기존 /converse 경로 사용 (converse-stream Lambda 배포 완료 전까지)
-        result = await gw.converse(model_id=model, messages=messages, system_prompt=system_prompt)
-        # 응답 성공 후 요약 체크포인트 비동기 트리거
+        # converse-stream Lambda Function URL (HTTP 호출)
+        result = await gw.converse_stream_live(model_id=model, messages=messages, system_prompt=system_prompt)
+        if result.get("decision") == "ERROR":
+            print(f"[Stream] fallback: {result.get('error', '')[:100]}")
+            result = await gw.converse(model_id=model, messages=messages, system_prompt=system_prompt)
         asyncio.create_task(_maybe_summarize(body.get("sessionId", "default"), body.get("chatHistory", []), gw))
     except Exception as e:
         err_str = str(e)
@@ -371,10 +373,16 @@ async def run_agent_parallel(request: Request):
             if rag_context:
                 sp = (sp + "\n\n" + rag_context) if sp else rag_context
             try:
+                # converse-stream 우선 시도, 실패 시 기존 /converse fallback
                 result = await asyncio.wait_for(
-                    gw.converse(model_id=model_id, messages=messages, system_prompt=sp),
-                    timeout=90
+                    gw.converse_stream_live(model_id=model_id, messages=messages, system_prompt=sp),
+                    timeout=120
                 )
+                if result.get("decision") == "ERROR":
+                    result = await asyncio.wait_for(
+                        gw.converse(model_id=model_id, messages=messages, system_prompt=sp),
+                        timeout=120
+                    )
                 decision = result.get("decision", "")
                 if decision == "ALLOW":
                     output = result.get("output", {}).get("message", {}).get("content", [])

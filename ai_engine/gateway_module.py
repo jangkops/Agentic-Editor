@@ -162,12 +162,42 @@ class GatewayClient:
 
         raw = await loop.run_in_executor(None, _stream_call)
 
-        # 응답 파싱 — JSON 또는 텍스트
+        # SSE 스트림 파싱 — data: {...} 형식
+        text_parts = []
+        remaining_quota = {}
+        estimated_cost = 0
+        for line in raw.split('\n'):
+            line = line.strip()
+            if not line.startswith('data: '):
+                continue
+            try:
+                evt = json.loads(line[6:])
+                if evt.get("type") == "content_block_delta":
+                    delta = evt.get("delta", {})
+                    if "text" in delta:
+                        text_parts.append(delta["text"])
+                elif evt.get("type") == "settlement":
+                    remaining_quota = {"cost_krw": evt.get("remaining_quota_krw", 0)}
+                    estimated_cost = evt.get("estimated_cost_krw", 0)
+                elif evt.get("type") == "error":
+                    return {"decision": "ERROR", "error": evt.get("message", str(evt))}
+            except json.JSONDecodeError:
+                continue
+
+        if text_parts:
+            full_text = "".join(text_parts)
+            return {
+                "decision": "ALLOW",
+                "output": {"message": {"content": [{"text": full_text}]}},
+                "remaining_quota": remaining_quota,
+                "estimated_cost_krw": estimated_cost,
+            }
+
+        # SSE 파싱 실패 시 원본 텍스트로 fallback
         try:
             data = json.loads(raw)
             if "error" in data:
                 return {"decision": "ERROR", "error": data["error"]}
-            # 정상 응답
             return {
                 "decision": "ALLOW",
                 "output": data.get("output", {"message": {"content": [{"text": raw}]}}),
@@ -175,12 +205,8 @@ class GatewayClient:
                 "estimated_cost_krw": data.get("estimated_cost_krw", 0),
             }
         except json.JSONDecodeError:
-            # 텍스트 응답
             if raw.strip():
-                return {
-                    "decision": "ALLOW",
-                    "output": {"message": {"content": [{"text": raw}]}},
-                }
+                return {"decision": "ALLOW", "output": {"message": {"content": [{"text": raw}]}}}
             return {"decision": "ERROR", "error": "빈 응답"}
 
     async def _cancel_job(self, job_id):
