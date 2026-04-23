@@ -403,7 +403,7 @@ function renderSkillsList() {
     ${allSkills.length ? allSkills.map(sk => `
       <div class="skill-item" data-id="${sk.id}">
         <span class="skill-dot" style="background:${sk.color}"></span>
-        <span style="flex:1" title="${sk.role}">${sk.name}</span>
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(sk.role?.substring(0,200))}">${esc(sk.name)}</span>
         <span class="sk-action" data-action="edit" data-id="${sk.id}">편집</span>
         <span class="sk-action sk-action-del" data-action="delete" data-id="${sk.id}">삭제</span>
       </div>
@@ -1023,6 +1023,7 @@ async function runAgentWorkflow(prompt) {
 async function runParallel(prompt) {
   if (!state.parallelSlots.length) return;
   state.isStreaming = true;
+  state._streamStartTime = Date.now();
   state._abortController = new AbortController();
   // 180초 타임아웃
   const timeoutId = setTimeout(() => { if (state._abortController) state._abortController.abort(); }, 180000);
@@ -1047,8 +1048,12 @@ async function runParallel(prompt) {
     return { modelId: slot.modelId, slotId: slot.slotId, systemPrompt: sp };
   });
 
-  // 모든 슬롯을 running으로
-  state.parallelSlots.forEach(slot => state.parallelResults.set(slot.slotId, { status:'running', content:'', modelName:slot.model.name }));
+  // 모든 슬롯을 running으로 + 시작 시간 기록
+  const _slotStartTimes = {};
+  state.parallelSlots.forEach(slot => {
+    state.parallelResults.set(slot.slotId, { status:'running', content:'', modelName:slot.model.name });
+    _slotStartTimes[slot.slotId] = Date.now();
+  });
   renderParallelResultGrid(); renderParallelSlotList();
 
   try {
@@ -1075,7 +1080,8 @@ async function runParallel(prompt) {
           if (ev.slotId) {
             const slot = state.parallelSlots.find(s => s.slotId === ev.slotId);
             const modelName = slot?.model?.name || ev.modelId || '';
-            state.parallelResults.set(ev.slotId, { status: ev.status, content: ev.content, modelName });
+            const slotElapsed = _slotStartTimes[ev.slotId] ? Math.floor((Date.now() - _slotStartTimes[ev.slotId]) / 1000) : 0;
+            state.parallelResults.set(ev.slotId, { status: ev.status, content: ev.content, modelName, elapsed: slotElapsed });
             renderParallelResultGrid();
             renderParallelSlotList();
             updateConsensus();
@@ -1101,7 +1107,8 @@ async function runParallel(prompt) {
 
   const done = [...state.parallelResults.values()].filter(r => r.status === 'done').length;
   const err = [...state.parallelResults.values()].filter(r => r.status === 'error').length;
-  state.messages.push({ role:'system', content:`병렬 완료: ${done}개 성공, ${err}개 실패 — 가운데 패널에서 결과 확인` });
+  const parallelElapsed = Math.floor((Date.now() - (state._streamStartTime || Date.now())) / 1000);
+  state.messages.push({ role:'system', content:`병렬 완료: ${done}개 성공, ${err}개 실패 (${fmtElapsed(parallelElapsed)}) — 가운데 패널에서 결과 확인` });
   saveParallelResults();
   renderMessages();
 }
@@ -1257,6 +1264,7 @@ ${dr.map((r, i) => `### 모델 ${i + 1}: ${r.model}\n${r.content.substring(0, 30
   renderMessages();
 
   state.isStreaming = true;
+  state._streamStartTime = Date.now();
   const msg = { role:'assistant', content:'', isConsensus: true };
   state.messages.push(msg);
 
@@ -1292,6 +1300,7 @@ ${dr.map((r, i) => `### 모델 ${i + 1}: ${r.model}\n${r.content.substring(0, 30
     msg.content += `\n[합의 오류: ${e.message}]`;
     addLiveLog('error', `합의 실패: ${e.message}`);
   }
+  msg._elapsed = Math.floor((Date.now() - (state._streamStartTime || Date.now())) / 1000);
   state.isStreaming = false;
 
   // 합의 이력 저장
@@ -1333,7 +1342,7 @@ function renderConsensusView() {
         <span style="flex:1"></span>
         <span style="font-size:10px;color:var(--color-text-muted);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${h.models.map(m => esc(m)).join(', ')}</span>
       </div>
-      <div class="consensus-body" id="consensus-body-${i}" style="padding:14px;font-size:13px;color:var(--color-text-primary);line-height:1.7;max-height:600px;overflow-y:auto">${fmtMd(h.content)}</div>
+      <div class="consensus-body" id="consensus-body-${i}" style="padding:14px;font-size:13px;color:var(--color-text-primary);line-height:1.7;overflow-y:auto">${fmtMd(h.content)}</div>
     </div>`;
   }).join('');
   container.querySelectorAll('[data-toggle-consensus]').forEach(el => {
@@ -1391,9 +1400,10 @@ function renderParallelResultGrid() {
     card.innerHTML = `
       <div class="model-card-header">
         <span class="model-name" style="color:${nameColor}">● ${r.modelName || '모델'}</span>
+        ${r.elapsed ? `<span style="font-size:10px;color:var(--color-text-muted)">${fmtElapsed(r.elapsed)}</span>` : ''}
         <span class="badge ${badge}">${label}</span>
       </div>
-      <div class="model-card-body" style="max-height:${isExp ? 'none' : '180px'}">${esc(displayContent)}</div>
+      <div class="model-card-body" style="max-height:${isExp ? 'none' : '180px'}">${r.status === 'done' ? fmtMd(displayContent) : esc(displayContent)}</div>
       <div style="padding:3px 10px;border-top:1px solid var(--color-border-light);display:flex;justify-content:space-between;align-items:center">
         ${r.status === 'done' ? '<button class="msg-action-btn card-copy-btn" title="Copy" style="width:24px;height:24px">' + SVG_COPY + '</button>' : '<span></span>'}
         <button class="sm-btn card-toggle">${isExp ? '축소' : '확장'}</button>
@@ -1464,10 +1474,21 @@ function renderMessages(){
       } else if(msg.isConsensus){
         const d=document.createElement('div');d.className='chat-msg assistant fade-in';
         if (msg.content) {
-          d.innerHTML=`<div class="msg-content" style="border-left:3px solid var(--color-success);background:var(--color-success-subtle);max-height:500px;overflow-y:auto">
+          const elapsedHtml = msg._elapsed ? `<div style="font-size:10px;color:var(--color-text-muted);margin-top:6px;text-align:right">${fmtElapsed(msg._elapsed)}</div>` : '';
+          d.innerHTML=`<div class="msg-content" style="border-left:3px solid var(--color-success);background:var(--color-success-subtle)">
             <div style="font-size:12px;font-weight:700;margin-bottom:8px;color:var(--color-success)">합의 결과</div>
-            <div style="color:var(--color-text-primary);line-height:1.6">${fmtMd(msg.content)}</div></div>`;
-          addCopySupport(d, msg.content);
+            <div class="md-body">${fmtMd(msg.content)}</div>${elapsedHtml}</div>`;
+          // 합의 결과에는 Copy만 (Run Command 제외)
+          const mc = d.querySelector('.msg-content');
+          const bar = document.createElement('div'); bar.className = 'msg-action-bar';
+          const copyBtn = document.createElement('button'); copyBtn.className = 'msg-action-btn';
+          copyBtn.innerHTML = SVG_COPY; copyBtn.title = 'Copy';
+          copyBtn.addEventListener('click', () => {
+            navigator.clipboard.writeText(msg.content).then(() => {
+              copyBtn.innerHTML = SVG_CHECK; setTimeout(() => { copyBtn.innerHTML = SVG_COPY; }, 1500);
+            });
+          });
+          bar.appendChild(copyBtn); mc.appendChild(bar);
         } else if (state.isStreaming) {
           d.innerHTML=`<div class="msg-content thinking-indicator" style="border-left:3px solid var(--color-success);background:var(--color-success-subtle)">
             <span class="thinking-dots"><span></span><span></span><span></span></span> 합의 도출 중</div>`;
@@ -1570,7 +1591,36 @@ function addCopySupport(el, text) {
 }
 function renderWorkflow(c,wf){for(const s of wf.steps){const d=document.createElement('div');const sc={done:'step-done',running:'step-running',failed:'step-failed'}[s.status]||'';d.className=`workflow-step ${sc} fade-in`;const ic={done:'done',running:'running',failed:'failed'}[s.status]||'';const bc={done:'step-badge-done',running:'step-badge-running',failed:'step-badge-failed'}[s.status]||'';const bt={done:'완료',running:'진행 중',failed:'실패'}[s.status]||'';d.innerHTML=`<div class="workflow-step-header"><span class="step-indicator ${ic}"></span><span class="step-title">● ${s.name}</span>${bt?`<span class="step-badge ${bc}">${bt}</span>`:''}</div>${s.detail?`<div class="workflow-step-body">${esc(s.detail)}</div>`:''}`;c.appendChild(d);}}
 function renderToolUseCard(c,t){const card=document.createElement('div');card.className='tool-use-card fade-in';card.innerHTML=`<div class="tool-use-header"><span class="tool-badge">도구</span><span class="tool-label">파일 쓰기: ${esc(t.path||t.name||'')}</span></div><div class="tool-use-body">${esc(t.content||t.diff||JSON.stringify(t,null,2))}</div>`;c.appendChild(card);}
-function fmtMd(t){let h=esc(t);h=h.replace(/```(\w*)\n([\s\S]*?)```/g,'<pre><code>$2</code></pre>');h=h.replace(/`([^`]+)`/g,'<code style="background:var(--color-bg-input);padding:1px 4px;border-radius:3px;font-family:var(--font-mono);font-size:11px">$1</code>');h=h.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');return h;}
+function fmtMd(t){
+  let h=esc(t);
+  // 코드 블록
+  h=h.replace(/```(\w*)\n([\s\S]*?)```/g,'<pre style="background:var(--color-bg-primary);padding:10px;border-radius:var(--radius-md);margin:8px 0;font-family:var(--font-mono);font-size:11px;overflow-x:auto;border:1px solid var(--color-border)"><code>$2</code></pre>');
+  // 인라인 코드
+  h=h.replace(/`([^`]+)`/g,'<code style="background:var(--color-bg-input);padding:1px 4px;border-radius:3px;font-family:var(--font-mono);font-size:11px">$1</code>');
+  // 헤딩
+  h=h.replace(/^### (.+)$/gm,'<div style="font-size:13px;font-weight:700;color:var(--color-text-primary);margin:12px 0 4px">$1</div>');
+  h=h.replace(/^## (.+)$/gm,'<div style="font-size:14px;font-weight:700;color:var(--color-text-primary);margin:14px 0 6px">$1</div>');
+  h=h.replace(/^# (.+)$/gm,'<div style="font-size:16px;font-weight:700;color:var(--color-text-primary);margin:16px 0 8px">$1</div>');
+  // 볼드/이탤릭
+  h=h.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
+  h=h.replace(/\*(.+?)\*/g,'<em>$1</em>');
+  // 리스트
+  h=h.replace(/^- (.+)$/gm,'<div style="padding-left:12px">· $1</div>');
+  h=h.replace(/^\d+\. (.+)$/gm,'<div style="padding-left:12px">$&</div>');
+  // 인용
+  h=h.replace(/^&gt; (.+)$/gm,'<div style="border-left:2px solid var(--color-accent);padding-left:10px;color:var(--color-text-secondary);margin:4px 0">$1</div>');
+  // 구분선
+  h=h.replace(/^---$/gm,'<hr style="border:none;border-top:1px solid var(--color-border);margin:10px 0">');
+  // 테이블 (간단)
+  h=h.replace(/\|(.+)\|/g, (match) => {
+    const cells = match.split('|').filter(c => c.trim());
+    if (cells.every(c => /^[-:]+$/.test(c.trim()))) return '';
+    return '<div style="display:flex;gap:8px;padding:2px 0;font-size:12px">' + cells.map(c => `<span style="flex:1">${c.trim()}</span>`).join('') + '</div>';
+  });
+  // 줄바꿈
+  h=h.replace(/\n/g,'<br>');
+  return h;
+}
 function fmtElapsed(secs) {
   if (!secs || secs < 1) return '';
   if (secs >= 3600) return `${Math.floor(secs/3600)}h ${Math.floor((secs%3600)/60)}m`;

@@ -34,11 +34,14 @@
 }
 .chat-msg.assistant .msg-content{
   color:var(--color-text-primary);font-size:13px;
-  line-height:1.6;white-space:pre-wrap;word-break:break-word;
+  line-height:1.5;word-break:break-word;
   background:var(--color-bg-secondary);padding:10px 14px;
   border-radius:4px 14px 14px 14px;max-width:95%;
   border:1px solid var(--color-border);
 }
+.chat-msg.assistant .msg-content pre{margin:6px 0;overflow-x:auto;padding:8px;background:var(--color-bg-primary);border-radius:var(--radius-sm);font-size:12px;}
+.chat-msg.assistant .msg-content strong{color:var(--color-text-primary);}
+.chat-msg.assistant .msg-content em{color:var(--color-text-secondary);}
 .chat-msg.system{
   padding:3px 12px;font-size:11px;color:var(--color-text-secondary);
   background:var(--color-accent-subtle);border-left:2px solid var(--color-accent);
