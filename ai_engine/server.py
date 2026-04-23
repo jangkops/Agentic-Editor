@@ -15,6 +15,28 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 # GatewayClient 캐시 — 동일 profile+user 조합은 재사용
 _gw_cache = {}
 
+
+def _is_code_related(prompt: str) -> bool:
+    """프롬프트가 코드/프로젝트 관련인지 판단."""
+    p = prompt.lower().strip()
+    # 코드 관련 키워드
+    code_keywords = [
+        'code', 'function', 'class', 'import', 'error', 'bug', 'fix',
+        'implement', 'refactor', 'test', 'deploy', 'build', 'compile',
+        '코드', '함수', '클래스', '에러', '버그', '수정', '구현', '리팩토링',
+        '파일', '모듈', '컴포넌트', '테스트', '배포', '빌드', '변수',
+        'api', 'endpoint', 'database', 'query', 'schema', 'migration',
+        'this file', 'this project', '이 파일', '이 프로젝트', '현재',
+        '.js', '.py', '.ts', '.css', '.html', '.json',
+    ]
+    for kw in code_keywords:
+        if kw in p:
+            return True
+    # 200자 이상이면 코드 관련일 가능성 높음
+    if len(p) > 200:
+        return True
+    return False
+
 def _get_gw(aws_profile, bedrock_user):
     key = f"{aws_profile}:{bedrock_user}"
     if key not in _gw_cache:
@@ -156,19 +178,22 @@ async def run_agent_stream(request: Request):
 
     gw = _get_gw(aws_profile, bedrock_user)
 
-    # RAG 컨텍스트 주입
-    if project_path:
-        from ai_engine.rag.context_builder import build_system_prompt
-        system_prompt = build_system_prompt(
-            project_path=project_path,
-            query=prompt,
-            open_file=open_file,
-            open_file_content=open_file_content,
-            base_system_prompt=system_prompt,
-            aws_profile=aws_profile,
-            bedrock_user=bedrock_user,
-            gateway_client=gw,
-        )
+    # RAG 컨텍스트 주입 — 코드/프로젝트 관련 질문에만
+    if project_path and _is_code_related(prompt):
+        try:
+            from ai_engine.rag.context_builder import build_system_prompt
+            system_prompt = build_system_prompt(
+                project_path=project_path,
+                query=prompt,
+                open_file=open_file,
+                open_file_content=open_file_content,
+                base_system_prompt=system_prompt,
+                aws_profile=aws_profile,
+                bedrock_user=bedrock_user,
+                gateway_client=gw,
+            )
+        except Exception as e:
+            print(f"[RAG] 컨텍스트 빌드 실패 (무시): {e}")
 
     messages = [{"role": "user", "content": [{"text": prompt}]}]
     try:
@@ -227,19 +252,22 @@ async def run_agent_parallel(request: Request):
 
     gw = _get_gw(aws_profile, bedrock_user)
 
-    # RAG 컨텍스트 — 각 모델의 systemPrompt에 주입
+    # RAG 컨텍스트 — 코드/프로젝트 관련 질문에만
     rag_context = ""
-    if project_path:
-        from ai_engine.rag.context_builder import build_system_prompt
-        rag_context = build_system_prompt(
-            project_path=project_path,
-            query=prompt,
-            open_file=open_file,
-            open_file_content=open_file_content,
-            aws_profile=aws_profile,
-            bedrock_user=bedrock_user,
-            gateway_client=gw,
-        )
+    if project_path and _is_code_related(prompt):
+        try:
+            from ai_engine.rag.context_builder import build_system_prompt
+            rag_context = build_system_prompt(
+                project_path=project_path,
+                query=prompt,
+                open_file=open_file,
+                open_file_content=open_file_content,
+                aws_profile=aws_profile,
+                bedrock_user=bedrock_user,
+                gateway_client=gw,
+            )
+        except Exception as e:
+            print(f"[RAG] 컨텍스트 빌드 실패 (무시): {e}")
 
     messages = [{"role": "user", "content": [{"text": prompt}]}]
 
