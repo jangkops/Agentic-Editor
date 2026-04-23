@@ -892,8 +892,16 @@ async function runSimpleChat(prompt) {
   state.messages.push(msg);
   renderMessages();
   const _chatStartTime = Date.now();
-  // 생각 중 경과 시간 표시 갱신
-  const thinkingTimer = setInterval(() => { if (state.isStreaming && !msg.content) renderMessages(); }, 1000);
+  // 생각 중 경과 시간 — DOM 직접 업데이트 (전체 리렌더 방지)
+  const thinkingTimer = setInterval(() => {
+    if (!state.isStreaming || msg.content) { clearInterval(thinkingTimer); return; }
+    const el = document.querySelector('.thinking-indicator');
+    if (el) {
+      const elapsed = Math.floor((Date.now() - _chatStartTime) / 1000);
+      const timeText = elapsed >= 3600 ? `${Math.floor(elapsed/3600)}h ${Math.floor((elapsed%3600)/60)}m` : elapsed >= 60 ? `${Math.floor(elapsed/60)}m ${elapsed%60}s` : `${elapsed}s`;
+      el.innerHTML = `<span class="thinking-dots"><span></span><span></span><span></span></span> thinking ${timeText}`;
+    }
+  }, 1000);
   try {
     const resp = await fetch('http://localhost:8765/api/agents/run-stream', {
       method:'POST', headers:{'Content-Type':'application/json'},
