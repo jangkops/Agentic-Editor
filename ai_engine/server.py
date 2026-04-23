@@ -43,17 +43,16 @@ def _is_code_related(prompt: str) -> bool:
 def _build_messages(chat_history: list, current_prompt: str) -> list:
     """대화 히스토리 + 현재 프롬프트를 Bedrock messages 형식으로 변환."""
     messages = []
-    # 최근 10개 메시지만 (토큰 절약)
-    recent = chat_history[-10:] if chat_history else []
+    # 최근 6개 메시지만 (토큰 절약 — Opus 비동기 속도 개선)
+    recent = chat_history[-6:] if chat_history else []
     for msg in recent:
         role = msg.get("role", "user")
         content = msg.get("content", "")
         if not content or role == "system":
             continue
-        # Bedrock는 user/assistant만 허용
         if role not in ("user", "assistant"):
             role = "user"
-        messages.append({"role": role, "content": [{"text": content[:3000]}]})
+        messages.append({"role": role, "content": [{"text": content[:1000]}]})
     # 현재 질문 추가
     messages.append({"role": "user", "content": [{"text": current_prompt}]})
     # Bedrock 규칙: 첫 메시지는 user, user/assistant 교대
@@ -212,11 +211,11 @@ async def run_agent_stream(request: Request):
 
     gw = _get_gw(aws_profile, bedrock_user)
 
-    # 기본 컨텍스트: 프로젝트 경로 + 열린 파일
+    # 기본 컨텍스트: 프로젝트 경로 + 열린 파일명만 (내용은 RAG에서)
     if project_path and not system_prompt:
-        system_prompt = f"사용자의 프로젝트: {project_path}\n"
+        system_prompt = f"사용자의 프로젝트 경로: {project_path}"
         if open_file:
-            system_prompt += f"현재 열린 파일: {open_file}\n"
+            system_prompt += f"\n현재 열린 파일: {open_file}"
 
     # RAG 컨텍스트 주입 — 코드/프로젝트 관련 질문에만
     if project_path and _is_code_related(prompt):

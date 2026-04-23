@@ -815,11 +815,11 @@ function _apiBody(extra) {
       if (model) body.openFileContent = model.getValue().substring(0, 5000);
     } catch {}
   }
-  // 대화 히스토리 (최근 10개)
+  // 대화 히스토리 (최근 6개, 각 1000자 제한 — 토큰 절약)
   const history = (state.messages || [])
-    .filter(m => m.role === 'user' || (m.role === 'assistant' && m.content && !m.isConsensus))
-    .slice(-10)
-    .map(m => ({ role: m.role, content: (m.content || '').substring(0, 2000) }));
+    .filter(m => m.role === 'user' || (m.role === 'assistant' && m.content && !m.isConsensus && !m.content.includes('[오류:')))
+    .slice(-6)
+    .map(m => ({ role: m.role, content: (m.content || '').substring(0, 1000) }));
   if (history.length) body.chatHistory = history;
   return body;
 }
