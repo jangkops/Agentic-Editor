@@ -884,12 +884,15 @@ async function runSingle(prompt) {
 // 간단한 질문 — 워크플로우 없이 바로 응답
 async function runSimpleChat(prompt) {
   state.isStreaming = true;
+  state._streamStartTime = Date.now();
   state._abortController = new AbortController();
-  const timeoutId = setTimeout(() => { if (state._abortController) state._abortController.abort(); }, 60000);
+  const timeoutId = setTimeout(() => { if (state._abortController) state._abortController.abort(); }, 180000);
   addLiveLog('request', `채팅: ${state.selectedModel.name}`, prompt.substring(0, 100));
   const msg = { role:'assistant', content:'' };
   state.messages.push(msg);
   renderMessages();
+  // 생각 중 경과 시간 표시 갱신
+  const thinkingTimer = setInterval(() => { if (state.isStreaming && !msg.content) renderMessages(); }, 1000);
   try {
     const resp = await fetch('http://localhost:8765/api/agents/run-stream', {
       method:'POST', headers:{'Content-Type':'application/json'},
@@ -927,6 +930,7 @@ async function runSimpleChat(prompt) {
     msg.content += `\n[오류: ${errMsg}]`;
     addLiveLog('error', `채팅 실패: ${errMsg}`);
   }
+  clearInterval(thinkingTimer);
   state.isStreaming = false;
   renderMessages();
   saveConversation();
@@ -935,8 +939,9 @@ async function runSimpleChat(prompt) {
 // 복잡한 작업 — 에이전트 워크플로우 (계획→코드→리뷰→테스트→완료)
 async function runAgentWorkflow(prompt) {
   state.isStreaming = true;
+  state._streamStartTime = Date.now();
   state._abortController = new AbortController();
-  const timeoutId = setTimeout(() => { if (state._abortController) state._abortController.abort(); }, 120000);
+  const timeoutId = setTimeout(() => { if (state._abortController) state._abortController.abort(); }, 180000);
   addLiveLog('request', `에이전트: ${state.selectedModel.name}`, prompt.substring(0, 100));
   const wfId = 'wf-' + Date.now();
   const wf = { id:wfId, steps:[
@@ -1005,8 +1010,8 @@ async function runParallel(prompt) {
   if (!state.parallelSlots.length) return;
   state.isStreaming = true;
   state._abortController = new AbortController();
-  // 120초 타임아웃 (백엔드 90초 + 여유)
-  const timeoutId = setTimeout(() => { if (state._abortController) state._abortController.abort(); }, 120000);
+  // 180초 타임아웃
+  const timeoutId = setTimeout(() => { if (state._abortController) state._abortController.abort(); }, 180000);
   addLiveLog('request', `병렬 호출: ${state.parallelSlots.length}개 모델`);
 
   state.parallelResults.clear();
@@ -1459,13 +1464,29 @@ function renderMessages(){
         if(msg.toolUses?.length)for(const t of msg.toolUses)renderToolUseCard(c,t);
         if(msg.content){
           const d=document.createElement('div');d.className='chat-msg assistant fade-in';
-          d.innerHTML=`<div class="msg-content">${fmtMd(msg.content)}</div>`;
+          const isError = msg.content.includes('[오류:') || msg.content.includes('[합의 오류:');
+          if (isError) {
+            // 오류 메시지 — 축약 표시 + 접기
+            const errorText = msg.content.match(/\[오류:\s*(.+?)\]/)?.[1] || msg.content;
+            d.innerHTML=`<div class="msg-content" style="border-left:3px solid var(--color-error);background:var(--color-error-subtle);max-height:80px;overflow:hidden;cursor:pointer" title="클릭하여 전체 보기">
+              <div style="font-size:11px;font-weight:600;color:var(--color-error);margin-bottom:4px">오류</div>
+              <div style="font-size:12px;color:var(--color-text-secondary)">${esc(errorText.substring(0, 150))}${errorText.length > 150 ? '...' : ''}</div>
+            </div>`;
+            d.querySelector('.msg-content').addEventListener('click', () => {
+              const mc = d.querySelector('.msg-content');
+              if (mc.style.maxHeight === '80px') { mc.style.maxHeight = 'none'; mc.style.overflow = 'auto'; }
+              else { mc.style.maxHeight = '80px'; mc.style.overflow = 'hidden'; }
+            });
+          } else {
+            d.innerHTML=`<div class="msg-content">${fmtMd(msg.content)}</div>`;
+          }
           addCopySupport(d, msg.content);
           c.appendChild(d);
         } else if(!msg.workflow && state.isStreaming) {
-          // 아직 응답이 안 왔으면 "생각 중" 표시
           const d=document.createElement('div');d.className='chat-msg assistant fade-in';
-          d.innerHTML=`<div class="msg-content thinking-indicator"><span class="thinking-dots"><span></span><span></span><span></span></span> 생각 중</div>`;
+          const elapsed = Math.floor((Date.now() - (state._streamStartTime || Date.now())) / 1000);
+          const timeText = elapsed > 5 ? ` (${elapsed}초)` : '';
+          d.innerHTML=`<div class="msg-content thinking-indicator"><span class="thinking-dots"><span></span><span></span><span></span></span> 생각 중${timeText}</div>`;
           c.appendChild(d);
         }
       }

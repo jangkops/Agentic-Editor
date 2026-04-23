@@ -88,14 +88,24 @@ class GatewayClient:
 
             # us. prefix로 실패하면 원본 ID로 재시도
             if result.get("decision") == "ERROR" and self._try_us_prefix and attempt == 0:
-                payload["modelId"] = model_id  # prefix 없이 원본
+                payload["modelId"] = model_id
                 body_bytes = json.dumps(payload).encode()
                 continue
 
-            if result.get("decision") != "ACCEPTED":
-                return result
-            if attempt < 2:
-                await asyncio.sleep(2)
+            if result.get("decision") == "ACCEPTED":
+                # 비동기 모델 — S3 폴링으로 결과 대기
+                job_id = result.get("job_id", "")
+                if job_id:
+                    text = await self._poll_job_result(job_id, max_wait=120)
+                    if text:
+                        return {"decision": "ALLOW", "output": {"message": {"content": [{"text": text}]}},
+                                "remaining_quota": result.get("remaining_quota", {}),
+                                "estimated_cost_krw": result.get("estimated_cost_krw", 0)}
+                    return {"decision": "ERROR", "error": f"비동기 작업 시간 초과 (job: {job_id[:12]}...)"}
+                if attempt < 2:
+                    await asyncio.sleep(2)
+                    continue
+            return result
         return result
 
     async def _cancel_job(self, job_id):
@@ -140,7 +150,7 @@ class GatewayClient:
             if "text" in c:
                 yield c["text"]
 
-    async def _poll_job_result(self, job_id, max_wait=60):
+    async def _poll_job_result(self, job_id, max_wait=120):
         creds = self._get_creds()
         s3 = boto3.client("s3", aws_access_key_id=creds.access_key, aws_secret_access_key=creds.secret_key, aws_session_token=creds.token, region_name=self.region)
         try:
@@ -149,8 +159,8 @@ class GatewayClient:
             account = "107650139384"
         bucket = f"bedrock-gw-dev-payload-{account}"
         key = f"results/{job_id}.json"
-        for i in range(max_wait // 2):
-            await asyncio.sleep(2)
+        for i in range(max_wait):  # 1초 간격으로 폴링
+            await asyncio.sleep(1)
             try:
                 obj = s3.get_object(Bucket=bucket, Key=key)
                 data = json.loads(obj["Body"].read().decode())
