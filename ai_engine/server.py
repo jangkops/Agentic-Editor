@@ -40,35 +40,24 @@ def _is_code_related(prompt: str) -> bool:
     return False
 
 
-def _build_messages(chat_history: list, current_prompt: str) -> list:
-    """대화 히스토리 + 현재 프롬프트를 Bedrock messages 형식으로 변환."""
-    messages = []
-    # 최근 6개 메시지만 (토큰 절약 — Opus 비동기 속도 개선)
-    recent = chat_history[-6:] if chat_history else []
-    for msg in recent:
-        role = msg.get("role", "user")
-        content = msg.get("content", "")
-        if not content or role == "system":
-            continue
-        if role not in ("user", "assistant"):
-            role = "user"
-        messages.append({"role": role, "content": [{"text": content[:1000]}]})
-    # 현재 질문 추가
-    messages.append({"role": "user", "content": [{"text": current_prompt}]})
-    # Bedrock 규칙: 첫 메시지는 user, user/assistant 교대
-    cleaned = []
-    last_role = None
-    for m in messages:
-        if m["role"] == last_role:
-            # 같은 role 연속이면 합치기
-            cleaned[-1]["content"][0]["text"] += "\n" + m["content"][0]["text"]
-        else:
-            cleaned.append(m)
-            last_role = m["role"]
-    # 첫 메시지가 assistant면 제거
-    if cleaned and cleaned[0]["role"] == "assistant":
-        cleaned = cleaned[1:]
-    return cleaned if cleaned else [{"role": "user", "content": [{"text": current_prompt}]}]
+def _build_messages(chat_history: list, current_prompt: str, session_id: str = "") -> list:
+    """ConversationMemory를 통해 messages 구성."""
+    from ai_engine.rag.conversation_memory import get_memory
+    mem = get_memory()
+    messages, _ = mem.build_messages(session_id or "default", chat_history, current_prompt)
+    return messages
+
+async def _maybe_summarize(session_id: str, chat_history: list, gw):
+    """대화가 길어지면 비동기로 요약 체크포인트 생성."""
+    try:
+        from ai_engine.rag.conversation_memory import get_memory
+        mem = get_memory()
+        _, needs = mem.build_messages(session_id, chat_history, "")
+        if needs:
+            await mem.summarize_and_checkpoint(session_id, chat_history, gw)
+    except Exception as e:
+        print(f"[Memory] 요약 트리거 실패: {e}")
+
 
 def _get_gw(aws_profile, bedrock_user):
     key = f"{aws_profile}:{bedrock_user}"
@@ -81,8 +70,9 @@ def _get_gw(aws_profile, bedrock_user):
             bedrock_user=bedrock_user,
         )
     gw = _gw_cache[key]
-    # 자격증명 캐시 강제 만료 — 매번 새로 assume role
-    gw._cred_time = 0
+    # 주입된 자격증명이 있으면 캐시 만료하지 않음
+    if not hasattr(gw, '_injected_creds') or not gw._injected_creds:
+        gw._cred_time = 0
     return gw
 
 
@@ -96,19 +86,69 @@ async def health():
 
 
 @app.post("/api/reset-cache")
-async def reset_cache():
-    """Gateway 클라이언트 캐시 + boto3 세션 캐시 완전 초기화."""
-    # GatewayClient 캐시 초기화
+async def reset_cache(request: Request):
+    """Gateway 클라이언트 캐시 초기화 + 선택적 자격증명 주입."""
     _gw_cache.clear()
-    # boto3 내부 credential 캐시 초기화
+    _quota_cache["used_krw"] = 0
+    _quota_cache["remaining_krw"] = 0
+    _quota_cache["limit_krw"] = 0
+    _quota_cache["last_updated"] = ""
+    _quota_cache["user"] = ""
     try:
         import boto3
-        import botocore.session as bs
-        # 기본 세션의 credential resolver 캐시 리셋
         boto3.DEFAULT_SESSION = None
     except Exception:
         pass
-    return {"status": "ok", "message": "all caches cleared"}
+    # 자격증명 직접 주입 (Electron에서 전달)
+    try:
+        body = await request.json()
+        creds = body.get("credentials")
+        if creds and creds.get("AWS_ACCESS_KEY_ID"):
+            profile = body.get("profile", "bedrock-gw")
+            user = body.get("bedrockUser", "")
+            # 새 GatewayClient 생성 후 자격증명 주입
+            from ai_engine.gateway_module import GatewayClient
+            gw = GatewayClient(
+                gateway_url=os.environ.get("GATEWAY_URL", "https://5l764dh7y9.execute-api.us-west-2.amazonaws.com/v1"),
+                aws_profile=profile,
+                region=os.environ.get("AWS_REGION", "us-west-2"),
+                bedrock_user=user,
+            )
+            # SSO 기본 자격증명으로 BedrockUser assume role 시도
+            try:
+                import boto3 as b3
+                from botocore.credentials import Credentials as BotoCreds
+                # 전달받은 SSO 자격증명으로 임시 세션 생성
+                tmp_session = b3.Session()
+                sts = tmp_session.client(
+                    "sts",
+                    aws_access_key_id=creds["AWS_ACCESS_KEY_ID"],
+                    aws_secret_access_key=creds["AWS_SECRET_ACCESS_KEY"],
+                    aws_session_token=creds.get("AWS_SESSION_TOKEN", ""),
+                    region_name=creds.get("AWS_DEFAULT_REGION", "us-west-2"),
+                )
+                account = sts.get_caller_identity()["Account"]
+                if user:
+                    assumed = sts.assume_role(
+                        RoleArn=f"arn:aws:iam::{account}:role/BedrockUser-{user}",
+                        RoleSessionName="ai-editor",
+                    )
+                    c = assumed["Credentials"]
+                    gw.inject_credentials(c["AccessKeyId"], c["SecretAccessKey"], c["SessionToken"])
+                    print(f"[Cache] BedrockUser-{user} assume role 성공")
+                else:
+                    gw.inject_credentials(
+                        creds["AWS_ACCESS_KEY_ID"],
+                        creds["AWS_SECRET_ACCESS_KEY"],
+                        creds.get("AWS_SESSION_TOKEN", ""),
+                    )
+                key = f"{profile}:{user}"
+                _gw_cache[key] = gw
+            except Exception as e:
+                print(f"[Cache] assume role 실패: {e}")
+    except Exception:
+        pass
+    return {"status": "ok", "message": "cache cleared"}
 
 
 @app.post("/api/rag/index")
@@ -234,11 +274,23 @@ async def run_agent_stream(request: Request):
         except Exception as e:
             print(f"[RAG] 컨텍스트 빌드 실패 (무시): {e}")
 
-    messages = _build_messages(body.get("chatHistory", []), prompt)
+    messages = _build_messages(body.get("chatHistory", []), prompt, body.get("sessionId", "default"))
     try:
+        # 기존 /converse 경로 사용 (converse-stream Lambda 배포 완료 전까지)
         result = await gw.converse(model_id=model, messages=messages, system_prompt=system_prompt)
+        # 응답 성공 후 요약 체크포인트 비동기 트리거
+        asyncio.create_task(_maybe_summarize(body.get("sessionId", "default"), body.get("chatHistory", []), gw))
     except Exception as e:
-        result = {"decision": "ERROR", "error": str(e)}
+        err_str = str(e)
+        # ValidationException (토큰 초과) → 히스토리 없이 재시도
+        if "ValidationException" in err_str or "too many" in err_str.lower():
+            try:
+                messages_retry = [{"role": "user", "content": [{"text": prompt}]}]
+                result = await gw.converse(model_id=model, messages=messages_retry, system_prompt=system_prompt)
+            except Exception as e2:
+                result = {"decision": "ERROR", "error": str(e2)}
+        else:
+            result = {"decision": "ERROR", "error": err_str}
 
     async def event_stream():
         decision = result.get("decision", "")
@@ -408,25 +460,29 @@ _quota_cache = {"used_krw": 0, "remaining_krw": 0, "limit_krw": 0, "last_updated
 async def get_quota(request: Request):
     profile = request.query_params.get("profile", os.environ.get("AWS_PROFILE", "default"))
     user = request.query_params.get("user", "")
+    print(f"[Quota] 요청: profile={profile}, user={user}, cache={_quota_cache}")
     # 첫 호출이면 실제 Gateway에서 quota 조회
     if _quota_cache["remaining_krw"] == 0 and user:
         try:
             gw = _get_gw(profile, user)
+            print(f"[Quota] Gateway 호출 시도...")
             # 간단한 호출로 quota 정보 획득
             result = await gw.converse(
                 model_id="anthropic.claude-haiku-4-5-20251001-v1:0",
                 messages=[{"role": "user", "content": [{"text": "hi"}]}],
             )
+            print(f"[Quota] Gateway 응답: decision={result.get('decision')}, remaining_quota={result.get('remaining_quota')}")
             if result.get("remaining_quota"):
                 rq = result["remaining_quota"]
                 _quota_cache["remaining_krw"] = rq.get("cost_krw", 0)
                 _quota_cache["limit_krw"] = rq.get("cost_krw", 0) + _quota_cache["used_krw"]
                 _quota_cache["user"] = user
                 _quota_cache["last_updated"] = datetime.utcnow().isoformat()
+                print(f"[Quota] 캐시 업데이트: {_quota_cache}")
             if result.get("estimated_cost_krw"):
                 _quota_cache["used_krw"] += result["estimated_cost_krw"]
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Quota] Gateway 호출 실패: {e}")
     return {
         "user": _quota_cache["user"] or user,
         "used_krw": round(_quota_cache["used_krw"], 2),

@@ -1,5 +1,15 @@
 /* ===== AI Editor — Main ===== */
 const _sessionStart = Date.now();
+let _ssoExpiry = null;
+
+async function loadSSOExpiry() {
+  if (window.electronAPI?.getSSOExpiry) {
+    try {
+      const exp = await window.electronAPI.getSSOExpiry(state.settings?.awsProfile || '');
+      if (exp) _ssoExpiry = new Date(exp);
+    } catch {}
+  }
+}
 
 // 숫자 포맷 유틸리티
 function fmtNum(n) {
@@ -129,15 +139,6 @@ async function initApp() {
     showSSODialog(true);
   }
   // SSO 세션 만료 타이머
-  let _ssoExpiry = null;
-  async function loadSSOExpiry() {
-    if (window.electronAPI?.getSSOExpiry) {
-      try {
-        const exp = await window.electronAPI.getSSOExpiry(state.settings?.awsProfile || '');
-        if (exp) _ssoExpiry = new Date(exp);
-      } catch {}
-    }
-  }
   loadSSOExpiry();
 
   setInterval(() => {
@@ -259,8 +260,14 @@ async function showSSODialog(isInitial) {
       }
       st.className = 'status-text success'; st.textContent = `✓ ${profile} 로그인 성공${state.settings.bedrockUser ? ` (BedrockUser-${state.settings.bedrockUser})` : ''}`;
       state.authenticated = true;
-      // 백엔드 캐시 초기화
-      try { await fetch('http://localhost:8765/api/reset-cache', { method:'POST' }); } catch {}
+      // 백엔드 캐시 초기화 + 자격증명 주입
+      try {
+        const freshCreds = await window.electronAPI?.getCredentials(profile);
+        await fetch('http://localhost:8765/api/reset-cache', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ profile, bedrockUser: state.settings?.bedrockUser || '', credentials: freshCreds || null }),
+        });
+      } catch {}
       st.className = 'status-text'; st.textContent = '모델 목록 로딩 중...';
       
       // Electron에서 새 자격증명 가져오기
@@ -535,7 +542,10 @@ function renderModelList(f) {
     const fl=ms.filter(m=>!q||m.name.toLowerCase().includes(q)||p.toLowerCase().includes(q));if(!fl.length)continue;
     const g=document.createElement('div');g.className='model-dropdown-group';
     g.innerHTML=`<div class="model-dropdown-group-title"><span style="color:var(--color-accent);font-weight:700">${p}</span><span style="color:var(--color-text-muted);margin-left:6px;font-size:9px">${ms.length}개 모델</span></div>`;
-    fl.forEach(m=>{const i=document.createElement('div');i.className='model-dropdown-item'+(state.selectedModel && m.id===state.selectedModel.id?' selected':'');i.textContent=m.name;
+    fl.forEach(m=>{const i=document.createElement('div');i.className='model-dropdown-item'+(state.selectedModel && m.id===state.selectedModel.id?' selected':'');
+      const speed = _modelSpeed(m.id);
+      i.innerHTML=`<span style="flex:1">${m.name}</span><span style="font-size:9px;color:${speed.color};margin-left:8px">${speed.label}</span>`;
+      i.style.display='flex';i.style.alignItems='center';
       i.onclick=()=>{state.selectedModel={...m,provider:p};document.getElementById('model-dropdown-btn').textContent=m.name+' ▾';document.getElementById('model-dropdown-menu').style.display='none';document.getElementById('status-model').textContent=m.name;};
       g.appendChild(i);});list.appendChild(g);}
 }
@@ -799,6 +809,17 @@ async function sendMessage() {
 }
 
 // ===== Single Mode =====
+// 모델별 예상 응답 속도
+function _modelSpeed(modelId) {
+  const id = (modelId || '').toLowerCase();
+  if (id.includes('opus')) return { label: '~30s async', color: 'var(--color-warning)' };
+  if (id.includes('haiku')) return { label: '~3s', color: 'var(--color-success)' };
+  if (id.includes('sonnet')) return { label: '~5s', color: 'var(--color-success)' };
+  if (id.includes('r1')) return { label: '~20s', color: 'var(--color-warning)' };
+  if (id.includes('llama') || id.includes('mistral') || id.includes('nova')) return { label: '~5s', color: 'var(--color-success)' };
+  return { label: '', color: 'var(--color-text-muted)' };
+}
+
 function _apiBody(extra) {
   const profile = state.settings?.awsProfile || 'bedrock-gw';
   const user = state.settings?.bedrockUser || '';
@@ -821,6 +842,8 @@ function _apiBody(extra) {
     .slice(-6)
     .map(m => ({ role: m.role, content: (m.content || '').substring(0, 1000) }));
   if (history.length) body.chatHistory = history;
+  // 세션 ID
+  body.sessionId = chatSessions[activeSessionIdx]?.id || 'default';
   return body;
 }
 
@@ -901,7 +924,8 @@ async function runSimpleChat(prompt) {
     if (el) {
       const elapsed = Math.floor((Date.now() - _chatStartTime) / 1000);
       const timeText = elapsed >= 3600 ? `${Math.floor(elapsed/3600)}h ${Math.floor((elapsed%3600)/60)}m` : elapsed >= 60 ? `${Math.floor(elapsed/60)}m ${elapsed%60}s` : `${elapsed}s`;
-      el.innerHTML = `<span class="thinking-dots"><span></span><span></span><span></span></span> thinking ${timeText}`;
+      const asyncTag = state.selectedModel && state.selectedModel.id?.toLowerCase().includes('opus') ? ' (async)' : '';
+      el.innerHTML = `<span class="thinking-dots"><span></span><span></span><span></span></span> thinking ${timeText}${asyncTag}`;
     }
   }, 1000);
   try {
@@ -1496,7 +1520,8 @@ function renderMessages(){
           const d=document.createElement('div');d.className='chat-msg assistant fade-in';
           const elapsed = Math.floor((Date.now() - (state._streamStartTime || Date.now())) / 1000);
           const timeText = elapsed >= 3600 ? `${Math.floor(elapsed/3600)}h ${Math.floor((elapsed%3600)/60)}m` : elapsed >= 60 ? `${Math.floor(elapsed/60)}m ${elapsed%60}s` : `${elapsed}s`;
-          d.innerHTML=`<div class="msg-content thinking-indicator"><span class="thinking-dots"><span></span><span></span><span></span></span> thinking ${timeText}</div>`;
+          const asyncTag = state.selectedModel && state.selectedModel.id?.toLowerCase().includes('opus') ? ' (async)' : '';
+          d.innerHTML=`<div class="msg-content thinking-indicator"><span class="thinking-dots"><span></span><span></span><span></span></span> thinking ${timeText}${asyncTag}</div>`;
           c.appendChild(d);
         }
       }
@@ -2032,8 +2057,13 @@ function addTerminal() {
     window.electronAPI.terminalCreate(id);
     // 프로젝트 폴더로 이동 + 프롬프트에 정보 표시
     setTimeout(() => {
-      if (state.folderPath && window.electronAPI?.terminalWrite) {
-        window.electronAPI.terminalWrite(id, `cd "${state.folderPath}" && echo "📂 $(pwd)" && echo "👤 $(whoami)@$(hostname -I 2>/dev/null | awk '{print $1}' || hostname)" && echo "---"\n`);
+      if (window.electronAPI?.terminalWrite) {
+        const profile = state.settings?.awsProfile || '';
+        let initCmd = '';
+        if (profile) initCmd += `export AWS_PROFILE=${profile} && `;
+        if (state.folderPath) initCmd += `cd "${state.folderPath}" && `;
+        initCmd += 'echo "$(whoami)@$(hostname -I 2>/dev/null | awk \'{print $1}\' || hostname):$(pwd)"';
+        window.electronAPI.terminalWrite(id, initCmd + '\n');
       }
     }, 500);
   }
@@ -2200,16 +2230,19 @@ async function showSettingsDialog() {
     btn.addEventListener('click', () => {
       _settingsTab = btn.dataset.stab;
       o.querySelectorAll('.settings-nav-btn').forEach(b => b.classList.toggle('active', b.dataset.stab === _settingsTab));
-      renderSettingsTab(o, profiles, cur, bu);
+      renderSettingsTab(o, profiles);
     });
   });
-  renderSettingsTab(o, profiles, cur, bu);
+  renderSettingsTab(o, profiles);
 }
 
-function renderSettingsTab(o, profiles, cur, bu) {
+function renderSettingsTab(o, profiles) {
   const body = o.querySelector('#settings-body');
   const title = o.querySelector('#settings-content-title');
   const titles = { appearance:'외관', cli:'CLI', account:'계정' };
+  // 항상 최신 state에서 읽기
+  const cur = state.settings?.awsProfile || '(없음)';
+  const bu = state.settings?.bedrockUser || '';
   title.textContent = titles[_settingsTab] || '';
 
   if (_settingsTab === 'appearance') {
@@ -2284,15 +2317,24 @@ function renderSettingsTab(o, profiles, cur, bu) {
     const testBtn = body.querySelector('#cli-test-btn');
     (async () => {
       try {
-        const r = await fetch('http://localhost:8765/health', { signal: AbortSignal.timeout(5000) });
+        const controller = new AbortController();
+        setTimeout(() => controller.abort(), 5000);
+        const r = await fetch('http://localhost:8765/health', { signal: controller.signal });
         statusEl.innerHTML = r.ok ? '<span style="color:var(--color-success)">● 연결됨</span>' : '<span style="color:var(--color-error)">● 오류</span>';
       } catch { statusEl.innerHTML = '<span style="color:var(--color-error)">● 오프라인</span>'; }
     })();
     testBtn.addEventListener('click', async () => {
       statusEl.textContent = '테스트 중...';
       try {
-        const r = await fetch('http://localhost:8765/health', { signal: AbortSignal.timeout(5000) });
-        statusEl.innerHTML = r.ok ? '<span style="color:var(--color-success)">● 연결됨</span>' : '<span style="color:var(--color-error)">● 오류</span>';
+        const controller = new AbortController();
+        setTimeout(() => controller.abort(), 5000);
+        const r = await fetch('http://localhost:8765/health', { signal: controller.signal });
+        if (r.ok) {
+          const data = await r.json();
+          statusEl.innerHTML = `<span style="color:var(--color-success)">● 연결됨</span> <span style="font-size:10px;color:var(--color-text-muted)">v${data.version || '?'}</span>`;
+        } else {
+          statusEl.innerHTML = '<span style="color:var(--color-error)">● 오류</span>';
+        }
       } catch { statusEl.innerHTML = '<span style="color:var(--color-error)">● 오프라인</span>'; }
     });
   } else if (_settingsTab === 'account') {
@@ -2339,12 +2381,39 @@ function renderSettingsTab(o, profiles, cur, bu) {
     body.querySelector('#acc-switch').addEventListener('click', async () => {
       const p = body.querySelector('#acc-profile').value;
       const st = body.querySelector('#acc-status');
-      if (!p || p === cur) return;
-      st.textContent = '전환 중...';
+      if (!p) return;
+      st.textContent = p === cur ? '재로그인 중...' : '전환 중...';
       try {
-        if (window.electronAPI?.ssoLogin) { const r = await window.electronAPI.ssoLogin(p); if (!r.success) { st.className='status-text error'; st.textContent=`실패: ${r.error}`; return; } }
-        state.settings.awsProfile = p; await window.electronAPI?.saveSettings?.(state.settings);
-        st.className='status-text success'; st.textContent=`✓ ${p}로 전환 완료`; checkBackend();
+        if (window.electronAPI?.ssoLogin) {
+          const r = await window.electronAPI.ssoLogin(p);
+          if (!r.success) { st.className='status-text error'; st.textContent=`실패: ${r.error}`; return; }
+        }
+        state.settings.awsProfile = p;
+        await window.electronAPI?.saveSettings?.(state.settings);
+        // 자격증명 가져와서 백엔드에 주입
+        const newCreds = await window.electronAPI?.getCredentials(p);
+        try {
+          await fetch('http://localhost:8765/api/reset-cache', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ profile: p, bedrockUser: state.settings?.bedrockUser || '', credentials: newCreds || null }),
+          });
+        } catch {}
+        state.authenticated = true;
+        st.className='status-text success'; st.textContent=`✓ ${p} 로그인 완료`;
+        checkBackend();
+        // 터미널에도 프로파일 환경변수 설정
+        if (state.terminals.length && window.electronAPI?.terminalWrite) {
+          for (const t of state.terminals) {
+            window.electronAPI.terminalWrite(t.id, `export AWS_PROFILE=${p}\n`);
+          }
+        }
+        setTimeout(async () => {
+          await loadModelsFromServer();
+          // quota + SSO 만료 갱신
+          updateQuotaBar();
+          loadSSOExpiry();
+          document.getElementById('sso-dialog').style.display = 'none';
+        }, 1000);
       } catch(e) { st.className='status-text error'; st.textContent=`오류: ${e.message}`; }
     });
     body.querySelector('#acc-logout').addEventListener('click', () => {
@@ -2520,14 +2589,22 @@ function updateQuotaBar(){
   const user = state.settings?.bedrockUser || '';
   fetch(`http://localhost:8765/api/quota?profile=${encodeURIComponent(profile)}&user=${encodeURIComponent(user)}`).then(r=>r.json()).then(q=>{
     const remaining = q.remaining_krw || 0;
+    if (remaining <= 0) {
+      // quota 정보 없음 — 표시하지 않음
+      const pctEl = document.getElementById('quota-pct');
+      const gauge = document.getElementById('topbar-quota-gauge');
+      if (pctEl) pctEl.textContent = '-';
+      if (gauge) gauge.title = '비용 정보를 가져올 수 없습니다. 첫 호출 후 갱신됩니다.';
+      return;
+    }
     // 한도 밴드 자동 감지: 50/100/150/200/300/400/500만
     const bands = [500000, 1000000, 1500000, 2000000, 3000000, 4000000, 5000000];
-    let limit = 1000000; // 기본 100만
+    let limit = 1000000;
     for (const b of bands) {
       if (remaining <= b) { limit = b; break; }
     }
     const usedKrw = limit - remaining;
-    const pct = limit > 0 ? Math.min((usedKrw / limit) * 100, 100) : 0;
+    const pct = limit > 0 ? Math.max(0, Math.min((usedKrw / limit) * 100, 100)) : 0;
     const fill = document.getElementById('quota-fill');
     const pctEl = document.getElementById('quota-pct');
     const gauge = document.getElementById('topbar-quota-gauge');

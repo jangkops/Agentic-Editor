@@ -12,6 +12,8 @@ from botocore.awsrequest import AWSRequest
 
 
 class GatewayClient:
+    STREAM_URL = "https://5kzi5pmk6leqq74cq64jza37lu0qipbk.lambda-url.us-west-2.on.aws/"
+
     def __init__(self, gateway_url="", aws_profile="default", region="us-west-2", bedrock_user=""):
         self.gateway_url = (gateway_url or os.environ.get(
             "GATEWAY_URL", "https://5l764dh7y9.execute-api.us-west-2.amazonaws.com/v1"
@@ -26,6 +28,11 @@ class GatewayClient:
         import time
         if self._creds and (time.time() - self._cred_time) < 300:
             return self._creds
+        # 외부에서 직접 주입된 자격증명이 있으면 사용 (SSO 토큰 캐시 우회)
+        if hasattr(self, '_injected_creds') and self._injected_creds:
+            self._creds = self._injected_creds
+            self._cred_time = time.time()
+            return self._creds
         session = boto3.Session(profile_name=self.aws_profile)
         if self.bedrock_user:
             sts = session.client("sts")
@@ -39,8 +46,15 @@ class GatewayClient:
         else:
             fc = session.get_credentials().get_frozen_credentials()
             self._creds = Credentials(fc.access_key, fc.secret_key, fc.token)
-        self._cred_time = __import__("time").time()
+        self._cred_time = time.time()
         return self._creds
+
+    def inject_credentials(self, access_key: str, secret_key: str, session_token: str = ""):
+        """Electron에서 가져온 자격증명을 직접 주입 — boto3 SSO 캐시 완전 우회."""
+        self._injected_creds = Credentials(access_key, secret_key, session_token)
+        self._creds = self._injected_creds
+        self._cred_time = __import__("time").time()
+        print(f"[GW] 자격증명 주입 완료: {access_key[:8]}...")
 
     def _sign(self, method, url, body_bytes):
         """botocore SigV4로 서명된 헤더 반환."""
@@ -107,6 +121,67 @@ class GatewayClient:
                     continue
             return result
         return result
+
+    async def converse_stream_live(self, model_id, messages, system_prompt=""):
+        """Lambda Function URL을 통한 실시간 스트리밍.
+        
+        기존 /converse (비동기 S3 폴링) 대신 직접 스트리밍.
+        SigV4로 서명하여 Lambda Function URL에 POST.
+        응답은 SSE 또는 chunked text로 옴.
+        """
+        url = self.STREAM_URL
+        payload = self._build_payload(model_id, messages, system_prompt)
+        body_bytes = json.dumps(payload).encode()
+
+        # Lambda Function URL은 'lambda' 서비스로 SigV4 서명
+        creds = self._get_creds()
+        aws_req = AWSRequest(method="POST", url=url, data=body_bytes,
+                             headers={"Content-Type": "application/json"})
+        BotocoreSigV4(creds, "lambda", self.region).add_auth(aws_req)
+        headers = dict(aws_req.headers)
+
+        loop = asyncio.get_event_loop()
+
+        def _stream_call():
+            """동기 HTTP 스트리밍 호출."""
+            import urllib.request
+            req = urllib.request.Request(url, data=body_bytes, method="POST")
+            for k, v in headers.items():
+                req.add_header(k, v)
+            try:
+                resp = urllib.request.urlopen(req, timeout=180)
+                chunks = []
+                while True:
+                    chunk = resp.read(4096)
+                    if not chunk:
+                        break
+                    chunks.append(chunk.decode('utf-8', errors='ignore'))
+                return "".join(chunks)
+            except Exception as e:
+                return json.dumps({"error": str(e)})
+
+        raw = await loop.run_in_executor(None, _stream_call)
+
+        # 응답 파싱 — JSON 또는 텍스트
+        try:
+            data = json.loads(raw)
+            if "error" in data:
+                return {"decision": "ERROR", "error": data["error"]}
+            # 정상 응답
+            return {
+                "decision": "ALLOW",
+                "output": data.get("output", {"message": {"content": [{"text": raw}]}}),
+                "remaining_quota": data.get("remaining_quota", {}),
+                "estimated_cost_krw": data.get("estimated_cost_krw", 0),
+            }
+        except json.JSONDecodeError:
+            # 텍스트 응답
+            if raw.strip():
+                return {
+                    "decision": "ALLOW",
+                    "output": {"message": {"content": [{"text": raw}]}},
+                }
+            return {"decision": "ERROR", "error": "빈 응답"}
 
     async def _cancel_job(self, job_id):
         """Gateway job cancel — reservation 해제."""

@@ -43,20 +43,27 @@ class AwsSsoManager {
   // assume role 기반 로그인 — bedrockuser-username 패턴
   login(profileName) {
     return new Promise((resolve) => {
-      // 먼저 assume role로 자격증명 유효성 확인
-      exec(`aws sts get-caller-identity --profile ${profileName}`, { timeout: 15000 }, (err, stdout) => {
-        if (!err && stdout.includes('Account')) {
-          resolve({ success: true, profile: profileName });
-          return;
+      // 항상 SSO 로그인 실행 (기존 세션이 다른 프로파일일 수 있으므로)
+      exec(`aws sso login --profile ${profileName}`, { timeout: 120000 }, (err, stdout, stderr) => {
+        if (err) {
+          // SSO 로그인 실패 — 이미 유효한 세션이 있는지 확인
+          exec(`aws configure export-credentials --profile ${profileName} --format env-no-export`, { timeout: 10000 }, (err2, stdout2) => {
+            if (!err2 && stdout2.includes('AWS_ACCESS_KEY_ID')) {
+              resolve({ success: true, profile: profileName });
+            } else {
+              resolve({ success: false, error: stderr || err.message });
+            }
+          });
+        } else {
+          // SSO 로그인 성공 — 자격증명 검증
+          exec(`aws configure export-credentials --profile ${profileName} --format env-no-export`, { timeout: 10000 }, (err3, stdout3) => {
+            if (!err3 && stdout3.includes('AWS_ACCESS_KEY_ID')) {
+              resolve({ success: true, profile: profileName });
+            } else {
+              resolve({ success: false, error: 'SSO 로그인 후 자격증명 획득 실패' });
+            }
+          });
         }
-        // SSO 로그인 시도
-        exec(`aws sso login --profile ${profileName}`, { timeout: 120000 }, (err2, stdout2, stderr2) => {
-          if (err2) {
-            resolve({ success: false, error: stderr2 || err2.message });
-          } else {
-            resolve({ success: true, profile: profileName });
-          }
-        });
       });
     });
   }
