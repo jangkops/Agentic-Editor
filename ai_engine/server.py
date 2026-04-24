@@ -592,15 +592,13 @@ async def run_agent_with_tools(request: Request):
         nonlocal messages
         import re
         max_turns = 5
-        TOOL_PATTERN = re.compile(r'<tool\s+name="(\w+)">(.*?)</tool>', re.DOTALL)
-        TOOL_CALL_PATTERN = re.compile(r'<tool_call>\s*(\{.*?\})\s*</tool_call>', re.DOTALL)
 
         for turn in range(max_turns):
             try:
-                print(f"[Agent] turn={turn}, converse-stream 호출")
+                print(f"[Agent] turn={turn}, converse-stream + toolConfig 호출")
                 result = await gw.converse_stream_live(
                     model_id=stream_model, messages=messages,
-                    system_prompt=system_prompt,
+                    system_prompt=system_prompt, tool_config=AGENT_TOOLS,
                 )
             except Exception as e:
                 yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
@@ -608,72 +606,45 @@ async def run_agent_with_tools(request: Request):
 
             _extract_quota(result, _quota_cache.get("user", ""))
             decision = result.get("decision", "")
+            stop_reason = result.get("stopReason", "")
+            content_blocks = result.get("output", {}).get("message", {}).get("content", [])
+            print(f"[Agent] turn={turn}, decision={decision}, stopReason={stop_reason}, blocks={len(content_blocks)}")
 
             if decision in ("DENY", "ERROR"):
                 yield f"data: {json.dumps({'error': result.get('error', result.get('denial_reason', 'Error'))}, ensure_ascii=False)}\n\n"
                 break
 
-            # 텍스트 추출
-            content = result.get("output", {}).get("message", {}).get("content", [])
-            text = ""
-            for c in content:
-                if "text" in c:
-                    text += c["text"]
+            # assistant 메시지를 messages에 추가
+            messages.append({"role": "assistant", "content": content_blocks})
 
-            if not text:
+            # 텍스트/도구 블록 처리
+            has_tool_use = False
+            tool_results = []
+            for block in content_blocks:
+                if "text" in block:
+                    yield f"data: {json.dumps({'text': block['text']}, ensure_ascii=False)}\n\n"
+                elif "toolUse" in block:
+                    has_tool_use = True
+                    tu = block["toolUse"]
+                    tool_name = tu.get("name", "")
+                    tool_id = tu.get("toolUseId", "")
+                    tool_input = tu.get("input", {})
+                    yield f"data: {json.dumps({'tool': tool_name, 'input': tool_input, 'status': 'running'}, ensure_ascii=False)}\n\n"
+                    tool_output = _execute_tool(tool_name, tool_input, project_path)
+                    print(f"[Agent] 도구 실행: {tool_name} → {len(tool_output)}자")
+                    yield f"data: {json.dumps({'tool': tool_name, 'output': tool_output[:500], 'status': 'done'}, ensure_ascii=False)}\n\n"
+                    tool_results.append({
+                        "toolResult": {
+                            "toolUseId": tool_id,
+                            "content": [{"text": tool_output[:15000]}],
+                        }
+                    })
+
+            if not has_tool_use:
                 break
 
-            # XML 도구 태그 파싱 — 두 가지 형식 지원
-            tool_calls = TOOL_PATTERN.findall(text)
-            # <tool_call>{"name":"...", "arguments":{...}}</tool_call> 형식도 파싱
-            for tc_json in TOOL_CALL_PATTERN.findall(text):
-                try:
-                    tc = json.loads(tc_json)
-                    name = tc.get("name", "")
-                    args = tc.get("arguments", tc.get("input", {}))
-                    if name:
-                        # path 매핑: relative_workspace_path → path
-                        if "relative_workspace_path" in args and "path" not in args:
-                            args["path"] = os.path.join(project_path, args.pop("relative_workspace_path"))
-                        tool_calls.append((name, json.dumps(args)))
-                except json.JSONDecodeError:
-                    pass
-
-            if not tool_calls:
-                # 도구 호출 없음 → 텍스트 그대로 전송
-                yield f"data: {json.dumps({'text': text}, ensure_ascii=False)}\n\n"
-                break
-
-            # 도구 호출 있음 → 텍스트에서 도구 태그 + 가짜 결과 제거 후 전송
-            clean_text = TOOL_PATTERN.sub('', text)
-            clean_text = TOOL_CALL_PATTERN.sub('', clean_text)
-            clean_text = re.sub(r'<tool_result>.*?</tool_result>', '', clean_text, flags=re.DOTALL)
-            clean_text = clean_text.strip()
-            if clean_text:
-                yield f"data: {json.dumps({'text': clean_text}, ensure_ascii=False)}\n\n"
-
-            # 도구 실행
-            tool_results_text = []
-            for tool_name, tool_body in tool_calls:
-                # XML 내부 파라미터 파싱 또는 JSON 파싱
-                tool_input = {}
-                try:
-                    tool_input = json.loads(tool_body)
-                except (json.JSONDecodeError, TypeError):
-                    for tag in ['path', 'content', 'command', 'query', 'file_pattern', 'cwd']:
-                        m = re.search(f'<{tag}>(.*?)</{tag}>', tool_body, re.DOTALL)
-                        if m:
-                            tool_input[tag] = m.group(1).strip()
-
-                yield f"data: {json.dumps({'tool': tool_name, 'input': tool_input, 'status': 'running'}, ensure_ascii=False)}\n\n"
-                tool_output = _execute_tool(tool_name, tool_input, project_path)
-                print(f"[Agent] 도구 실행: {tool_name} → {len(tool_output)}자")
-                yield f"data: {json.dumps({'tool': tool_name, 'output': tool_output[:500], 'status': 'done'}, ensure_ascii=False)}\n\n"
-                tool_results_text.append(f"[도구 결과: {tool_name}]\n{tool_output[:10000]}")
-
-            # 도구 결과를 다음 메시지로 추가 → 다음 턴
-            messages.append({"role": "assistant", "content": [{"text": text}]})
-            messages.append({"role": "user", "content": [{"text": "\n\n".join(tool_results_text)}]})
+            # 도구 결과를 user 메시지로 추가 → 다음 턴
+            messages.append({"role": "user", "content": tool_results})
 
         yield "data: [DONE]\n\n"
 

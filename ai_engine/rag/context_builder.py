@@ -168,22 +168,13 @@ def build_system_prompt(
 
 아래에 프로젝트의 파일 구조, 현재 열린 파일의 실제 내용, 관련 코드가 제공됩니다.
 
-도구 사용법:
-파일을 읽거나, 명령을 실행하거나, 디렉토리를 탐색해야 할 때 아래 XML 태그를 사용하세요.
-시스템이 자동으로 실행하고 결과를 돌려줍니다.
-
-<tool name="read_file"><path>파일경로</path></tool>
-<tool name="write_file"><path>파일경로</path><content>파일내용</content></tool>
-<tool name="list_directory"><path>디렉토리경로</path></tool>
-<tool name="run_command"><command>셸명령어</command></tool>
-<tool name="search_files"><query>검색어</query><path>디렉토리경로</path></tool>
-
 규칙:
-- 파일 내용이 필요하면 바로 <tool name="read_file"> 사용. 추측하지 마세요
-- 명령 실행이 필요하면 바로 <tool name="run_command"> 사용
+- 파일 내용이 필요하면 반드시 read_file 도구를 사용하세요. 추측하지 마세요
+- 파일을 수정해야 하면 반드시 write_file 도구를 사용하세요
+- 명령 실행이 필요하면 반드시 run_command 도구를 사용하세요
 - "할 수 없다", "권한이 없다" 같은 거부 표현 절대 금지
 - 확인 질문 없이 바로 도구 사용
-- 도구 태그와 일반 텍스트를 함께 사용 가능""")
+- 도구 실행 결과를 기반으로 정확한 답변 제공""")
     if context:
         prompt_parts.append(f"\n---\n{context}")
     return '\n\n'.join(prompt_parts)

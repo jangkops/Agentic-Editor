@@ -245,8 +245,6 @@ class GatewayClient:
                 return json.dumps({"error": str(e)})
 
         raw = await loop.run_in_executor(None, _stream_call)
-        # 디버그: raw 응답 앞부분 로깅
-        print(f"[Stream] raw 응답 ({len(raw)}자): {raw[:500]}")
 
         # SSE 스트림 파싱 — data: {...} 형식
         text_parts = []
@@ -271,13 +269,12 @@ class GatewayClient:
                         if current_tool:
                             current_tool["_input_json"] = current_tool.get("_input_json", "") + delta.get("toolUse", {}).get("input", "")
                 elif evt_type == "content_block_start":
-                    cb = evt.get("contentBlock", {})
+                    cb = evt.get("content_block") or evt.get("contentBlock") or {}
                     if "toolUse" in cb:
                         tu = cb["toolUse"]
                         current_tool = {"toolUseId": tu.get("toolUseId", ""), "name": tu.get("name", ""), "_input_json": ""}
                 elif evt_type == "content_block_stop":
                     if current_tool and current_tool.get("name"):
-                        # input JSON 파싱
                         try:
                             inp = json.loads(current_tool.get("_input_json", "{}"))
                         except json.JSONDecodeError:
@@ -290,8 +287,8 @@ class GatewayClient:
                             }
                         })
                         current_tool = {}
-                elif evt_type == "message_delta":
-                    stop_reason = evt.get("delta", {}).get("stopReason", "") or evt.get("stopReason", "")
+                elif evt_type in ("message_delta", "message_stop"):
+                    stop_reason = evt.get("delta", {}).get("stopReason", "") or evt.get("stop_reason", "") or evt.get("stopReason", "")
                 elif evt_type == "settlement":
                     remaining_quota = {"cost_krw": evt.get("remaining_quota_krw", 0)}
                     estimated_cost = evt.get("estimated_cost_krw", 0)
