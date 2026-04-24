@@ -117,8 +117,28 @@ async function initApp() {
   initModelDropdown(); initModeToggle(); initChat(); initFileExplorer();
   initGithubImport(); initSkills(); initTerminal(); initMonaco(); initTopbar();
   initChatTabs(); checkBackend();
+  // 자격증명을 백엔드에 주입 (quota 조회 등에서 사용)
+  try {
+    if (window.electronAPI?.getCredentials && state.settings?.awsProfile) {
+      const creds = await window.electronAPI.getCredentials(state.settings.awsProfile);
+      if (creds && creds.AWS_ACCESS_KEY_ID) {
+        await fetch('http://localhost:8765/api/reset-cache', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            profile: state.settings.awsProfile,
+            bedrockUser: state.settings.bedrockUser || '',
+            credentials: creds,
+          }),
+        });
+      }
+    }
+  } catch {}
   await loadModelsFromServer();
-  loadUsageData();
+  // quota 조회 — loadModelsFromServer 완료 후 즉시 실행
+  console.log('[initApp] loadModelsFromServer 완료, updateQuotaBar 직접 호출');
+  try { updateQuotaBar(); } catch(e) { console.error('[initApp] updateQuotaBar 에러:', e); }
+  try { loadUsageData(); } catch(e) { console.error('[initApp] loadUsageData 에러:', e); }
+  console.log('[initApp] quota+usage 호출 완료');
   loadSavedConsensusHistory();
   initCenterViews();
   // 모델이 없으면 (initApp이 DOMContentLoaded에서 직접 호출된 경우) 로그인 필요
@@ -812,14 +832,14 @@ function _apiBody(extra) {
     body.openFile = state.activeTab.replace(state.folderPath + '/', '');
     try {
       const model = monacoEditor.getModel();
-      if (model) body.openFileContent = model.getValue().substring(0, 5000);
+      if (model) body.openFileContent = model.getValue().substring(0, 15000);
     } catch {}
   }
   // 대화 히스토리 (최근 6개, 각 1000자 제한 — 토큰 절약)
   const history = (state.messages || [])
     .filter(m => m.role === 'user' || (m.role === 'assistant' && m.content && !m.isConsensus && !m.content.includes('[오류:')))
-    .slice(-6)
-    .map(m => ({ role: m.role, content: (m.content || '').substring(0, 1000) }));
+    .slice(-10)
+    .map(m => ({ role: m.role, content: (m.content || '').substring(0, 2000) }));
   if (history.length) body.chatHistory = history;
   // 세션 ID
   body.sessionId = chatSessions[activeSessionIdx]?.id || 'default';
@@ -890,7 +910,7 @@ async function runSimpleChat(prompt) {
   state.isStreaming = true;
   state._streamStartTime = Date.now();
   state._abortController = new AbortController();
-  const timeoutId = setTimeout(() => { if (state._abortController) state._abortController.abort(); }, 180000);
+  const timeoutId = setTimeout(() => { if (state._abortController) state._abortController.abort(); }, 300000);
   addLiveLog('request', `채팅: ${state.selectedModel.name}`, prompt.substring(0, 100));
   const msg = { role:'assistant', content:'' };
   state.messages.push(msg);
@@ -907,7 +927,7 @@ async function runSimpleChat(prompt) {
     }
   }, 1000);
   try {
-    const resp = await fetch('http://localhost:8765/api/agents/run-stream', {
+    const resp = await fetch('http://localhost:8765/api/agents/run-agent', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(_apiBody({ prompt, model: state.selectedModel.id })),
       signal: state._abortController.signal
@@ -928,6 +948,16 @@ async function runSimpleChat(prompt) {
         if (d === '[DONE]') continue;
         try {
           const p = JSON.parse(d);
+          if (p.tool) {
+            // 도구 실행 이벤트
+            if (p.status === 'running') {
+              msg.content += `\n[도구 실행: ${p.tool}]`;
+            } else if (p.status === 'done') {
+              msg.content += ` 완료`;
+            }
+            renderMessages();
+            continue;
+          }
           if (p.error) {
             // 토큰 만료 → 자동 재로그인 시도
             if (p.error.includes('expired') || p.error.includes('security token')) {
@@ -971,21 +1001,19 @@ async function runAgentWorkflow(prompt) {
   state.isStreaming = true;
   state._streamStartTime = Date.now();
   state._abortController = new AbortController();
-  const timeoutId = setTimeout(() => { if (state._abortController) state._abortController.abort(); }, 180000);
+  const timeoutId = setTimeout(() => { if (state._abortController) state._abortController.abort(); }, 300000);
   addLiveLog('request', `에이전트: ${state.selectedModel.name}`, prompt.substring(0, 100));
   const wfId = 'wf-' + Date.now();
   const wf = { id:wfId, steps:[
-    { name:'계획 수립', status:'running', detail:'' },
-    { name:'코드 작성', status:'pending', detail:'' },
-    { name:'리뷰', status:'pending', detail:'' },
-    { name:'테스트', status:'pending', detail:'' },
+    { name:'분석', status:'running', detail:'' },
+    { name:'도구 실행', status:'pending', detail:'' },
     { name:'완료', status:'pending', detail:'' },
   ]};
   const msg = { role:'assistant', content:'', workflow:wf, toolUses:[] };
   state.messages.push(msg);
   renderMessages();
   try {
-    const resp = await fetch('http://localhost:8765/api/agents/run-stream', {
+    const resp = await fetch('http://localhost:8765/api/agents/run-agent', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(_apiBody({ prompt, model: state.selectedModel.id })),
       signal: state._abortController.signal
@@ -993,8 +1021,8 @@ async function runAgentWorkflow(prompt) {
     clearTimeout(timeoutId);
     if (!resp.ok) throw new Error(`서버 응답 오류: ${resp.status}`);
     const reader = resp.body.getReader(), dec = new TextDecoder();
-    let buf = '';
-    wf.steps[0].status = 'done'; wf.steps[0].detail = prompt; wf.steps[1].status = 'running';
+    let buf = '', toolCount = 0;
+    wf.steps[0].status = 'done'; wf.steps[0].detail = prompt.substring(0, 80);
     renderMessages();
     while (true) {
       const { done, value } = await reader.read();
@@ -1008,16 +1036,27 @@ async function runAgentWorkflow(prompt) {
         if (d === '[DONE]') continue;
         try {
           const p = JSON.parse(d);
-          if (p.error) msg.content += `\n[오류: ${p.error}]`;
-          else if (p.tool_use) msg.toolUses.push(p.tool_use);
-          else if (p.text) msg.content += p.text;
-          else msg.content += d;
+          if (p.error) { msg.content += `\n[오류: ${p.error}]`; }
+          else if (p.tool && p.status === 'running') {
+            // 도구 실행 시작
+            toolCount++;
+            wf.steps[1].status = 'running';
+            wf.steps[1].detail = `${p.tool} 실행 중... (${toolCount}번째)`;
+            msg.content += `\n[도구: ${p.tool}] `;
+          }
+          else if (p.tool && p.status === 'done') {
+            // 도구 실행 완료
+            wf.steps[1].detail = `${p.tool} 완료 (${toolCount}개)`;
+            if (p.output) msg.content += `${p.output.substring(0, 200)}${p.output.length > 200 ? '...' : ''}\n`;
+          }
+          else if (p.text) { msg.content += p.text; }
+          else { msg.content += d; }
         } catch { msg.content += d; }
       }
       renderMessages();
     }
-    wf.steps[1].status = 'done';
-    wf.steps[2].status = 'done'; wf.steps[2].detail = '통과';
+    if (toolCount > 0) wf.steps[1].status = 'done';
+    else wf.steps[1].detail = '도구 사용 없음';
     wf.steps[3].status = 'done'; wf.steps[3].detail = '검증 완료';
     wf.steps[4].status = 'done';
     trackUsage(prompt.length, msg.content.length);
@@ -1041,8 +1080,8 @@ async function runParallel(prompt) {
   state.isStreaming = true;
   state._streamStartTime = Date.now();
   state._abortController = new AbortController();
-  // 180초 타임아웃
-  const timeoutId = setTimeout(() => { if (state._abortController) state._abortController.abort(); }, 180000);
+  // 300초 타임아웃 (5분)
+  const timeoutId = setTimeout(() => { if (state._abortController) state._abortController.abort(); }, 300000);
   addLiveLog('request', `병렬 호출: ${state.parallelSlots.length}개 모델`);
 
   state.parallelResults.clear();
@@ -1610,13 +1649,13 @@ function renderToolUseCard(c,t){const card=document.createElement('div');card.cl
 function fmtMd(t){
   let h=esc(t);
   // 코드 블록
-  h=h.replace(/```(\w*)\n([\s\S]*?)```/g,'<pre style="background:var(--color-bg-primary);padding:10px;border-radius:var(--radius-md);margin:8px 0;font-family:var(--font-mono);font-size:11px;overflow-x:auto;border:1px solid var(--color-border)"><code>$2</code></pre>');
+  h=h.replace(/```(\w*)\n([\s\S]*?)```/g,'<pre style="background:var(--color-bg-primary);padding:8px;border-radius:var(--radius-md);margin:3px 0;font-family:var(--font-mono);font-size:11px;overflow-x:auto;border:1px solid var(--color-border)"><code>$2</code></pre>');
   // 인라인 코드
   h=h.replace(/`([^`]+)`/g,'<code style="background:var(--color-bg-input);padding:1px 4px;border-radius:3px;font-family:var(--font-mono);font-size:11px">$1</code>');
   // 헤딩
-  h=h.replace(/^### (.+)$/gm,'<div style="font-size:13px;font-weight:700;color:var(--color-text-primary);margin:12px 0 4px">$1</div>');
-  h=h.replace(/^## (.+)$/gm,'<div style="font-size:14px;font-weight:700;color:var(--color-text-primary);margin:14px 0 6px">$1</div>');
-  h=h.replace(/^# (.+)$/gm,'<div style="font-size:16px;font-weight:700;color:var(--color-text-primary);margin:16px 0 8px">$1</div>');
+  h=h.replace(/^### (.+)$/gm,'<div style="font-size:13px;font-weight:700;color:var(--color-text-primary);margin:6px 0 1px">$1</div>');
+  h=h.replace(/^## (.+)$/gm,'<div style="font-size:14px;font-weight:700;color:var(--color-text-primary);margin:8px 0 1px">$1</div>');
+  h=h.replace(/^# (.+)$/gm,'<div style="font-size:15px;font-weight:700;color:var(--color-text-primary);margin:8px 0 2px">$1</div>');
   // 볼드/이탤릭
   h=h.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
   h=h.replace(/\*(.+?)\*/g,'<em>$1</em>');
@@ -1624,17 +1663,20 @@ function fmtMd(t){
   h=h.replace(/^- (.+)$/gm,'<div style="padding-left:12px">· $1</div>');
   h=h.replace(/^\d+\. (.+)$/gm,'<div style="padding-left:12px">$&</div>');
   // 인용
-  h=h.replace(/^&gt; (.+)$/gm,'<div style="border-left:2px solid var(--color-accent);padding-left:10px;color:var(--color-text-secondary);margin:4px 0">$1</div>');
+  h=h.replace(/^&gt; (.+)$/gm,'<div style="border-left:2px solid var(--color-accent);padding-left:10px;color:var(--color-text-secondary);margin:2px 0">$1</div>');
   // 구분선
-  h=h.replace(/^---$/gm,'<hr style="border:none;border-top:1px solid var(--color-border);margin:10px 0">');
+  h=h.replace(/^---$/gm,'<hr style="border:none;border-top:1px solid var(--color-border);margin:4px 0">');
   // 테이블 (간단)
   h=h.replace(/\|(.+)\|/g, (match) => {
     const cells = match.split('|').filter(c => c.trim());
     if (cells.every(c => /^[-:]+$/.test(c.trim()))) return '';
-    return '<div style="display:flex;gap:8px;padding:2px 0;font-size:12px">' + cells.map(c => `<span style="flex:1">${c.trim()}</span>`).join('') + '</div>';
+    return '<div style="display:flex;gap:8px;padding:1px 0;font-size:12px">' + cells.map(c => `<span style="flex:1">${c.trim()}</span>`).join('') + '</div>';
   });
-  // 줄바꿈
+  // 연속 빈 줄 → 단일 br, 단일 줄바꿈 → br
+  h=h.replace(/\n{3,}/g,'\n');
+  h=h.replace(/\n\n/g,'<br>');
   h=h.replace(/\n/g,'<br>');
+  h=h.replace(/(<br>){3,}/g,'<br>');
   return h;
 }
 function fmtElapsed(secs) {
@@ -2625,21 +2667,29 @@ async function renderSourceControlPanel() {
 }
 
 // ===== Usage (기존 — 통계 탭에서도 사용) =====
-async function loadUsageData(){if(window.electronAPI?.loadUsage){const u=await window.electronAPI.loadUsage();if(u){state.usageData.inputTokens=u.used||0;state.usageData.cost=u.cost||0;}}updateQuotaBar();}
+async function loadUsageData(){try{if(window.electronAPI?.loadUsage){const u=await window.electronAPI.loadUsage();if(u){state.usageData.inputTokens=u.used||0;state.usageData.cost=u.cost||0;}}}catch(e){console.warn('[Usage] loadUsage 실패:',e);}updateQuotaBar();}
 function trackUsage(il,ol){const it=Math.ceil(il/4),ot=Math.ceil(ol/4);state.usageData.inputTokens+=it;state.usageData.outputTokens+=ot;state.usageData.cost+=(it*0.000003)+(ot*0.000015);state.usageData.history.push({time:new Date().toLocaleTimeString(),model:state.selectedModel?.name||'?',input:it,output:ot,cost:(it*0.000003)+(ot*0.000015)});window.electronAPI?.updateUsage?.(it+ot);updateQuotaBar();}
 function updateQuotaBar(){
   const profile = state.settings?.awsProfile || '';
   const user = state.settings?.bedrockUser || '';
-  fetch(`http://localhost:8765/api/quota?profile=${encodeURIComponent(profile)}&user=${encodeURIComponent(user)}`).then(r=>r.json()).then(q=>{
+  console.log(`[QuotaBar] fetch 시작: profile=${profile}, user=${user}`);
+  fetch(`http://localhost:8765/api/quota?profile=${encodeURIComponent(profile)}&user=${encodeURIComponent(user)}`, { signal: AbortSignal.timeout(10000) }).then(r=>r.json()).then(q=>{
+    console.log('[QuotaBar] 응답:', JSON.stringify(q));
     const remaining = q.remaining_krw || 0;
     if (remaining <= 0) {
-      // quota 정보 없음 — 표시하지 않음
       const pctEl = document.getElementById('quota-pct');
       const gauge = document.getElementById('topbar-quota-gauge');
       if (pctEl) pctEl.textContent = '-';
-      if (gauge) gauge.title = '비용 정보를 가져올 수 없습니다. 첫 호출 후 갱신됩니다.';
+      if (gauge) gauge.title = '비용 정보 조회 중...';
+      // 5초 후 재시도 (백그라운드 조회 완료 대기)
+      if (!updateQuotaBar._retryCount) updateQuotaBar._retryCount = 0;
+      if (updateQuotaBar._retryCount < 6) {
+        updateQuotaBar._retryCount++;
+        setTimeout(updateQuotaBar, 5000);
+      }
       return;
     }
+    updateQuotaBar._retryCount = 0;
     // 한도 밴드 자동 감지: 50/100/150/200/300/400/500만
     const bands = [500000, 1000000, 1500000, 2000000, 3000000, 4000000, 5000000];
     let limit = 1000000;
@@ -2657,7 +2707,12 @@ function updateQuotaBar(){
     }
     if (pctEl) pctEl.textContent = pct.toFixed(1) + '%';
     if (gauge) gauge.title = `월간 사용: ₩${Math.round(usedKrw).toLocaleString()} / 한도: ₩${Math.round(limit).toLocaleString()}\n잔여: ₩${Math.round(remaining).toLocaleString()} (${(100 - pct).toFixed(1)}%)`;
-  }).catch(()=>{});
+  }).catch(()=>{
+    const pctEl = document.getElementById('quota-pct');
+    const gauge = document.getElementById('topbar-quota-gauge');
+    if (pctEl) pctEl.textContent = '-';
+    if (gauge) gauge.title = '비용 정보 조회 실패 — 첫 호출 후 자동 갱신됩니다';
+  }).catch((e)=>{ console.error('[QuotaBar] fetch 실패:', e); });
 }
 function showUsageDashboard(){const o=document.getElementById('usage-dashboard-overlay');o.style.display='block';const ud=state.usageData;const costStr='$$'+ud.cost.toFixed(4);const dayMap={};for(let i=6;i>=0;i--){const d=new Date();d.setDate(d.getDate()-i);dayMap[`${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`]=0;}ud.history.forEach(h=>{const n=new Date();const k=`${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;dayMap[k]=(dayMap[k]||0)+h.input+h.output;});const mx=Math.max(...Object.values(dayMap),1);const bars=Object.entries(dayMap).map(([k,v])=>`<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end"><div class="bar" style="height:${Math.max((v/mx)*100,2)}%;width:100%"></div><div class="bar-label">${k}</div></div>`).join('');const rows=ud.history.slice(-20).reverse().map(h=>`<tr><td>${h.time}</td><td>${h.model||'—'}</td><td>${h.input.toLocaleString()}</td><td>${h.output.toLocaleString()}</td><td>$${h.cost.toFixed(5)}</td></tr>`).join('');o.innerHTML=`<div class="usage-overlay" onclick="if(event.target===this)document.getElementById('usage-dashboard-overlay').style.display='none'"><div class="usage-dashboard" style="position:relative"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px"><h3 style="margin:0">토큰 사용량 대시보드</h3><div style="display:flex;gap:6px"><button class="sm-btn" onclick="loadUsageData()">↻</button><button class="sm-btn" onclick="document.getElementById('usage-dashboard-overlay').style.display='none'">✕</button></div></div><div class="usage-summary"><div class="usage-card"><div class="label">입력 토큰</div><div class="value">${ud.inputTokens.toLocaleString()}</div></div><div class="usage-card"><div class="label">출력 토큰</div><div class="value">${ud.outputTokens.toLocaleString()}</div></div><div class="usage-card"><div class="label">예상 비용</div><div class="value">${costStr}</div></div></div><div class="usage-chart">${bars}</div><table class="usage-table"><thead><tr><th>시간</th><th>모델</th><th>입력</th><th>출력</th><th>비용</th></tr></thead><tbody>${rows||'<tr><td colspan="5" style="text-align:center;color:var(--color-text-muted)">사용 기록 없음</td></tr>'}</tbody></table></div></div>`;}
 async function saveConversation(){

@@ -24,10 +24,10 @@ class ConversationCheckpoint:
 class ConversationMemory:
     """세션별 대화 메모리 관리."""
 
-    RECENT_WINDOW = 6  # 원본으로 유지할 최근 메시지 수
-    SUMMARIZE_THRESHOLD = 8  # 이 수 이상이면 요약 트리거
-    MAX_SUMMARY_CHARS = 1500  # 요약 최대 길이
-    MAX_MSG_CHARS = 800  # 개별 메시지 최대 길이
+    RECENT_WINDOW = 10  # 원본으로 유지할 최근 메시지 수
+    SUMMARIZE_THRESHOLD = 12  # 이 수 이상이면 요약 트리거
+    MAX_SUMMARY_CHARS = 3000  # 요약 최대 길이
+    MAX_MSG_CHARS = 2000  # 개별 메시지 최대 길이
 
     def __init__(self, storage_dir: str = ""):
         self.storage_dir = storage_dir
@@ -71,7 +71,7 @@ class ConversationMemory:
         session_id: str,
         chat_history: List[Dict],
         current_prompt: str,
-        max_total_chars: int = 10000,
+        max_total_chars: int = 20000,
     ) -> Tuple[List[Dict], bool]:
         """
         LLM에 전달할 messages 배열 구성.

@@ -49,12 +49,18 @@ class GatewayClient:
         return self._creds
 
     def force_refresh_creds(self):
-        """자격증명 강제 갱신 — 토큰 만료 시 호출."""
+        """자격증명 강제 갱신 — 토큰 만료 시 호출. 주입된 자격증명도 초기화."""
         self._cred_time = 0
         self._creds = None
         if hasattr(self, '_injected_creds'):
             self._injected_creds = None
-        print("[GW] 자격증명 강제 갱신")
+        # boto3 기본 세션 캐시도 초기화
+        try:
+            import boto3 as _b3
+            _b3.DEFAULT_SESSION = None
+        except Exception:
+            pass
+        print("[GW] 자격증명 강제 갱신 완료")
 
     def inject_credentials(self, access_key: str, secret_key: str, session_token: str = ""):
         """Electron에서 가져온 자격증명을 직접 주입 — boto3 SSO 캐시 완전 우회."""
@@ -70,24 +76,66 @@ class GatewayClient:
         BotocoreSigV4(creds, "execute-api", self.region).add_auth(aws_req)
         return dict(aws_req.headers)
 
-    def _build_payload(self, model_id, messages, system_prompt=""):
-        # Gateway는 us. prefix 모델을 선호 — 이미 prefix가 있으면 그대로
-        # 일부 모델은 prefix 없이도 작동하므로 원본도 시도
+    def _build_payload(self, model_id, messages, system_prompt="", tool_config=None):
+        # Gateway는 일부 모델에 us. prefix 필요 — 원본 ID 우선, DENY 시 prefix 재시도
         if not model_id.startswith("us.") and not model_id.startswith("eu."):
-            # 먼저 원본 ID로 시도, 실패하면 us. prefix 추가
             self._try_us_prefix = True
-            prefixed = f"us.{model_id}"
+            used_id = model_id
         else:
             self._try_us_prefix = False
-            prefixed = model_id
-        body = {"modelId": prefixed, "messages": messages, "inferenceConfig": {"maxTokens": 2048}}
+            used_id = model_id
+        body = {"modelId": used_id, "messages": messages, "inferenceConfig": {"maxTokens": 8192}}
         if system_prompt:
             body["system"] = [{"text": system_prompt}]
+        if tool_config:
+            body["toolConfig"] = tool_config
         return body
 
-    async def converse(self, model_id, messages, system_prompt=""):
+    def _is_expired_error(self, err_str):
+        """토큰 만료 에러인지 판단."""
+        low = err_str.lower()
+        return "expired" in low or "security token" in low or "not authorized" in low
+
+    async def converse_quota_only(self, model_id, messages, system_prompt=""):
+        """Quota 조회 전용 — maxTokens:1로 최소 비용, ACCEPTED 시 폴링 없이 quota만 반환."""
         url = f"{self.gateway_url}/converse"
         payload = self._build_payload(model_id, messages, system_prompt)
+        # maxTokens를 1로 오버라이드 — 최소 비용
+        payload["inferenceConfig"]["maxTokens"] = 1
+        body_bytes = json.dumps(payload).encode()
+        import urllib.request, urllib.error
+        loop = asyncio.get_event_loop()
+
+        headers = self._sign("POST", url, body_bytes)
+        def _call(h=headers, b=body_bytes):
+            req = urllib.request.Request(url, data=b, method="POST")
+            for k, v in h.items():
+                req.add_header(k, v)
+            try:
+                resp = urllib.request.urlopen(req, timeout=15)
+                return json.loads(resp.read().decode())
+            except urllib.error.HTTPError as e:
+                return {"decision": "ERROR", "error": f"HTTP {e.code}: {e.read().decode()[:200]}"}
+            except Exception as e:
+                return {"decision": "ERROR", "error": str(e)}
+        result = await loop.run_in_executor(None, _call)
+
+        # ACCEPTED도 quota 정보 포함 — 폴링 없이 바로 반환
+        if result.get("decision") == "ACCEPTED":
+            # job cancel (비용 절약)
+            job_id = result.get("job_id", "")
+            if job_id:
+                asyncio.create_task(self._cancel_job(job_id))
+            return {
+                "decision": "ALLOW",
+                "remaining_quota": result.get("remaining_quota", {}),
+                "estimated_cost_krw": result.get("estimated_cost_krw", 0),
+            }
+        return result
+
+    async def converse(self, model_id, messages, system_prompt="", tool_config=None):
+        url = f"{self.gateway_url}/converse"
+        payload = self._build_payload(model_id, messages, system_prompt, tool_config)
         body_bytes = json.dumps(payload).encode()
         import urllib.request, urllib.error
         loop = asyncio.get_event_loop()
@@ -99,7 +147,7 @@ class GatewayClient:
                 for k, v in h.items():
                     req.add_header(k, v)
                 try:
-                    resp = urllib.request.urlopen(req, timeout=120)
+                    resp = urllib.request.urlopen(req, timeout=300)
                     return json.loads(resp.read().decode())
                 except urllib.error.HTTPError as e:
                     return {"decision": "ERROR", "error": f"HTTP {e.code}: {e.read().decode()[:200]}"}
@@ -109,23 +157,30 @@ class GatewayClient:
 
             # 토큰 만료 → 자격증명 갱신 후 재시도
             err_str = result.get("error", "")
-            if "expired" in err_str.lower() or "security token" in err_str.lower():
+            if self._is_expired_error(err_str):
                 if attempt < 2:
+                    print(f"[GW] 토큰 만료 감지 (시도 {attempt+1}/3) — 자격증명 갱신 후 재시도")
                     self.force_refresh_creds()
+                    payload = self._build_payload(model_id, messages, system_prompt)
                     body_bytes = json.dumps(payload).encode()
+                    await asyncio.sleep(0.5)
                     continue
 
-            # us. prefix로 실패하면 원본 ID로 재시도
-            if result.get("decision") == "ERROR" and self._try_us_prefix and attempt == 0:
-                payload["modelId"] = model_id
+            # 원본 ID로 DENY/ERROR → us. prefix로 재시도
+            err_or_deny = result.get("decision") in ("ERROR", "DENY")
+            deny_reason = result.get("denial_reason", "") + result.get("error", "")
+            if err_or_deny and self._try_us_prefix and "not in allowed" in deny_reason and attempt == 0:
+                print(f"[GW] 원본 ID '{model_id}' 거부 → us.{model_id} 로 재시도")
+                payload["modelId"] = f"us.{model_id}"
                 body_bytes = json.dumps(payload).encode()
+                self._try_us_prefix = False  # 한 번만 재시도
                 continue
 
             if result.get("decision") == "ACCEPTED":
                 # 비동기 모델 — S3 폴링으로 결과 대기
                 job_id = result.get("job_id", "")
                 if job_id:
-                    text = await self._poll_job_result(job_id, max_wait=120)
+                    text = await self._poll_job_result(job_id, max_wait=300)
                     if text:
                         return {"decision": "ALLOW", "output": {"message": {"content": [{"text": text}]}},
                                 "remaining_quota": result.get("remaining_quota", {}),
@@ -137,22 +192,29 @@ class GatewayClient:
             return result
         return result
 
-    async def converse_stream_live(self, model_id, messages, system_prompt=""):
-        """Lambda Function URL — 토큰 만료 시 자동 갱신 + 재시도."""
-        for _retry in range(2):
-            result = await self._converse_stream_live_once(model_id, messages, system_prompt)
+    async def converse_stream_live(self, model_id, messages, system_prompt="", tool_config=None):
+        """Lambda Function URL — 토큰 만료 시 자동 갱신 + 재시도 (최대 3회)."""
+        result = None
+        for _retry in range(3):
+            result = await self._converse_stream_live_once(model_id, messages, system_prompt, tool_config)
             err = result.get("error", "")
-            if "expired" in err.lower() or "security token" in err.lower():
+            if self._is_expired_error(err):
+                print(f"[Stream] 토큰 만료 감지 (시도 {_retry+1}/3) — 자격증명 갱신 후 재시도")
                 self.force_refresh_creds()
+                await asyncio.sleep(0.5)
+                continue
+            # "not in allowed list" → us. prefix로 재시도
+            if "not in allowed" in err and not model_id.startswith("us.") and _retry == 0:
+                print(f"[Stream] '{model_id}' 거부 → us.{model_id} 로 재시도")
+                model_id = f"us.{model_id}"
                 continue
             return result
         return result
 
-    async def _converse_stream_live_once(self, model_id, messages, system_prompt=""):
+    async def _converse_stream_live_once(self, model_id, messages, system_prompt="", tool_config=None):
         """Lambda Function URL을 통한 실시간 스트리밍 (1회 시도)."""
-        """
         url = self.STREAM_URL
-        payload = self._build_payload(model_id, messages, system_prompt)
+        payload = self._build_payload(model_id, messages, system_prompt, tool_config)
         body_bytes = json.dumps(payload).encode()
 
         # Lambda Function URL은 'lambda' 서비스로 SigV4 서명
@@ -171,7 +233,7 @@ class GatewayClient:
             for k, v in headers.items():
                 req.add_header(k, v)
             try:
-                resp = urllib.request.urlopen(req, timeout=180)
+                resp = urllib.request.urlopen(req, timeout=300)
                 chunks = []
                 while True:
                     chunk = resp.read(4096)
@@ -183,34 +245,72 @@ class GatewayClient:
                 return json.dumps({"error": str(e)})
 
         raw = await loop.run_in_executor(None, _stream_call)
+        # 디버그: raw 응답 앞부분 로깅
+        print(f"[Stream] raw 응답 ({len(raw)}자): {raw[:500]}")
 
         # SSE 스트림 파싱 — data: {...} 형식
         text_parts = []
+        tool_use_blocks = []
         remaining_quota = {}
         estimated_cost = 0
+        stop_reason = ""
+        current_tool = {}
         for line in raw.split('\n'):
             line = line.strip()
             if not line.startswith('data: '):
                 continue
             try:
                 evt = json.loads(line[6:])
-                if evt.get("type") == "content_block_delta":
+                evt_type = evt.get("type", "")
+                if evt_type == "content_block_delta":
                     delta = evt.get("delta", {})
                     if "text" in delta:
                         text_parts.append(delta["text"])
-                elif evt.get("type") == "settlement":
+                    elif "toolUse" in delta:
+                        # toolUse 델타 (input JSON 조각)
+                        if current_tool:
+                            current_tool["_input_json"] = current_tool.get("_input_json", "") + delta.get("toolUse", {}).get("input", "")
+                elif evt_type == "content_block_start":
+                    cb = evt.get("contentBlock", {})
+                    if "toolUse" in cb:
+                        tu = cb["toolUse"]
+                        current_tool = {"toolUseId": tu.get("toolUseId", ""), "name": tu.get("name", ""), "_input_json": ""}
+                elif evt_type == "content_block_stop":
+                    if current_tool and current_tool.get("name"):
+                        # input JSON 파싱
+                        try:
+                            inp = json.loads(current_tool.get("_input_json", "{}"))
+                        except json.JSONDecodeError:
+                            inp = {}
+                        tool_use_blocks.append({
+                            "toolUse": {
+                                "toolUseId": current_tool["toolUseId"],
+                                "name": current_tool["name"],
+                                "input": inp,
+                            }
+                        })
+                        current_tool = {}
+                elif evt_type == "message_delta":
+                    stop_reason = evt.get("delta", {}).get("stopReason", "") or evt.get("stopReason", "")
+                elif evt_type == "settlement":
                     remaining_quota = {"cost_krw": evt.get("remaining_quota_krw", 0)}
                     estimated_cost = evt.get("estimated_cost_krw", 0)
-                elif evt.get("type") == "error":
+                elif evt_type == "error":
                     return {"decision": "ERROR", "error": evt.get("message", str(evt))}
             except json.JSONDecodeError:
                 continue
 
+        # content 블록 조합
+        content_blocks = []
         if text_parts:
-            full_text = "".join(text_parts)
+            content_blocks.append({"text": "".join(text_parts)})
+        content_blocks.extend(tool_use_blocks)
+
+        if content_blocks:
             return {
                 "decision": "ALLOW",
-                "output": {"message": {"content": [{"text": full_text}]}},
+                "output": {"message": {"content": content_blocks}},
+                "stopReason": stop_reason,
                 "remaining_quota": remaining_quota,
                 "estimated_cost_krw": estimated_cost,
             }
@@ -261,7 +361,7 @@ class GatewayClient:
         if decision == "ACCEPTED":
             job_id = result.get("job_id", "")
             if job_id:
-                text = await self._poll_job_result(job_id)
+                text = await self._poll_job_result(job_id, max_wait=300)
                 if text:
                     yield text
                     return
@@ -273,7 +373,7 @@ class GatewayClient:
             if "text" in c:
                 yield c["text"]
 
-    async def _poll_job_result(self, job_id, max_wait=120):
+    async def _poll_job_result(self, job_id, max_wait=300):
         creds = self._get_creds()
         s3 = boto3.client("s3", aws_access_key_id=creds.access_key, aws_secret_access_key=creds.secret_key, aws_session_token=creds.token, region_name=self.region)
         try:

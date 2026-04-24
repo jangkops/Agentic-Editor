@@ -27,7 +27,21 @@ function createWindow() {
 
 app.whenReady().then(() => {
   createWindow();
-  processManager.startPython();
+  // dev 모드(npm run dev)에서는 dev:python이 이미 서버를 시작하므로 중복 시작 방지
+  const isDev = process.argv.includes('--dev') || process.env.NODE_ENV === 'development' || process.env.npm_lifecycle_event === 'dev:electron';
+  if (!isDev) {
+    // 포트가 이미 사용 중인지 확인
+    const http = require('http');
+    const checkReq = http.request({ host: '127.0.0.1', port: 8765, method: 'HEAD', path: '/health', timeout: 2000 }, (res) => {
+      console.log('[ProcessManager] Python backend already running, skipping start');
+    });
+    checkReq.on('error', () => {
+      processManager.startPython();
+    });
+    checkReq.end();
+  } else {
+    console.log('[ProcessManager] Dev mode — skipping Python start (dev:python handles it)');
+  }
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });

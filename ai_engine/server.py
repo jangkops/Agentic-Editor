@@ -3,6 +3,7 @@ import os
 import json
 import uuid
 import asyncio
+import subprocess
 from datetime import datetime
 
 from fastapi import FastAPI, Request
@@ -11,6 +12,164 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="AI Editor Engine", version="0.3.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+# ===== Agent Tool Definitions =====
+AGENT_TOOLS = {
+    "tools": [
+        {
+            "toolSpec": {
+                "name": "read_file",
+                "description": "파일 내용을 읽습니다. 프로젝트 내 모든 파일을 읽을 수 있습니다.",
+                "inputSchema": {
+                    "json": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "읽을 파일의 절대 경로 또는 프로젝트 상대 경로"}
+                        },
+                        "required": ["path"]
+                    }
+                }
+            }
+        },
+        {
+            "toolSpec": {
+                "name": "write_file",
+                "description": "파일에 내용을 씁니다. 새 파일 생성 또는 기존 파일 덮어쓰기.",
+                "inputSchema": {
+                    "json": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "쓸 파일의 절대 경로"},
+                            "content": {"type": "string", "description": "파일에 쓸 내용"}
+                        },
+                        "required": ["path", "content"]
+                    }
+                }
+            }
+        },
+        {
+            "toolSpec": {
+                "name": "list_directory",
+                "description": "디렉토리의 파일/폴더 목록을 반환합니다.",
+                "inputSchema": {
+                    "json": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "탐색할 디렉토리 경로"}
+                        },
+                        "required": ["path"]
+                    }
+                }
+            }
+        },
+        {
+            "toolSpec": {
+                "name": "run_command",
+                "description": "터미널 명령어를 실행하고 결과를 반환합니다. git, npm, pip 등 모든 CLI 도구 사용 가능.",
+                "inputSchema": {
+                    "json": {
+                        "type": "object",
+                        "properties": {
+                            "command": {"type": "string", "description": "실행할 셸 명령어"},
+                            "cwd": {"type": "string", "description": "작업 디렉토리 (선택)"}
+                        },
+                        "required": ["command"]
+                    }
+                }
+            }
+        },
+        {
+            "toolSpec": {
+                "name": "search_files",
+                "description": "프로젝트 내 파일에서 텍스트를 검색합니다 (grep).",
+                "inputSchema": {
+                    "json": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "검색할 텍스트 또는 정규식"},
+                            "path": {"type": "string", "description": "검색할 디렉토리 경로"},
+                            "file_pattern": {"type": "string", "description": "파일 패턴 (예: *.py, *.js)"}
+                        },
+                        "required": ["query", "path"]
+                    }
+                }
+            }
+        }
+    ]
+}
+
+
+def _execute_tool(tool_name: str, tool_input: dict, project_path: str = "") -> str:
+    """도구를 실행하고 결과를 문자열로 반환."""
+    try:
+        if tool_name == "read_file":
+            path = tool_input["path"]
+            if not os.path.isabs(path) and project_path:
+                path = os.path.join(project_path, path)
+            if not os.path.exists(path):
+                return f"파일 없음: {path}"
+            with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+            if len(content) > 30000:
+                content = content[:30000] + f"\n... (총 {len(content)}자, 30000자까지 표시)"
+            return content
+
+        elif tool_name == "write_file":
+            path = tool_input["path"]
+            if not os.path.isabs(path) and project_path:
+                path = os.path.join(project_path, path)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(tool_input["content"])
+            return f"파일 저장 완료: {path} ({len(tool_input['content'])}자)"
+
+        elif tool_name == "list_directory":
+            path = tool_input["path"]
+            if not os.path.isabs(path) and project_path:
+                path = os.path.join(project_path, path)
+            if not os.path.isdir(path):
+                return f"디렉토리 없음: {path}"
+            entries = os.listdir(path)
+            result = []
+            for e in sorted(entries):
+                if e.startswith('.') and e not in ('.env', '.gitignore'):
+                    continue
+                fp = os.path.join(path, e)
+                kind = "DIR" if os.path.isdir(fp) else "FILE"
+                result.append(f"  {kind}  {e}")
+            return f"{path}/ ({len(result)}개)\n" + "\n".join(result[:100])
+
+        elif tool_name == "run_command":
+            cmd = tool_input["command"]
+            cwd = tool_input.get("cwd", project_path or os.getcwd())
+            result = subprocess.run(
+                cmd, shell=True, capture_output=True, text=True,
+                timeout=30, cwd=cwd,
+                env={**os.environ, "PATH": os.environ.get("PATH", "")},
+            )
+            output = result.stdout + result.stderr
+            if len(output) > 10000:
+                output = output[:10000] + "\n... (출력 잘림)"
+            return output or "(출력 없음)"
+
+        elif tool_name == "search_files":
+            query = tool_input["query"]
+            path = tool_input["path"]
+            if not os.path.isabs(path) and project_path:
+                path = os.path.join(project_path, path)
+            pattern = tool_input.get("file_pattern", "")
+            include = f"--include='{pattern}'" if pattern else ""
+            cmd = f"grep -rn {include} --color=never '{query}' '{path}' 2>/dev/null | head -50"
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+            return result.stdout or "검색 결과 없음"
+
+        else:
+            return f"알 수 없는 도구: {tool_name}"
+    except subprocess.TimeoutExpired:
+        return "명령 실행 시간 초과 (30초)"
+    except Exception as e:
+        return f"도구 실행 오류: {str(e)}"
+
 
 # GatewayClient 캐시 — 동일 profile+user 조합은 재사용
 _gw_cache = {}
@@ -74,6 +233,47 @@ def _get_gw(aws_profile, bedrock_user):
     if not hasattr(gw, '_injected_creds') or not gw._injected_creds:
         gw._cred_time = 0
     return gw
+
+
+def _is_expired_error(result):
+    """응답이 토큰 만료 에러인지 판단."""
+    err = ""
+    if isinstance(result, dict):
+        err = result.get("error", "")
+    elif isinstance(result, str):
+        err = result
+    low = err.lower()
+    return "expired" in low or "security token" in low
+
+
+async def _refresh_and_retry_gw(gw, aws_profile, bedrock_user):
+    """토큰 만료 시 자격증명을 다시 assume role하여 주입."""
+    try:
+        import boto3 as b3
+        from botocore.credentials import Credentials as BotoCreds
+        # boto3 세션 캐시 초기화
+        b3.DEFAULT_SESSION = None
+        gw.force_refresh_creds()
+        session = b3.Session(profile_name=aws_profile)
+        sts = session.client("sts")
+        account = sts.get_caller_identity()["Account"]
+        if bedrock_user:
+            assumed = sts.assume_role(
+                RoleArn=f"arn:aws:iam::{account}:role/BedrockUser-{bedrock_user}",
+                RoleSessionName="ai-editor-refresh",
+            )
+            c = assumed["Credentials"]
+            gw.inject_credentials(c["AccessKeyId"], c["SecretAccessKey"], c["SessionToken"])
+            print(f"[AutoRefresh] BedrockUser-{bedrock_user} 자격증명 재주입 성공")
+            return True
+        else:
+            fc = session.get_credentials().get_frozen_credentials()
+            gw.inject_credentials(fc.access_key, fc.secret_key, fc.token)
+            print(f"[AutoRefresh] 프로파일 {aws_profile} 자격증명 재주입 성공")
+            return True
+    except Exception as e:
+        print(f"[AutoRefresh] 자격증명 재주입 실패: {e}")
+        return False
 
 
 @app.api_route("/health", methods=["GET", "HEAD"])
@@ -275,37 +475,59 @@ async def run_agent_stream(request: Request):
             print(f"[RAG] 컨텍스트 빌드 실패 (무시): {e}")
 
     messages = _build_messages(body.get("chatHistory", []), prompt, body.get("sessionId", "default"))
-    try:
-        # converse-stream Lambda Function URL (HTTP 호출)
-        result = await gw.converse_stream_live(model_id=model, messages=messages, system_prompt=system_prompt)
-        if result.get("decision") == "ERROR":
-            print(f"[Stream] fallback: {result.get('error', '')[:100]}")
-            result = await gw.converse(model_id=model, messages=messages, system_prompt=system_prompt)
-        asyncio.create_task(_maybe_summarize(body.get("sessionId", "default"), body.get("chatHistory", []), gw))
-    except Exception as e:
-        err_str = str(e)
-        # ValidationException (토큰 초과) → 히스토리 없이 재시도
-        if "ValidationException" in err_str or "too many" in err_str.lower():
-            try:
-                messages_retry = [{"role": "user", "content": [{"text": prompt}]}]
-                result = await gw.converse(model_id=model, messages=messages_retry, system_prompt=system_prompt)
-            except Exception as e2:
-                result = {"decision": "ERROR", "error": str(e2)}
-        else:
-            result = {"decision": "ERROR", "error": err_str}
+
+    # 모델 ID에 us. prefix 적용 (Gateway/Lambda 모두 us. prefix 필요)
+    stream_model = model if model.startswith("us.") or model.startswith("eu.") else f"us.{model}"
+
+    # 최대 2회 시도 (1회 만료 → 갱신 → 재시도)
+    result = None
+    for _attempt in range(2):
+        try:
+            # converse-stream Lambda Function URL (HTTP 호출)
+            result = await gw.converse_stream_live(model_id=stream_model, messages=messages, system_prompt=system_prompt)
+            if result.get("decision") == "ERROR":
+                err = result.get("error", "")
+                # 토큰 만료 → 서버 측 자동 갱신 후 재시도
+                if _is_expired_error(result) and _attempt == 0:
+                    print(f"[Stream] 토큰 만료 — 서버 측 자격증명 갱신 후 재시도")
+                    refreshed = await _refresh_and_retry_gw(gw, aws_profile, bedrock_user)
+                    if refreshed:
+                        continue
+                # converse-stream 실패 → /converse fallback (us. prefix 이미 적용됨)
+                print(f"[Stream] fallback to /converse: {err[:100]}")
+                result = await gw.converse(model_id=stream_model, messages=messages, system_prompt=system_prompt)
+                # converse도 만료 → 갱신 후 재시도
+                if _is_expired_error(result) and _attempt == 0:
+                    print(f"[Converse] 토큰 만료 — 서버 측 자격증명 갱신 후 재시도")
+                    refreshed = await _refresh_and_retry_gw(gw, aws_profile, bedrock_user)
+                    if refreshed:
+                        continue
+            break  # 성공 또는 만료 아닌 에러
+        except Exception as e:
+            err_str = str(e)
+            # ValidationException (토큰 초과) → 히스토리 없이 재시도
+            if "ValidationException" in err_str or "too many" in err_str.lower():
+                try:
+                    messages_retry = [{"role": "user", "content": [{"text": prompt}]}]
+                    result = await gw.converse(model_id=model, messages=messages_retry, system_prompt=system_prompt)
+                except Exception as e2:
+                    result = {"decision": "ERROR", "error": str(e2)}
+            elif _is_expired_error({"error": err_str}) and _attempt == 0:
+                print(f"[Exception] 토큰 만료 — 서버 측 자격증명 갱신 후 재시도")
+                refreshed = await _refresh_and_retry_gw(gw, aws_profile, bedrock_user)
+                if refreshed:
+                    continue
+                result = {"decision": "ERROR", "error": err_str}
+            else:
+                result = {"decision": "ERROR", "error": err_str}
+            break
+
+    asyncio.create_task(_maybe_summarize(body.get("sessionId", "default"), body.get("chatHistory", []), gw))
 
     async def event_stream():
         decision = result.get("decision", "")
-        # quota 정보 캐시
-        if result.get("remaining_quota"):
-            rq = result["remaining_quota"]
-            _quota_cache["remaining_krw"] = rq.get("cost_krw", 0)
-            _quota_cache["last_updated"] = datetime.utcnow().isoformat()
-        if result.get("estimated_cost_krw"):
-            _quota_cache["used_krw"] += result["estimated_cost_krw"]
-            # 한도 추정 (remaining + used)
-            if _quota_cache["remaining_krw"] > 0:
-                _quota_cache["limit_krw"] = _quota_cache["remaining_krw"] + _quota_cache["used_krw"]
+        # quota 정보 캐시 갱신
+        _extract_quota(result, _quota_cache.get("user", ""))
         if decision == "ALLOW":
             output = result.get("output", {}).get("message", {}).get("content", [])
             for c in output:
@@ -315,7 +537,7 @@ async def run_agent_stream(request: Request):
         elif decision == "ACCEPTED":
             job_id = result.get("job_id", "")
             if job_id:
-                text = await gw._poll_job_result(job_id)
+                text = await gw._poll_job_result(job_id, max_wait=300)
                 if text:
                     yield f"data: {json.dumps({'text': text}, ensure_ascii=False)}\n\n"
                 else:
@@ -329,6 +551,133 @@ async def run_agent_stream(request: Request):
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.post("/api/agents/run-agent")
+async def run_agent_with_tools(request: Request):
+    """에이전트 모드 — 도구 실행 루프 포함. 모델이 tool_use로 응답하면 실행 후 재호출."""
+    body = await request.json()
+    prompt = body.get("prompt", "")
+    model = body.get("model", "anthropic.claude-sonnet-4-6")
+    system_prompt = body.get("systemPrompt", "")
+    aws_profile = body.get("awsProfile", os.environ.get("AWS_PROFILE", "bedrock-gw"))
+    bedrock_user = body.get("bedrockUser", os.environ.get("BEDROCK_USER", ""))
+    project_path = body.get("projectPath", "")
+    open_file = body.get("openFile", "")
+    open_file_content = body.get("openFileContent", "")
+
+    gw = _get_gw(aws_profile, bedrock_user)
+    stream_model = model if model.startswith("us.") or model.startswith("eu.") else f"us.{model}"
+
+    # 시스템 프롬프트 구성
+    if project_path and not system_prompt:
+        system_prompt = f"사용자의 프로젝트 경로: {project_path}"
+        if open_file:
+            system_prompt += f"\n현재 열린 파일: {open_file}"
+    if project_path and _is_code_related(prompt):
+        try:
+            from ai_engine.rag.context_builder import build_system_prompt
+            system_prompt = build_system_prompt(
+                project_path=project_path, query=prompt,
+                open_file=open_file, open_file_content=open_file_content,
+                base_system_prompt=system_prompt,
+                aws_profile=aws_profile, bedrock_user=bedrock_user, gateway_client=gw,
+            )
+        except Exception as e:
+            print(f"[Agent] RAG 실패 (무시): {e}")
+
+    messages = _build_messages(body.get("chatHistory", []), prompt, body.get("sessionId", "default"))
+
+    async def agent_stream():
+        nonlocal messages
+        import re
+        max_turns = 5
+        TOOL_PATTERN = re.compile(r'<tool\s+name="(\w+)">(.*?)</tool>', re.DOTALL)
+        TOOL_CALL_PATTERN = re.compile(r'<tool_call>\s*(\{.*?\})\s*</tool_call>', re.DOTALL)
+
+        for turn in range(max_turns):
+            try:
+                print(f"[Agent] turn={turn}, converse-stream 호출")
+                result = await gw.converse_stream_live(
+                    model_id=stream_model, messages=messages,
+                    system_prompt=system_prompt,
+                )
+            except Exception as e:
+                yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
+                break
+
+            _extract_quota(result, _quota_cache.get("user", ""))
+            decision = result.get("decision", "")
+
+            if decision in ("DENY", "ERROR"):
+                yield f"data: {json.dumps({'error': result.get('error', result.get('denial_reason', 'Error'))}, ensure_ascii=False)}\n\n"
+                break
+
+            # 텍스트 추출
+            content = result.get("output", {}).get("message", {}).get("content", [])
+            text = ""
+            for c in content:
+                if "text" in c:
+                    text += c["text"]
+
+            if not text:
+                break
+
+            # XML 도구 태그 파싱 — 두 가지 형식 지원
+            tool_calls = TOOL_PATTERN.findall(text)
+            # <tool_call>{"name":"...", "arguments":{...}}</tool_call> 형식도 파싱
+            for tc_json in TOOL_CALL_PATTERN.findall(text):
+                try:
+                    tc = json.loads(tc_json)
+                    name = tc.get("name", "")
+                    args = tc.get("arguments", tc.get("input", {}))
+                    if name:
+                        # path 매핑: relative_workspace_path → path
+                        if "relative_workspace_path" in args and "path" not in args:
+                            args["path"] = os.path.join(project_path, args.pop("relative_workspace_path"))
+                        tool_calls.append((name, json.dumps(args)))
+                except json.JSONDecodeError:
+                    pass
+
+            if not tool_calls:
+                # 도구 호출 없음 → 텍스트 그대로 전송
+                yield f"data: {json.dumps({'text': text}, ensure_ascii=False)}\n\n"
+                break
+
+            # 도구 호출 있음 → 텍스트에서 도구 태그 + 가짜 결과 제거 후 전송
+            clean_text = TOOL_PATTERN.sub('', text)
+            clean_text = TOOL_CALL_PATTERN.sub('', clean_text)
+            clean_text = re.sub(r'<tool_result>.*?</tool_result>', '', clean_text, flags=re.DOTALL)
+            clean_text = clean_text.strip()
+            if clean_text:
+                yield f"data: {json.dumps({'text': clean_text}, ensure_ascii=False)}\n\n"
+
+            # 도구 실행
+            tool_results_text = []
+            for tool_name, tool_body in tool_calls:
+                # XML 내부 파라미터 파싱 또는 JSON 파싱
+                tool_input = {}
+                try:
+                    tool_input = json.loads(tool_body)
+                except (json.JSONDecodeError, TypeError):
+                    for tag in ['path', 'content', 'command', 'query', 'file_pattern', 'cwd']:
+                        m = re.search(f'<{tag}>(.*?)</{tag}>', tool_body, re.DOTALL)
+                        if m:
+                            tool_input[tag] = m.group(1).strip()
+
+                yield f"data: {json.dumps({'tool': tool_name, 'input': tool_input, 'status': 'running'}, ensure_ascii=False)}\n\n"
+                tool_output = _execute_tool(tool_name, tool_input, project_path)
+                print(f"[Agent] 도구 실행: {tool_name} → {len(tool_output)}자")
+                yield f"data: {json.dumps({'tool': tool_name, 'output': tool_output[:500], 'status': 'done'}, ensure_ascii=False)}\n\n"
+                tool_results_text.append(f"[도구 결과: {tool_name}]\n{tool_output[:10000]}")
+
+            # 도구 결과를 다음 메시지로 추가 → 다음 턴
+            messages.append({"role": "assistant", "content": [{"text": text}]})
+            messages.append({"role": "user", "content": [{"text": "\n\n".join(tool_results_text)}]})
+
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(agent_stream(), media_type="text/event-stream")
 
 
 @app.post("/api/agents/run-parallel")
@@ -369,19 +718,21 @@ async def run_agent_parallel(request: Request):
             model_id = slot.get("modelId", "")
             slot_id = slot.get("slotId", "")
             sp = slot.get("systemPrompt", "")
+            # us. prefix 적용
+            sid = model_id if model_id.startswith("us.") or model_id.startswith("eu.") else f"us.{model_id}"
             # RAG 컨텍스트를 시스템 프롬프트에 추가
             if rag_context:
                 sp = (sp + "\n\n" + rag_context) if sp else rag_context
             try:
                 # converse-stream 우선 시도, 실패 시 기존 /converse fallback
                 result = await asyncio.wait_for(
-                    gw.converse_stream_live(model_id=model_id, messages=messages, system_prompt=sp),
-                    timeout=120
+                    gw.converse_stream_live(model_id=sid, messages=messages, system_prompt=sp),
+                    timeout=300
                 )
                 if result.get("decision") == "ERROR":
                     result = await asyncio.wait_for(
-                        gw.converse(model_id=model_id, messages=messages, system_prompt=sp),
-                        timeout=120
+                        gw.converse(model_id=sid, messages=messages, system_prompt=sp),
+                        timeout=300
                     )
                 decision = result.get("decision", "")
                 if decision == "ALLOW":
@@ -391,7 +742,7 @@ async def run_agent_parallel(request: Request):
                 elif decision == "ACCEPTED":
                     job_id = result.get("job_id", "")
                     if job_id:
-                        text = await gw._poll_job_result(job_id)
+                        text = await gw._poll_job_result(job_id, max_wait=300)
                         if text:
                             return {"slotId": slot_id, "modelId": model_id, "status": "done", "content": text}
                     return {"slotId": slot_id, "modelId": model_id, "status": "error", "content": "ACCEPTED — 결과 대기 시간 초과"}
@@ -400,7 +751,7 @@ async def run_agent_parallel(request: Request):
                 else:
                     return {"slotId": slot_id, "modelId": model_id, "status": "error", "content": result.get("error", f"Unknown: {decision}")}
             except asyncio.TimeoutError:
-                return {"slotId": slot_id, "modelId": model_id, "status": "error", "content": "90초 타임아웃"}
+                return {"slotId": slot_id, "modelId": model_id, "status": "error", "content": "300초 타임아웃"}
             except Exception as e:
                 return {"slotId": slot_id, "modelId": model_id, "status": "error", "content": str(e)}
 
@@ -462,35 +813,16 @@ async def run_workflow(request: Request):
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
-_quota_cache = {"used_krw": 0, "remaining_krw": 0, "limit_krw": 0, "last_updated": "", "user": ""}
+_quota_cache = {"used_krw": 0, "remaining_krw": 0, "limit_krw": 0, "last_updated": "", "user": "", "fetching": False}
 
 @app.get("/api/quota")
 async def get_quota(request: Request):
     profile = request.query_params.get("profile", os.environ.get("AWS_PROFILE", "default"))
     user = request.query_params.get("user", "")
-    print(f"[Quota] 요청: profile={profile}, user={user}, cache={_quota_cache}")
-    # 첫 호출이면 실제 Gateway에서 quota 조회
-    if _quota_cache["remaining_krw"] == 0 and user:
-        try:
-            gw = _get_gw(profile, user)
-            print(f"[Quota] Gateway 호출 시도...")
-            # 간단한 호출로 quota 정보 획득
-            result = await gw.converse(
-                model_id="anthropic.claude-haiku-4-5-20251001-v1:0",
-                messages=[{"role": "user", "content": [{"text": "hi"}]}],
-            )
-            print(f"[Quota] Gateway 응답: decision={result.get('decision')}, remaining_quota={result.get('remaining_quota')}")
-            if result.get("remaining_quota"):
-                rq = result["remaining_quota"]
-                _quota_cache["remaining_krw"] = rq.get("cost_krw", 0)
-                _quota_cache["limit_krw"] = rq.get("cost_krw", 0) + _quota_cache["used_krw"]
-                _quota_cache["user"] = user
-                _quota_cache["last_updated"] = datetime.utcnow().isoformat()
-                print(f"[Quota] 캐시 업데이트: {_quota_cache}")
-            if result.get("estimated_cost_krw"):
-                _quota_cache["used_krw"] += result["estimated_cost_krw"]
-        except Exception as e:
-            print(f"[Quota] Gateway 호출 실패: {e}")
+    # 첫 호출이면 백그라운드에서 quota 조회 시작 (즉시 응답 반환)
+    if _quota_cache["remaining_krw"] == 0 and user and not _quota_cache["fetching"]:
+        _quota_cache["fetching"] = True
+        asyncio.create_task(_fetch_quota_background(profile, user))
     return {
         "user": _quota_cache["user"] or user,
         "used_krw": round(_quota_cache["used_krw"], 2),
@@ -498,3 +830,65 @@ async def get_quota(request: Request):
         "limit_krw": round(_quota_cache["limit_krw"], 2),
         "last_updated": _quota_cache["last_updated"],
     }
+
+
+async def _fetch_quota_background(profile, user):
+    """백그라운드에서 Gateway 호출하여 quota 정보 캐시."""
+    try:
+        gw = _get_gw(profile, user)
+        print(f"[Quota] 백그라운드 quota 조회 시작...")
+        # Gateway /converse 직접 호출 — maxTokens:1로 최소 비용
+        # us. prefix haiku 4.5 우선, 실패 시 haiku 3 fallback
+        quota_models = [
+            "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+            "us.anthropic.claude-3-haiku-20240307-v1:0",
+        ]
+        for mid in quota_models:
+            try:
+                result = await asyncio.wait_for(
+                    gw.converse_quota_only(
+                        model_id=mid,
+                        messages=[{"role": "user", "content": [{"text": "hi"}]}],
+                    ),
+                    timeout=15
+                )
+                print(f"[Quota] {mid}: decision={result.get('decision')}, remaining_quota={result.get('remaining_quota')}, error={result.get('error', '')[:100]}")
+                _extract_quota(result, user)
+                if _quota_cache["remaining_krw"] > 0:
+                    print(f"[Quota] 성공! remaining={_quota_cache['remaining_krw']}")
+                    return
+            except Exception as e:
+                print(f"[Quota] {mid} 실패: {e}")
+                continue
+        print(f"[Quota] 모든 모델 실패 — 첫 채팅 후 자동 갱신")
+    except Exception as e:
+        print(f"[Quota] 백그라운드 조회 실패: {e}")
+    finally:
+        _quota_cache["fetching"] = False
+
+
+def _extract_quota(result, user=""):
+    """Gateway 응답에서 quota 정보를 추출하여 캐시에 저장."""
+    rq = result.get("remaining_quota", {})
+    if rq:
+        # 다양한 키 이름 대응
+        cost_val = 0
+        if isinstance(rq, (int, float)):
+            cost_val = rq
+        elif isinstance(rq, dict):
+            cost_val = rq.get("cost_krw") or rq.get("remaining_cost_krw") or rq.get("remaining_krw") or rq.get("remaining") or 0
+            if not cost_val:
+                for v in rq.values():
+                    if isinstance(v, (int, float)) and v > 0:
+                        cost_val = v
+                        break
+        if cost_val > 0:
+            _quota_cache["remaining_krw"] = cost_val
+            _quota_cache["limit_krw"] = cost_val + _quota_cache["used_krw"]
+            _quota_cache["user"] = user
+            _quota_cache["last_updated"] = datetime.utcnow().isoformat()
+            print(f"[Quota] 캐시 갱신 성공: remaining={cost_val}")
+    if result.get("estimated_cost_krw"):
+        _quota_cache["used_krw"] += result["estimated_cost_krw"]
+        if _quota_cache["remaining_krw"] > 0:
+            _quota_cache["limit_krw"] = _quota_cache["remaining_krw"] + _quota_cache["used_krw"]

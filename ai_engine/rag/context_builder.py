@@ -61,18 +61,14 @@ def get_searcher(
             if store.load(cache_path) and store.size == len(idx.chunks):
                 print(f"[RAG] 캐시된 벡터 로드: {store.size}개")
             else:
-                # 새로 임베딩
-                print(f"[RAG] {len(idx.chunks)}개 청크 임베딩 시작...")
+                # TF-IDF 배치 임베딩 — 전체 코퍼스를 한번에 처리
+                print(f"[RAG] {len(idx.chunks)}개 청크 TF-IDF 임베딩...")
                 store = VectorStore()
-                for i, chunk in enumerate(idx.chunks):
-                    # 파일 경로 + 내용을 합쳐서 임베딩
-                    text = f"File: {chunk.file_path}\n{chunk.content}"
-                    vec = embedder.embed(text)
+                texts = [f"File: {c.file_path}\n{c.content}" for c in idx.chunks]
+                vectors = embedder.embed_batch(texts)
+                for i, vec in enumerate(vectors):
                     if vec is not None:
-                        store.add(vec, {"chunk_idx": i, "file": chunk.file_path})
-                    if (i + 1) % 20 == 0:
-                        print(f"[RAG] 임베딩 진행: {i+1}/{len(idx.chunks)}")
-                # 캐시 저장
+                        store.add(vec, {"chunk_idx": i, "file": idx.chunks[i].file_path})
                 store.save(cache_path)
                 print(f"[RAG] 벡터 저장 완료: {store.size}개")
             searcher.set_embedder(embedder)
@@ -98,7 +94,7 @@ def build_context(
     aws_profile: str = "",
     bedrock_user: str = "",
     gateway_client=None,
-    max_context_chars: int = 12000,
+    max_context_chars: int = 24000,
 ) -> str:
     """하이브리드 RAG 기반 컨텍스트 생성."""
     if not project_path:
@@ -127,7 +123,7 @@ def build_context(
     # 3. 현재 열린 파일 (우선 포함)
     if open_file and open_file_content:
         section = f"## 현재 열린 파일: {open_file}\n```\n"
-        content = open_file_content[:3000] + ("\n... (truncated)" if len(open_file_content) > 3000 else "")
+        content = open_file_content[:6000] + ("\n... (truncated)" if len(open_file_content) > 6000 else "")
         section += content + "\n```\n"
         if used_chars + len(section) < max_context_chars:
             parts.append(section)
@@ -168,10 +164,26 @@ def build_system_prompt(
     prompt_parts = []
     if base_system_prompt:
         prompt_parts.append(base_system_prompt)
-    prompt_parts.append("""당신은 사용자의 프로젝트를 이해하고 도와주는 AI 코딩 어시스턴트입니다.
-아래에 프로젝트의 파일 구조와 관련 코드가 제공됩니다.
-이 컨텍스트를 활용하여 정확하고 구체적인 답변을 제공하세요.
-코드를 수정하거나 생성할 때는 프로젝트의 기존 스타일과 패턴을 따르세요.""")
+    prompt_parts.append("""당신은 사용자의 프로젝트를 완전히 이해하고 적극적으로 도와주는 AI 코딩 어시스턴트입니다.
+
+아래에 프로젝트의 파일 구조, 현재 열린 파일의 실제 내용, 관련 코드가 제공됩니다.
+
+도구 사용법:
+파일을 읽거나, 명령을 실행하거나, 디렉토리를 탐색해야 할 때 아래 XML 태그를 사용하세요.
+시스템이 자동으로 실행하고 결과를 돌려줍니다.
+
+<tool name="read_file"><path>파일경로</path></tool>
+<tool name="write_file"><path>파일경로</path><content>파일내용</content></tool>
+<tool name="list_directory"><path>디렉토리경로</path></tool>
+<tool name="run_command"><command>셸명령어</command></tool>
+<tool name="search_files"><query>검색어</query><path>디렉토리경로</path></tool>
+
+규칙:
+- 파일 내용이 필요하면 바로 <tool name="read_file"> 사용. 추측하지 마세요
+- 명령 실행이 필요하면 바로 <tool name="run_command"> 사용
+- "할 수 없다", "권한이 없다" 같은 거부 표현 절대 금지
+- 확인 질문 없이 바로 도구 사용
+- 도구 태그와 일반 텍스트를 함께 사용 가능""")
     if context:
         prompt_parts.append(f"\n---\n{context}")
     return '\n\n'.join(prompt_parts)
