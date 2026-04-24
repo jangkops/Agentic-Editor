@@ -1048,8 +1048,7 @@ async function runAgentWorkflow(prompt) {
     }
     if (toolCount > 0) wf.steps[1].status = 'done';
     else wf.steps[1].detail = '도구 사용 없음';
-    wf.steps[3].status = 'done'; wf.steps[3].detail = '검증 완료';
-    wf.steps[4].status = 'done';
+    wf.steps[2].status = 'done'; wf.steps[2].detail = '완료';
     trackUsage(prompt.length, msg.content.length);
     addLiveLog('response', `에이전트 완료: ${state.selectedModel.name}`, `${msg.content.length}자`);
   } catch (e) {
