@@ -917,7 +917,7 @@ async function runSimpleChat(prompt) {
   const _chatStartTime = Date.now();
   // 생각 중 경과 시간 — DOM 직접 업데이트 (전체 리렌더 방지)
   const thinkingTimer = setInterval(() => {
-    if (!state.isStreaming) { clearInterval(thinkingTimer); return; }
+    if (!state.isStreaming || msg.content) { clearInterval(thinkingTimer); return; }
     const el = document.querySelector('.thinking-indicator');
     if (el) {
       const elapsed = Math.floor((Date.now() - _chatStartTime) / 1000);
@@ -926,7 +926,7 @@ async function runSimpleChat(prompt) {
     }
   }, 1000);
   try {
-    const resp = await fetch('http://localhost:8765/api/agents/run-stream', {
+    const resp = await fetch('http://localhost:8765/api/agents/run-agent', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(_apiBody({ prompt, model: state.selectedModel.id })),
       signal: state._abortController.signal
