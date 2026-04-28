@@ -451,106 +451,46 @@ async def run_agent_stream(request: Request):
 
     gw = _get_gw(aws_profile, bedrock_user)
 
-    # 기본 컨텍스트: 프로젝트 경로 + 열린 파일명만 (내용은 RAG에서)
     if project_path and not system_prompt:
         system_prompt = f"사용자의 프로젝트 경로: {project_path}"
         if open_file:
             system_prompt += f"\n현재 열린 파일: {open_file}"
 
-    # RAG 컨텍스트 주입 — 코드/프로젝트 관련 질문에만
     if project_path and _is_code_related(prompt):
         try:
             from ai_engine.rag.context_builder import build_system_prompt
             system_prompt = build_system_prompt(
-                project_path=project_path,
-                query=prompt,
-                open_file=open_file,
-                open_file_content=open_file_content,
+                project_path=project_path, query=prompt,
+                open_file=open_file, open_file_content=open_file_content,
                 base_system_prompt=system_prompt,
-                aws_profile=aws_profile,
-                bedrock_user=bedrock_user,
-                gateway_client=gw,
+                aws_profile=aws_profile, bedrock_user=bedrock_user, gateway_client=gw,
             )
         except Exception as e:
             print(f"[RAG] 컨텍스트 빌드 실패 (무시): {e}")
 
     messages = _build_messages(body.get("chatHistory", []), prompt, body.get("sessionId", "default"))
-
-    # 모델 ID에 us. prefix 적용 (Gateway/Lambda 모두 us. prefix 필요)
     stream_model = model if model.startswith("us.") or model.startswith("eu.") else f"us.{model}"
 
-    # 최대 2회 시도 (1회 만료 → 갱신 → 재시도)
-    result = None
-    for _attempt in range(2):
+    async def realtime_stream():
+        """Lambda SSE를 실시간으로 프론트엔드에 중계 — ChatGPT처럼 글자가 써지는 효과."""
         try:
-            # converse-stream Lambda Function URL (HTTP 호출)
-            result = await gw.converse_stream_live(model_id=stream_model, messages=messages, system_prompt=system_prompt)
-            if result.get("decision") == "ERROR":
-                err = result.get("error", "")
-                # 토큰 만료 → 서버 측 자동 갱신 후 재시도
-                if _is_expired_error(result) and _attempt == 0:
-                    print(f"[Stream] 토큰 만료 — 서버 측 자격증명 갱신 후 재시도")
-                    refreshed = await _refresh_and_retry_gw(gw, aws_profile, bedrock_user)
-                    if refreshed:
-                        continue
-                # converse-stream 실패 → /converse fallback (us. prefix 이미 적용됨)
-                print(f"[Stream] fallback to /converse: {err[:100]}")
-                result = await gw.converse(model_id=stream_model, messages=messages, system_prompt=system_prompt)
-                # converse도 만료 → 갱신 후 재시도
-                if _is_expired_error(result) and _attempt == 0:
-                    print(f"[Converse] 토큰 만료 — 서버 측 자격증명 갱신 후 재시도")
-                    refreshed = await _refresh_and_retry_gw(gw, aws_profile, bedrock_user)
-                    if refreshed:
-                        continue
-            break  # 성공 또는 만료 아닌 에러
+            async for evt in gw.stream_sse_realtime(model_id=stream_model, messages=messages, system_prompt=system_prompt):
+                evt_type = evt.get("type", "")
+                if evt_type == "content_block_delta":
+                    delta = evt.get("delta", {})
+                    if "text" in delta:
+                        yield f"data: {json.dumps({'text': delta['text']}, ensure_ascii=False)}\n\n"
+                elif evt_type == "settlement":
+                    rq = {"cost_krw": evt.get("remaining_quota_krw", 0)}
+                    _extract_quota({"remaining_quota": rq, "estimated_cost_krw": evt.get("estimated_cost_krw", 0)}, _quota_cache.get("user", ""))
+                elif evt_type == "error":
+                    yield f"data: {json.dumps({'error': evt.get('message', str(evt))}, ensure_ascii=False)}\n\n"
         except Exception as e:
-            err_str = str(e)
-            # ValidationException (토큰 초과) → 히스토리 없이 재시도
-            if "ValidationException" in err_str or "too many" in err_str.lower():
-                try:
-                    messages_retry = [{"role": "user", "content": [{"text": prompt}]}]
-                    result = await gw.converse(model_id=model, messages=messages_retry, system_prompt=system_prompt)
-                except Exception as e2:
-                    result = {"decision": "ERROR", "error": str(e2)}
-            elif _is_expired_error({"error": err_str}) and _attempt == 0:
-                print(f"[Exception] 토큰 만료 — 서버 측 자격증명 갱신 후 재시도")
-                refreshed = await _refresh_and_retry_gw(gw, aws_profile, bedrock_user)
-                if refreshed:
-                    continue
-                result = {"decision": "ERROR", "error": err_str}
-            else:
-                result = {"decision": "ERROR", "error": err_str}
-            break
-
-    asyncio.create_task(_maybe_summarize(body.get("sessionId", "default"), body.get("chatHistory", []), gw))
-
-    async def event_stream():
-        decision = result.get("decision", "")
-        # quota 정보 캐시 갱신
-        _extract_quota(result, _quota_cache.get("user", ""))
-        if decision == "ALLOW":
-            output = result.get("output", {}).get("message", {}).get("content", [])
-            for c in output:
-                if "text" in c:
-                    # JSON으로 감싸서 줄바꿈 이스케이프
-                    yield f"data: {json.dumps({'text': c['text']}, ensure_ascii=False)}\n\n"
-        elif decision == "ACCEPTED":
-            job_id = result.get("job_id", "")
-            if job_id:
-                text = await gw._poll_job_result(job_id, max_wait=300)
-                if text:
-                    yield f"data: {json.dumps({'text': text}, ensure_ascii=False)}\n\n"
-                else:
-                    yield f"data: {json.dumps({'error': f'작업 {job_id[:12]}... 결과 대기 시간 초과'})}\n\n"
-            else:
-                yield f"data: {json.dumps({'error': 'ACCEPTED — job_id 없음'})}\n\n"
-        elif decision == "DENY":
-            yield f"data: {json.dumps({'error': result.get('denial_reason', 'DENIED') + ' (model: ' + model + ')'})}\n\n"
-        else:
-            yield f"data: {json.dumps({'error': result.get('error', f'Unknown: {decision}')})}\n\n"
+            yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
         yield "data: [DONE]\n\n"
+        asyncio.create_task(_maybe_summarize(body.get("sessionId", "default"), body.get("chatHistory", []), gw))
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return StreamingResponse(realtime_stream(), media_type="text/event-stream")
 
 
 @app.post("/api/agents/run-agent")
@@ -611,7 +551,9 @@ async def run_agent_with_tools(request: Request):
             print(f"[Agent] turn={turn}, decision={decision}, stopReason={stop_reason}, blocks={len(content_blocks)}")
 
             if decision in ("DENY", "ERROR"):
-                yield f"data: {json.dumps({'error': result.get('error', result.get('denial_reason', 'Error'))}, ensure_ascii=False)}\n\n"
+                err_msg = result.get('error', result.get('denial_reason', 'Unknown error'))
+                print(f"[Agent] ERROR: {err_msg[:300]}")
+                yield f"data: {json.dumps({'error': err_msg}, ensure_ascii=False)}\n\n"
                 break
 
             # assistant 메시지를 messages에 추가

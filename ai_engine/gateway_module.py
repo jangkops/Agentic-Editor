@@ -211,6 +211,51 @@ class GatewayClient:
             return result
         return result
 
+    async def stream_sse_realtime(self, model_id, messages, system_prompt="", tool_config=None):
+        """Lambda Function URL — 실시간 SSE 이터레이터. 각 이벤트를 즉시 yield."""
+        url = self.STREAM_URL
+        payload = self._build_payload(model_id, messages, system_prompt, tool_config)
+        body_bytes = json.dumps(payload).encode()
+        creds = self._get_creds()
+        aws_req = AWSRequest(method="POST", url=url, data=body_bytes,
+                             headers={"Content-Type": "application/json"})
+        BotocoreSigV4(creds, "lambda", self.region).add_auth(aws_req)
+        signed_headers = dict(aws_req.headers)
+
+        import urllib.request
+        loop = asyncio.get_event_loop()
+
+        def _open():
+            req = urllib.request.Request(url, data=body_bytes, method="POST")
+            for k, v in signed_headers.items():
+                req.add_header(k, v)
+            return urllib.request.urlopen(req, timeout=300)
+
+        try:
+            resp = await loop.run_in_executor(None, _open)
+        except Exception as e:
+            yield {"type": "error", "error": str(e)}
+            return
+
+        buf = ""
+        while True:
+            try:
+                chunk = await loop.run_in_executor(None, lambda: resp.read(4096))
+            except Exception:
+                break
+            if not chunk:
+                break
+            buf += chunk.decode('utf-8', errors='ignore')
+            while '\n' in buf:
+                line, buf = buf.split('\n', 1)
+                line = line.strip()
+                if not line or not line.startswith('data: '):
+                    continue
+                try:
+                    yield json.loads(line[6:])
+                except json.JSONDecodeError:
+                    continue
+
     async def _converse_stream_live_once(self, model_id, messages, system_prompt="", tool_config=None):
         """Lambda Function URL을 통한 실시간 스트리밍 (1회 시도)."""
         url = self.STREAM_URL
