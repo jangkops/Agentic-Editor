@@ -897,11 +897,8 @@ function isSimpleQuery(prompt) {
 }
 
 async function runSingle(prompt) {
-  if (isSimpleQuery(prompt)) {
-    await runSimpleChat(prompt);
-  } else {
-    await runAgentWorkflow(prompt);
-  }
+  // 모든 호출을 에이전트 모드로 통일 — 도구 사용 가능
+  await runAgentWorkflow(prompt);
 }
 
 // 간단한 질문 — 워크플로우 없이 바로 응답

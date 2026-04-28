@@ -530,62 +530,83 @@ async def run_agent_with_tools(request: Request):
 
     async def agent_stream():
         nonlocal messages
-        import re
         max_turns = 5
 
         for turn in range(max_turns):
+            print(f"[Agent] turn={turn}, realtime stream + toolConfig")
+            text_parts = []
+            tool_use_blocks = []
+            current_tool = {}
+            stop_reason = ""
+
             try:
-                print(f"[Agent] turn={turn}, converse-stream + toolConfig 호출")
-                result = await gw.converse_stream_live(
+                async for evt in gw.stream_sse_realtime(
                     model_id=stream_model, messages=messages,
                     system_prompt=system_prompt, tool_config=AGENT_TOOLS,
-                )
+                ):
+                    evt_type = evt.get("type", "")
+                    if evt_type == "content_block_delta":
+                        delta = evt.get("delta", {})
+                        if "text" in delta:
+                            text_parts.append(delta["text"])
+                            yield f"data: {json.dumps({'text': delta['text']}, ensure_ascii=False)}\n\n"
+                        elif "toolUse" in delta:
+                            if current_tool:
+                                current_tool["_input_json"] = current_tool.get("_input_json", "") + delta["toolUse"].get("input", "")
+                    elif evt_type == "content_block_start":
+                        cb = evt.get("content_block") or evt.get("contentBlock") or {}
+                        if "toolUse" in cb:
+                            tu = cb["toolUse"]
+                            current_tool = {"toolUseId": tu.get("toolUseId", ""), "name": tu.get("name", ""), "_input_json": ""}
+                    elif evt_type == "content_block_stop":
+                        if current_tool and current_tool.get("name"):
+                            try:
+                                inp = json.loads(current_tool.get("_input_json", "{}"))
+                            except json.JSONDecodeError:
+                                inp = {}
+                            tool_use_blocks.append({
+                                "toolUse": {"toolUseId": current_tool["toolUseId"], "name": current_tool["name"], "input": inp}
+                            })
+                            current_tool = {}
+                    elif evt_type in ("message_delta", "message_stop"):
+                        stop_reason = evt.get("delta", {}).get("stopReason", "") or evt.get("stop_reason", "") or evt.get("stopReason", "")
+                    elif evt_type == "settlement":
+                        _extract_quota({"remaining_quota": {"cost_krw": evt.get("remaining_quota_krw", 0)}, "estimated_cost_krw": evt.get("estimated_cost_krw", 0)}, _quota_cache.get("user", ""))
+                    elif evt_type == "error":
+                        yield f"data: {json.dumps({'error': evt.get('message', str(evt))}, ensure_ascii=False)}\n\n"
             except Exception as e:
                 yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
                 break
 
-            _extract_quota(result, _quota_cache.get("user", ""))
-            decision = result.get("decision", "")
-            stop_reason = result.get("stopReason", "")
-            content_blocks = result.get("output", {}).get("message", {}).get("content", [])
-            print(f"[Agent] turn={turn}, decision={decision}, stopReason={stop_reason}, blocks={len(content_blocks)}")
+            # content_blocks 조합
+            content_blocks = []
+            if text_parts:
+                content_blocks.append({"text": "".join(text_parts)})
+            content_blocks.extend(tool_use_blocks)
 
-            if decision in ("DENY", "ERROR"):
-                err_msg = result.get('error', result.get('denial_reason', 'Unknown error'))
-                print(f"[Agent] ERROR: {err_msg[:300]}")
-                yield f"data: {json.dumps({'error': err_msg}, ensure_ascii=False)}\n\n"
+            print(f"[Agent] turn={turn}, stopReason={stop_reason}, text={len(text_parts)}parts, tools={len(tool_use_blocks)}")
+
+            if not content_blocks:
                 break
 
-            # assistant 메시지를 messages에 추가
             messages.append({"role": "assistant", "content": content_blocks})
 
-            # 텍스트/도구 블록 처리
-            has_tool_use = False
-            tool_results = []
-            for block in content_blocks:
-                if "text" in block:
-                    yield f"data: {json.dumps({'text': block['text']}, ensure_ascii=False)}\n\n"
-                elif "toolUse" in block:
-                    has_tool_use = True
-                    tu = block["toolUse"]
-                    tool_name = tu.get("name", "")
-                    tool_id = tu.get("toolUseId", "")
-                    tool_input = tu.get("input", {})
-                    yield f"data: {json.dumps({'tool': tool_name, 'input': tool_input, 'status': 'running'}, ensure_ascii=False)}\n\n"
-                    tool_output = _execute_tool(tool_name, tool_input, project_path)
-                    print(f"[Agent] 도구 실행: {tool_name} → {len(tool_output)}자")
-                    yield f"data: {json.dumps({'tool': tool_name, 'output': tool_output[:500], 'status': 'done'}, ensure_ascii=False)}\n\n"
-                    tool_results.append({
-                        "toolResult": {
-                            "toolUseId": tool_id,
-                            "content": [{"text": tool_output[:15000]}],
-                        }
-                    })
-
-            if not has_tool_use:
+            if not tool_use_blocks:
                 break
 
-            # 도구 결과를 user 메시지로 추가 → 다음 턴
+            # 도구 실행
+            tool_results = []
+            for block in tool_use_blocks:
+                tu = block["toolUse"]
+                tool_name = tu.get("name", "")
+                tool_id = tu.get("toolUseId", "")
+                tool_input = tu.get("input", {})
+                yield f"data: {json.dumps({'tool': tool_name, 'input': tool_input, 'status': 'running'}, ensure_ascii=False)}\n\n"
+                tool_output = _execute_tool(tool_name, tool_input, project_path)
+                print(f"[Agent] 도구 실행: {tool_name} → {len(tool_output)}자")
+                yield f"data: {json.dumps({'tool': tool_name, 'output': tool_output[:500], 'status': 'done'}, ensure_ascii=False)}\n\n"
+                tool_results.append({"toolResult": {"toolUseId": tool_id, "content": [{"text": tool_output[:15000]}]}})
+
             messages.append({"role": "user", "content": tool_results})
 
         yield "data: [DONE]\n\n"
