@@ -2177,7 +2177,7 @@ function renderTerminalTabs() {
   document.getElementById('terminal-add-btn')?.addEventListener('click', addTerminal);
 }
 
-function renderTerminalContent() {
+async function renderTerminalContent() {
   const c = document.getElementById('terminal-content'); if (!c) return;
   const term = state.terminals[state.activeTerminalIdx]; if (!term) return;
 
@@ -2191,20 +2191,37 @@ function renderTerminalContent() {
 
   // xterm.js 로드 확인
   if (!window.Terminal) {
-    // 로컬 vendor 폴더에서 로드
-    const loadScript = (src) => new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = rej; document.head.appendChild(s); });
+    if (c._xtermLoading) return; // 중복 로드 방지
+    c._xtermLoading = true;
+    c.innerHTML = '<div style="padding:12px;color:var(--color-text-muted)">터미널 초기화 중...</div>';
+
+    // AMD define 충돌 방지 (Monaco loader.js와 충돌)
+    const _define = window.define;
+    window.define = undefined;
+
+    const loadScript = (src) => new Promise((res, rej) => {
+      const s = document.createElement('script'); s.src = src;
+      s.onload = res; s.onerror = rej; document.head.appendChild(s);
+    });
     if (!document.querySelector('link[href*="xterm.css"]')) {
       const link = document.createElement('link'); link.rel = 'stylesheet'; link.href = 'vendor/xterm.css'; document.head.appendChild(link);
     }
-    loadScript('vendor/xterm.js')
-      .then(() => loadScript('vendor/xterm-addon-fit.js'))
-      .then(() => renderTerminalContent())
-      .catch((e) => {
-        console.error('[Terminal] xterm.js 로드 실패:', e);
-        c.innerHTML = '<div style="padding:12px;color:var(--color-error)">xterm.js 로드 실패</div>';
-      });
-    c.innerHTML = '<div style="padding:12px;color:var(--color-text-muted)">터미널 초기화 중...</div>';
-    return;
+    try {
+      await loadScript('vendor/xterm.js');
+      await loadScript('vendor/xterm-addon-fit.js');
+    } catch (e) {
+      console.error('[Terminal] xterm.js 로드 실패:', e);
+      c.innerHTML = '<div style="padding:12px;color:var(--color-error)">xterm.js 로드 실패</div>';
+      window.define = _define;
+      return;
+    }
+    window.define = _define; // AMD define 복원
+    c._xtermLoading = false;
+
+    if (!window.Terminal) {
+      c.innerHTML = '<div style="padding:12px;color:var(--color-error)">xterm.js Terminal 객체 없음</div>';
+      return;
+    }
   }
 
   // xterm.js 초기화
