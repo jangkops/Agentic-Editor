@@ -1,7 +1,7 @@
 const { spawn } = require('child_process');
 const path = require('path');
 let pty;
-try { pty = require('node-pty'); console.log('[PTY] node-pty 로드 성공'); } catch (e) { pty = null; console.log('[PTY] node-pty 로드 실패, spawn fallback:', e.message); }
+try { pty = require('node-pty'); console.log('[PTY] node-pty 로드 성공'); } catch (e) { pty = null; console.log('[PTY] node-pty 사용 불가, spawn 사용:', e.message); }
 
 class ProcessManager {
   constructor() {
@@ -48,7 +48,7 @@ class ProcessManager {
       const shell = process.platform === 'win32' ? 'powershell.exe' : process.env.SHELL || '/bin/bash';
       console.log(`[PTY] shell=${shell}, HOME=${process.env.HOME}, platform=${process.platform}`);
 
-      if (pty) {
+      if (false && pty) {
         // node-pty — 진짜 PTY
         const shells = [shell, '/bin/zsh', '/bin/bash', '/bin/sh'];
         let term = null;
@@ -89,12 +89,23 @@ class ProcessManager {
         return { success: true, id };
       }
 
-      // fallback: child_process (interactive mode 강제)
-      const proc = spawn(shell, ['-i'], {
-        cwd: process.env.HOME || process.cwd(),
-        env: { ...process.env, TERM: 'xterm-256color' },
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
+      // macOS: script 명령으로 PTY 에뮬레이션 (interactive shell + echo)
+      const isLinux = process.platform === 'linux';
+      let proc;
+      if (process.platform === 'darwin') {
+        proc = spawn('script', ['-q', '/dev/null', shell, '-il'], {
+          cwd: process.env.HOME || process.cwd(),
+          env: { ...process.env, TERM: 'xterm-256color' },
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      } else {
+        proc = spawn(shell, ['-il'], {
+          cwd: process.env.HOME || process.cwd(),
+          env: { ...process.env, TERM: 'xterm-256color' },
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      }
+      console.log(`[PTY] spawn 성공: script + ${shell} -il (pid: ${proc.pid})`);
 
       this._terminals.set(id, { type: 'spawn', term: proc });
 
