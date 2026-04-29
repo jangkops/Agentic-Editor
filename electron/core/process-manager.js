@@ -1,7 +1,7 @@
 const { spawn } = require('child_process');
 const path = require('path');
 let pty;
-try { pty = require('node-pty'); } catch { pty = null; }
+try { pty = require('node-pty'); console.log('[PTY] node-pty 로드 성공'); } catch (e) { pty = null; console.log('[PTY] node-pty 로드 실패, spawn fallback:', e.message); }
 
 class ProcessManager {
   constructor() {
@@ -75,8 +75,8 @@ class ProcessManager {
         return { success: true, id };
       }
 
-      // fallback: child_process (echo 안 됨)
-      const proc = spawn(shell, [], {
+      // fallback: child_process (interactive mode 강제)
+      const proc = spawn(shell, ['-i'], {
         cwd: process.env.HOME || process.cwd(),
         env: { ...process.env, TERM: 'xterm-256color' },
         stdio: ['pipe', 'pipe', 'pipe'],
