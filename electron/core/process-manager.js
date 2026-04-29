@@ -1,56 +1,13 @@
-const { spawn, fork } = require('child_process');
+const { spawn } = require('child_process');
 const path = require('path');
+
+let pty;
+try { pty = require('node-pty'); } catch { pty = null; }
 
 class ProcessManager {
   constructor() {
     this._pythonProcess = null;
     this._terminals = new Map();
-    this._ptyWorker = null;
-    this._mainWindow = null;
-    this._pendingCreates = new Map();
-  }
-
-  _ensurePtyWorker() {
-    if (this._ptyWorker && !this._ptyWorker.killed) return;
-    const workerPath = path.join(__dirname, 'pty-worker.js');
-    // 시스템 Node.js 경로 자동 감지
-    const fs = require('fs');
-    const nodePaths = [
-      process.env.NODE_PATH_SYSTEM,
-      '/opt/homebrew/bin/node',
-      '/usr/local/bin/node',
-      '/usr/bin/node',
-    ].filter(Boolean);
-    let nodePath = nodePaths.find(p => { try { return fs.existsSync(p); } catch { return false; } });
-    if (!nodePath) {
-      try { nodePath = require('child_process').execSync('which node', { encoding: 'utf-8' }).trim(); } catch { nodePath = 'node'; }
-    }
-    console.log(`[PTY] worker 시작: node=${nodePath}`);
-    // 시스템 Node.js로 fork (Electron Node가 아닌)
-    this._ptyWorker = fork(workerPath, [], {
-      execPath: nodePath,
-      stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
-    });
-    this._ptyWorker.on('message', (msg) => {
-      if (msg.type === 'ready') {
-        console.log('[PTY] worker 준비 완료');
-      } else if (msg.type === 'created') {
-        const resolve = this._pendingCreates.get(msg.id);
-        if (resolve) { resolve(msg); this._pendingCreates.delete(msg.id); }
-      } else if (msg.type === 'data') {
-        if (this._mainWindow && !this._mainWindow.isDestroyed()) {
-          this._mainWindow.webContents.send('terminal:data', { id: msg.id, data: msg.data });
-        }
-      } else if (msg.type === 'exit') {
-        this._terminals.delete(msg.id);
-        if (this._mainWindow && !this._mainWindow.isDestroyed()) {
-          this._mainWindow.webContents.send('terminal:exit', { id: msg.id, code: msg.code });
-        }
-      }
-    });
-    this._ptyWorker.on('error', (e) => console.error('[PTY] worker 에러:', e.message));
-    this._ptyWorker.on('exit', (code) => { console.log('[PTY] worker 종료:', code); this._ptyWorker = null; });
-    this._ptyWorker.stderr?.on('data', (d) => console.error('[PTY] worker stderr:', d.toString()));
   }
 
   startPython() {
@@ -62,8 +19,8 @@ class ProcessManager {
       env: { ...process.env, PYTHONUNBUFFERED: '1' },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
-    this._pythonProcess.stdout.on('data', (data) => console.log(`[dev:python] ${data.toString().trim()}`));
-    this._pythonProcess.stderr.on('data', (data) => console.error(`[dev:python] ${data.toString().trim()}`));
+    this._pythonProcess.stdout.on('data', (d) => console.log(`[dev:python] ${d.toString().trim()}`));
+    this._pythonProcess.stderr.on('data', (d) => console.error(`[dev:python] ${d.toString().trim()}`));
     this._pythonProcess.on('exit', (code) => { console.log(`[ProcessManager] Python exited with code ${code}`); this._pythonProcess = null; });
   }
 
@@ -72,49 +29,79 @@ class ProcessManager {
   }
 
   createTerminal(id, mainWindow) {
-    this._mainWindow = mainWindow;
     try {
-      this._ensurePtyWorker();
-      return new Promise((resolve) => {
-        this._pendingCreates.set(id, (result) => {
-          if (result.success) this._terminals.set(id, true);
-          resolve(result);
-        });
-        this._ptyWorker.send({
-          type: 'create', id,
-          shell: process.env.SHELL || '/bin/zsh',
-          cwd: process.env.HOME || process.cwd(),
+      const shell = process.platform === 'win32' ? 'powershell.exe' : (process.env.SHELL || '/bin/bash');
+
+      if (pty) {
+        // node-pty — 진짜 PTY
+        const term = pty.spawn(shell, [], {
+          name: 'xterm-256color',
           cols: 120, rows: 30,
+          cwd: process.env.HOME || process.cwd(),
+          env: { ...process.env, TERM: 'xterm-256color' },
         });
-        // 5초 타임아웃
-        setTimeout(() => {
-          if (this._pendingCreates.has(id)) {
-            this._pendingCreates.delete(id);
-            resolve({ success: false, error: 'PTY 생성 타임아웃' });
+        this._terminals.set(id, { type: 'pty', proc: term });
+        term.onData((data) => {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('terminal:data', { id, data });
           }
-        }, 5000);
+        });
+        term.onExit(({ exitCode }) => {
+          this._terminals.delete(id);
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('terminal:exit', { id, code: exitCode });
+          }
+        });
+        console.log(`[PTY] node-pty 터미널 생성: ${shell} (pid: ${term.pid})`);
+        return { success: true, id };
+      }
+
+      // fallback: child_process.spawn (echo 없음, 기본 동작)
+      console.log(`[PTY] node-pty 없음, spawn fallback: ${shell}`);
+      const proc = spawn(shell, [], {
+        cwd: process.env.HOME || process.cwd(),
+        env: { ...process.env, TERM: 'dumb' },
+        stdio: ['pipe', 'pipe', 'pipe'],
       });
+      this._terminals.set(id, { type: 'spawn', proc });
+      proc.stdout.on('data', (d) => {
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('terminal:data', { id, data: d.toString() });
+      });
+      proc.stderr.on('data', (d) => {
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('terminal:data', { id, data: d.toString() });
+      });
+      proc.on('exit', (code) => {
+        this._terminals.delete(id);
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('terminal:exit', { id, code });
+      });
+      return { success: true, id };
     } catch (e) {
+      console.error(`[PTY] 터미널 생성 실패:`, e.message);
       return { success: false, error: e.message };
     }
   }
 
   writeTerminal(id, data) {
-    if (this._ptyWorker && this._terminals.has(id)) {
-      this._ptyWorker.send({ type: 'write', id, data });
-    }
+    const entry = this._terminals.get(id);
+    if (!entry) return;
+    if (entry.type === 'pty') entry.proc.write(data);
+    else if (entry.proc.stdin?.writable) entry.proc.stdin.write(data);
   }
 
   killTerminal(id) {
-    if (this._ptyWorker && this._terminals.has(id)) {
-      this._ptyWorker.send({ type: 'kill', id });
-      this._terminals.delete(id);
-    }
+    const entry = this._terminals.get(id);
+    if (!entry) return;
+    if (entry.type === 'pty') entry.proc.kill();
+    else entry.proc.kill('SIGTERM');
+    this._terminals.delete(id);
   }
 
   stopAll() {
     this.stopPython();
-    if (this._ptyWorker) { this._ptyWorker.kill(); this._ptyWorker = null; }
+    for (const [, entry] of this._terminals) {
+      if (entry.type === 'pty') entry.proc.kill();
+      else entry.proc.kill('SIGTERM');
+    }
     this._terminals.clear();
   }
 }
