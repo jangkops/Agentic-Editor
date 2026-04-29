@@ -2185,7 +2185,11 @@ async function renderTerminalContent() {
   if (term._xterm) {
     c.innerHTML = '';
     c.appendChild(term._xtermContainer);
-    setTimeout(() => { try { term._fitAddon?.fit(); term._xterm?.focus(); } catch {} }, 50);
+    setTimeout(() => {
+      try { term._fitAddon?.fit(); } catch {}
+      const ta = term._xtermContainer?.querySelector('.xterm-helper-textarea');
+      if (ta) ta.focus(); else term._xterm?.focus();
+    }, 50);
     return;
   }
 
@@ -2253,9 +2257,14 @@ async function renderTerminalContent() {
 
   xt.open(container);
   if (fitAddon) setTimeout(() => { try { fitAddon.fit(); } catch {} }, 100);
-  // 포커스 — 클릭 시에도 포커스
-  setTimeout(() => xt.focus(), 200);
-  container.addEventListener('click', () => xt.focus());
+  // 포커스 — xterm-helper-textarea에 직접 포커스
+  const focusXterm = () => {
+    const ta = container.querySelector('.xterm-helper-textarea');
+    if (ta) ta.focus();
+    else xt.focus();
+  };
+  setTimeout(focusXterm, 300);
+  container.addEventListener('click', focusXterm);
 
   // 입력을 Electron PTY로 전달
   xt.onData((data) => {
