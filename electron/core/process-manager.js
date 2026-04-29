@@ -46,16 +46,30 @@ class ProcessManager {
   createTerminal(id, mainWindow) {
     try {
       const shell = process.platform === 'win32' ? 'powershell.exe' : process.env.SHELL || '/bin/bash';
+      console.log(`[PTY] shell=${shell}, HOME=${process.env.HOME}, platform=${process.platform}`);
 
       if (pty) {
-        // node-pty — 진짜 PTY (echo, 색상, interactive mode 지원)
-        const term = pty.spawn(shell, [], {
-          name: 'xterm-256color',
-          cols: 120,
-          rows: 30,
-          cwd: process.env.HOME || process.cwd(),
-          env: { ...process.env, TERM: 'xterm-256color' },
-        });
+        // node-pty — 진짜 PTY
+        const shells = [shell, '/bin/zsh', '/bin/bash', '/bin/sh'];
+        let term = null;
+        let usedShell = '';
+        for (const sh of shells) {
+          try {
+            term = pty.spawn(sh, [], {
+              name: 'xterm-256color',
+              cols: 120,
+              rows: 30,
+              cwd: process.env.HOME || process.cwd(),
+              env: { ...process.env, TERM: 'xterm-256color' },
+            });
+            usedShell = sh;
+            console.log(`[PTY] spawn 성공: ${sh}`);
+            break;
+          } catch (e) {
+            console.log(`[PTY] spawn 실패 (${sh}): ${e.message}`);
+          }
+        }
+        if (!term) throw new Error('모든 셸 spawn 실패');
 
         this._terminals.set(id, { type: 'pty', term });
 
