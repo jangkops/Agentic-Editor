@@ -89,23 +89,13 @@ class ProcessManager {
         return { success: true, id };
       }
 
-      // macOS: script 명령으로 PTY 에뮬레이션 (interactive shell + echo)
-      const isLinux = process.platform === 'linux';
-      let proc;
-      if (process.platform === 'darwin') {
-        proc = spawn('script', ['-q', '/dev/null', shell, '-il'], {
-          cwd: process.env.HOME || process.cwd(),
-          env: { ...process.env, TERM: 'xterm-256color' },
-          stdio: ['pipe', 'pipe', 'pipe'],
-        });
-      } else {
-        proc = spawn(shell, ['-il'], {
-          cwd: process.env.HOME || process.cwd(),
-          env: { ...process.env, TERM: 'xterm-256color' },
-          stdio: ['pipe', 'pipe', 'pipe'],
-        });
-      }
-      console.log(`[PTY] spawn 성공: script + ${shell} -il (pid: ${proc.pid})`);
+      // child_process.spawn — pipe 모드 (echo는 xterm에서 처리)
+      const proc = spawn(shell, [], {
+        cwd: process.env.HOME || process.cwd(),
+        env: { ...process.env, TERM: 'dumb' },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      console.log(`[PTY] spawn 성공: ${shell} (pid: ${proc.pid})`);
 
       this._terminals.set(id, { type: 'spawn', term: proc });
 

@@ -2273,13 +2273,40 @@ async function renderTerminalContent() {
   setTimeout(focusXterm, 300);
   container.addEventListener('click', focusXterm);
 
-  // 입력을 Electron PTY로 전달
+  // 입력 처리 — pipe 모드에서는 로컬 echo + Enter 시 PTY 전송
+  let _cmdBuffer = '';
   xt.onData((data) => {
-    if (window.electronAPI?.terminalWrite) window.electronAPI.terminalWrite(term.id, data);
+    if (data === '\r' || data === '\n') {
+      // Enter — 명령을 PTY에 전송
+      xt.write('\r\n');
+      if (window.electronAPI?.terminalWrite) window.electronAPI.terminalWrite(term.id, _cmdBuffer + '\n');
+      _cmdBuffer = '';
+    } else if (data === '\x7f' || data === '\b') {
+      // Backspace
+      if (_cmdBuffer.length > 0) {
+        _cmdBuffer = _cmdBuffer.slice(0, -1);
+        xt.write('\b \b');
+      }
+    } else if (data === '\x03') {
+      // Ctrl+C
+      xt.write('^C\r\n');
+      if (window.electronAPI?.terminalWrite) window.electronAPI.terminalWrite(term.id, '\x03');
+      _cmdBuffer = '';
+    } else if (data >= ' ') {
+      // 일반 문자 — 로컬 echo
+      _cmdBuffer += data;
+      xt.write(data);
+    }
   });
 
-  // 기존 출력 복원
-  if (term.output) xt.write(term.output);
+  // 기존 출력 복원 또는 초기 프롬프트
+  if (term.output) {
+    xt.write(term.output);
+  } else {
+    // 초기 프롬프트 표시
+    const user = process.env?.USER || 'user';
+    xt.write(`\x1b[32m${user}\x1b[0m:\x1b[34m~\x1b[0m$ `);
+  }
 
   term._xterm = xt;
   term._fitAddon = fitAddon;
@@ -2308,10 +2335,17 @@ function setupTerminalIPC() {
     window.electronAPI.onTerminalData(data => {
       const term = state.terminals.find(t => t.id === data.id);
       if (term) {
-        // OOM 방지: output 버퍼를 최대 100KB로 제한 (xterm.js가 자체 scrollback 관리)
         if (term.output.length > 100000) term.output = term.output.slice(-50000);
         term.output += data.data;
-        if (term._xterm) term._xterm.write(data.data);
+        if (term._xterm) {
+          term._xterm.write(data.data);
+          // 출력 후 프롬프트 표시
+          if (data.data.endsWith('\n') || data.data.includes('\n')) {
+            setTimeout(() => {
+              term._xterm.write(`\x1b[32m$\x1b[0m `);
+            }, 50);
+          }
+        }
       }
     });
   }
