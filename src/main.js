@@ -2135,18 +2135,18 @@ function addTerminal() {
   state.terminals.push({ id, output: '' });
   state.activeTerminalIdx = state.terminals.length - 1;
   if (window.electronAPI?.terminalCreate) {
-    window.electronAPI.terminalCreate(id);
-    // 프로젝트 폴더로 이동 + 프롬프트에 정보 표시
-    setTimeout(() => {
-      if (window.electronAPI?.terminalWrite) {
-        const profile = state.settings?.awsProfile || '';
-        let initCmd = '';
-        if (profile) initCmd += `export AWS_PROFILE=${profile} && `;
-        if (state.folderPath) initCmd += `cd "${state.folderPath}" && `;
-        initCmd += 'echo "$(whoami)@$(hostname -I 2>/dev/null | awk \'{print $1}\' || hostname):$(pwd)"';
-        window.electronAPI.terminalWrite(id, initCmd + '\n');
+    window.electronAPI.terminalCreate(id).then((result) => {
+      if (result?.success) {
+        // PTY 준비 후 초기 명령 전송 (2초 대기 — 셸 초기화 완료 후)
+        setTimeout(() => {
+          if (window.electronAPI?.terminalWrite) {
+            const profile = state.settings?.awsProfile || '';
+            if (profile) window.electronAPI.terminalWrite(id, `export AWS_PROFILE=${profile}\n`);
+            if (state.folderPath) window.electronAPI.terminalWrite(id, `cd "${state.folderPath}"\n`);
+          }
+        }, 2000);
       }
-    }, 500);
+    });
   }
   renderTerminalTabs(); renderTerminalContent();
 }

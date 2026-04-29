@@ -13,9 +13,22 @@ class ProcessManager {
   _ensurePtyWorker() {
     if (this._ptyWorker && !this._ptyWorker.killed) return;
     const workerPath = path.join(__dirname, 'pty-worker.js');
+    // 시스템 Node.js 경로 자동 감지
+    const fs = require('fs');
+    const nodePaths = [
+      process.env.NODE_PATH_SYSTEM,
+      '/opt/homebrew/bin/node',
+      '/usr/local/bin/node',
+      '/usr/bin/node',
+    ].filter(Boolean);
+    let nodePath = nodePaths.find(p => { try { return fs.existsSync(p); } catch { return false; } });
+    if (!nodePath) {
+      try { nodePath = require('child_process').execSync('which node', { encoding: 'utf-8' }).trim(); } catch { nodePath = 'node'; }
+    }
+    console.log(`[PTY] worker 시작: node=${nodePath}`);
     // 시스템 Node.js로 fork (Electron Node가 아닌)
     this._ptyWorker = fork(workerPath, [], {
-      execPath: '/opt/homebrew/bin/node',
+      execPath: nodePath,
       stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
     });
     this._ptyWorker.on('message', (msg) => {
