@@ -2275,7 +2275,6 @@ async function renderTerminalContent() {
 
   // 입력을 Electron PTY로 전달
   xt.onData((data) => {
-    console.log('[Terminal] onData:', JSON.stringify(data), 'terminalWrite:', !!window.electronAPI?.terminalWrite, 'id:', term.id);
     if (window.electronAPI?.terminalWrite) window.electronAPI.terminalWrite(term.id, data);
   });
 

@@ -1,5 +1,7 @@
 const { spawn } = require('child_process');
 const path = require('path');
+let pty;
+try { pty = require('node-pty'); } catch { pty = null; }
 
 class ProcessManager {
   constructor() {
@@ -43,28 +45,58 @@ class ProcessManager {
   // Terminal PTY management
   createTerminal(id, mainWindow) {
     try {
-      const shell = process.platform === 'win32' ? 'cmd.exe' : process.env.SHELL || '/bin/bash';
-      const pty = spawn(shell, [], {
+      const shell = process.platform === 'win32' ? 'powershell.exe' : process.env.SHELL || '/bin/bash';
+
+      if (pty) {
+        // node-pty — 진짜 PTY (echo, 색상, interactive mode 지원)
+        const term = pty.spawn(shell, [], {
+          name: 'xterm-256color',
+          cols: 120,
+          rows: 30,
+          cwd: process.env.HOME || process.cwd(),
+          env: { ...process.env, TERM: 'xterm-256color' },
+        });
+
+        this._terminals.set(id, { type: 'pty', term });
+
+        term.onData((data) => {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('terminal:data', { id, data });
+          }
+        });
+
+        term.onExit(({ exitCode }) => {
+          this._terminals.delete(id);
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('terminal:exit', { id, code: exitCode });
+          }
+        });
+
+        return { success: true, id };
+      }
+
+      // fallback: child_process (echo 안 됨)
+      const proc = spawn(shell, [], {
         cwd: process.env.HOME || process.cwd(),
         env: { ...process.env, TERM: 'xterm-256color' },
         stdio: ['pipe', 'pipe', 'pipe'],
       });
 
-      this._terminals.set(id, pty);
+      this._terminals.set(id, { type: 'spawn', term: proc });
 
-      pty.stdout.on('data', (data) => {
+      proc.stdout.on('data', (data) => {
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('terminal:data', { id, data: data.toString() });
         }
       });
 
-      pty.stderr.on('data', (data) => {
+      proc.stderr.on('data', (data) => {
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('terminal:data', { id, data: data.toString() });
         }
       });
 
-      pty.on('exit', (code) => {
+      proc.on('exit', (code) => {
         this._terminals.delete(id);
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('terminal:exit', { id, code });
@@ -78,24 +110,31 @@ class ProcessManager {
   }
 
   writeTerminal(id, data) {
-    const pty = this._terminals.get(id);
-    if (pty && pty.stdin.writable) {
-      pty.stdin.write(data);
+    const entry = this._terminals.get(id);
+    if (!entry) return;
+    if (entry.type === 'pty') {
+      entry.term.write(data);
+    } else if (entry.term.stdin?.writable) {
+      entry.term.stdin.write(data);
     }
   }
 
   killTerminal(id) {
-    const pty = this._terminals.get(id);
-    if (pty) {
-      pty.kill('SIGTERM');
-      this._terminals.delete(id);
+    const entry = this._terminals.get(id);
+    if (!entry) return;
+    if (entry.type === 'pty') {
+      entry.term.kill();
+    } else {
+      entry.term.kill('SIGTERM');
     }
+    this._terminals.delete(id);
   }
 
   stopAll() {
     this.stopPython();
-    for (const [id, pty] of this._terminals) {
-      pty.kill('SIGTERM');
+    for (const [id, entry] of this._terminals) {
+      if (entry.type === 'pty') entry.term.kill();
+      else entry.term.kill('SIGTERM');
     }
     this._terminals.clear();
   }
