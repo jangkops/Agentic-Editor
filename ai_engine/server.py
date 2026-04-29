@@ -179,7 +179,7 @@ def _is_code_related(prompt: str) -> bool:
     """프롬프트가 코드/프로젝트 관련인지 판단."""
     p = prompt.lower().strip()
     # 코드 관련 키워드
-    code_keywords = [
+    code_keySwords = [
         'code', 'function', 'class', 'import', 'error', 'bug', 'fix',
         'implement', 'refactor', 'test', 'deploy', 'build', 'compile',
         '코드', '함수', '클래스', '에러', '버그', '수정', '구현', '리팩토링',
@@ -530,7 +530,7 @@ async def run_agent_with_tools(request: Request):
 
     async def agent_stream():
         nonlocal messages
-        max_turns = 5
+        max_turns = 10
 
         for turn in range(max_turns):
             print(f"[Agent] turn={turn}, realtime stream + toolConfig")
@@ -592,6 +592,11 @@ async def run_agent_with_tools(request: Request):
             messages.append({"role": "assistant", "content": content_blocks})
 
             if not tool_use_blocks:
+                # max_tokens로 끊긴 경우 → 이어서 생성
+                if stop_reason == "max_tokens" and turn < max_turns - 1:
+                    print(f"[Agent] max_tokens 도달 — 이어서 생성 (turn {turn+1})")
+                    messages.append({"role": "user", "content": [{"text": "계속 이어서 작성해주세요."}]})
+                    continue
                 break
 
             # 도구 실행
