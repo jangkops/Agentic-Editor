@@ -2178,96 +2178,54 @@ function renderTerminalTabs() {
 function renderTerminalContent() {
   const c = document.getElementById('terminal-content'); if (!c) return;
   const term = state.terminals[state.activeTerminalIdx]; if (!term) return;
-
-  // xterm.js가 이미 초기화되어 있으면 표시만 전환
-  if (term._xterm) {
-    c.innerHTML = '';
-    c.appendChild(term._xtermContainer);
-    setTimeout(() => { try { term._fitAddon?.fit(); } catch {} }, 50);
-    return;
-  }
-
-  // xterm.js 로드 확인
-  if (!window.Terminal) {
-    // CDN에서 로드
-    const loadScript = (src) => new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = rej; document.head.appendChild(s); });
-    const link = document.createElement('link'); link.rel = 'stylesheet'; link.href = 'https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css'; document.head.appendChild(link);
-    loadScript('https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js')
-      .then(() => loadScript('https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js'))
-      .then(() => renderTerminalContent())
-      .catch(() => { c.innerHTML = '<div style="padding:12px;color:var(--color-error)">xterm.js 로드 실패</div>'; });
-    c.innerHTML = '<div style="padding:12px;color:var(--color-text-muted)">터미널 로딩 중...</div>';
-    return;
-  }
-
-  // xterm.js 초기화
-  const container = document.createElement('div');
-  container.style.cssText = 'width:100%;height:100%;';
-  c.innerHTML = '';
-  c.appendChild(container);
-
-  const xt = new window.Terminal({
-    cursorBlink: true, cursorStyle: 'block', fontSize: 13,
-    fontFamily: "'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace",
-    theme: {
-      background: '#1e1e1e', foreground: '#cccccc', cursor: '#ffffff', cursorAccent: '#1e1e1e',
-      selectionBackground: 'rgba(255,255,255,0.2)',
-      black: '#1e1e1e', red: '#f44747', green: '#4ec9b0', yellow: '#ce9178',
-      blue: '#007acc', magenta: '#c586c0', cyan: '#4fc1ff', white: '#cccccc',
-      brightBlack: '#6a6a6a', brightRed: '#f44747', brightGreen: '#4ec9b0',
-      brightYellow: '#ce9178', brightBlue: '#1a8ad4', brightMagenta: '#c586c0',
-      brightCyan: '#4fc1ff', brightWhite: '#ffffff',
-    },
-    scrollback: 5000, allowTransparency: true,
+  // 통합 입출력: 출력 아래에 커서가 바로 이어지는 형태
+  c.innerHTML = `<div id="terminal-body" class="terminal-body">${esc(term.output)}<span id="terminal-cursor" class="terminal-cursor"></span></div>`;
+  const body = c.querySelector('#terminal-body');
+  // 클릭하면 포커스
+  body.setAttribute('tabindex', '0');
+  body.focus();
+  body.addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      const line = body.dataset.currentLine || '';
+      term.output += line + '\n';
+      body.dataset.currentLine = '';
+      if (window.electronAPI?.terminalWrite) window.electronAPI.terminalWrite(term.id, line + '\n');
+      renderTerminalOutput();
+    } else if (e.key === 'Backspace') {
+      const line = body.dataset.currentLine || '';
+      if (line.length > 0) {
+        body.dataset.currentLine = line.slice(0, -1);
+        renderTerminalOutput();
+      }
+    } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
+      body.dataset.currentLine = (body.dataset.currentLine || '') + e.key;
+      renderTerminalOutput();
+    }
+    e.preventDefault();
   });
-
-  let fitAddon = null;
-  if (window.FitAddon) {
-    fitAddon = new window.FitAddon.FitAddon();
-    xt.loadAddon(fitAddon);
-  }
-
-  xt.open(container);
-  if (fitAddon) setTimeout(() => { try { fitAddon.fit(); } catch {} }, 100);
-
-  // 입력을 Electron PTY로 전달
-  xt.onData((data) => {
-    if (window.electronAPI?.terminalWrite) window.electronAPI.terminalWrite(term.id, data);
-  });
-
-  // 기존 출력 복원
-  if (term.output) xt.write(term.output);
-
-  term._xterm = xt;
-  term._fitAddon = fitAddon;
-  term._xtermContainer = container;
-
-  // 리사이즈 감지
-  new ResizeObserver(() => { if (fitAddon) try { fitAddon.fit(); } catch {} }).observe(container);
+  body.dataset.currentLine = '';
+  body.scrollTop = body.scrollHeight;
 }
 
 function renderTerminalOutput() {
-  // xterm.js 사용 시 별도 렌더 불필요 — xterm이 자체 관리
+  const body = document.getElementById('terminal-body');
   const term = state.terminals[state.activeTerminalIdx];
-  if (term?._xterm) return;
+  if (!body || !term) return;
+  const line = body.dataset.currentLine || '';
+  body.innerHTML = esc(term.output) + esc(line) + '<span class="terminal-cursor"></span>';
+  body.scrollTop = body.scrollHeight;
 }
 
 function appendTerminalOutput(text) {
   const term = state.terminals[state.activeTerminalIdx];
-  if (term) {
-    term.output += text;
-    if (term._xterm) term._xterm.write(text);
-  }
+  if (term) { term.output += text; renderTerminalOutput(); }
 }
 
 function setupTerminalIPC() {
   if (window.electronAPI?.onTerminalData) {
     window.electronAPI.onTerminalData(data => {
       const term = state.terminals.find(t => t.id === data.id);
-      if (term) {
-        term.output += data.data;
-        if (term._xterm) term._xterm.write(data.data);
-      }
+      if (term) { term.output += data.data; if (term === state.terminals[state.activeTerminalIdx]) renderTerminalOutput(); }
     });
   }
 }
