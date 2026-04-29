@@ -179,7 +179,7 @@ def _is_code_related(prompt: str) -> bool:
     """프롬프트가 코드/프로젝트 관련인지 판단."""
     p = prompt.lower().strip()
     # 코드 관련 키워드
-    code_keySwords = [
+    code_keywords = [
         'code', 'function', 'class', 'import', 'error', 'bug', 'fix',
         'implement', 'refactor', 'test', 'deploy', 'build', 'compile',
         '코드', '함수', '클래스', '에러', '버그', '수정', '구현', '리팩토링',
