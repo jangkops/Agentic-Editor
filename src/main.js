@@ -785,6 +785,8 @@ async function sendMessage() {
     return;
   }
   input.value='';input.style.height='auto';
+  // IME 조합 중인 경우 강제 완료
+  input.blur(); input.focus();
   let content=text;
   if(state.attachedFiles.length){
     content=state.attachedFiles.map(f=>{
@@ -2265,6 +2267,8 @@ function setupTerminalIPC() {
     window.electronAPI.onTerminalData(data => {
       const term = state.terminals.find(t => t.id === data.id);
       if (term) {
+        // OOM 방지: output 버퍼를 최대 100KB로 제한 (xterm.js가 자체 scrollback 관리)
+        if (term.output.length > 100000) term.output = term.output.slice(-50000);
         term.output += data.data;
         if (term._xterm) term._xterm.write(data.data);
       }
