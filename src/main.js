@@ -2108,6 +2108,13 @@ function initTerminal() {
   document.getElementById('btn-terminal-toggle')?.addEventListener('click', () => {
     document.getElementById('terminal-area').classList.toggle('collapsed');
   });
+  // 터미널 영역 클릭 시 xterm에 포커스
+  document.getElementById('terminal-content')?.addEventListener('mousedown', () => {
+    setTimeout(() => {
+      const ta = document.querySelector('.xterm-helper-textarea');
+      if (ta) ta.focus();
+    }, 10);
+  });
   // 리사이즈 핸들
   const area = document.getElementById('terminal-area');
   const handle = document.getElementById('terminal-resize-handle');
