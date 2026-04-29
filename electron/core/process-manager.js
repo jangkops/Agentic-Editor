@@ -1,156 +1,107 @@
-const { spawn } = require('child_process');
+const { spawn, fork } = require('child_process');
 const path = require('path');
-let pty;
-try { pty = require('node-pty'); console.log('[PTY] node-pty 로드 성공'); } catch (e) { pty = null; console.log('[PTY] node-pty 사용 불가, spawn 사용:', e.message); }
 
 class ProcessManager {
   constructor() {
     this._pythonProcess = null;
     this._terminals = new Map();
+    this._ptyWorker = null;
+    this._mainWindow = null;
+    this._pendingCreates = new Map();
+  }
+
+  _ensurePtyWorker() {
+    if (this._ptyWorker && !this._ptyWorker.killed) return;
+    const workerPath = path.join(__dirname, 'pty-worker.js');
+    // 시스템 Node.js로 fork (Electron Node가 아닌)
+    this._ptyWorker = fork(workerPath, [], {
+      execPath: '/opt/homebrew/bin/node',
+      stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+    });
+    this._ptyWorker.on('message', (msg) => {
+      if (msg.type === 'ready') {
+        console.log('[PTY] worker 준비 완료');
+      } else if (msg.type === 'created') {
+        const resolve = this._pendingCreates.get(msg.id);
+        if (resolve) { resolve(msg); this._pendingCreates.delete(msg.id); }
+      } else if (msg.type === 'data') {
+        if (this._mainWindow && !this._mainWindow.isDestroyed()) {
+          this._mainWindow.webContents.send('terminal:data', { id: msg.id, data: msg.data });
+        }
+      } else if (msg.type === 'exit') {
+        this._terminals.delete(msg.id);
+        if (this._mainWindow && !this._mainWindow.isDestroyed()) {
+          this._mainWindow.webContents.send('terminal:exit', { id: msg.id, code: msg.code });
+        }
+      }
+    });
+    this._ptyWorker.on('error', (e) => console.error('[PTY] worker 에러:', e.message));
+    this._ptyWorker.on('exit', (code) => { console.log('[PTY] worker 종료:', code); this._ptyWorker = null; });
+    this._ptyWorker.stderr?.on('data', (d) => console.error('[PTY] worker stderr:', d.toString()));
   }
 
   startPython() {
     if (this._pythonProcess) return;
-
     const scriptPath = path.join(__dirname, '..', '..', 'scripts', 'start_server.py');
     console.log('[ProcessManager] Starting Python backend...');
-
     this._pythonProcess = spawn('python3', [scriptPath], {
       cwd: path.join(__dirname, '..', '..'),
       env: { ...process.env, PYTHONUNBUFFERED: '1' },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
-
-    this._pythonProcess.stdout.on('data', (data) => {
-      console.log(`[dev:python] ${data.toString().trim()}`);
-    });
-
-    this._pythonProcess.stderr.on('data', (data) => {
-      console.error(`[dev:python] ${data.toString().trim()}`);
-    });
-
-    this._pythonProcess.on('exit', (code) => {
-      console.log(`[ProcessManager] Python exited with code ${code}`);
-      this._pythonProcess = null;
-    });
+    this._pythonProcess.stdout.on('data', (data) => console.log(`[dev:python] ${data.toString().trim()}`));
+    this._pythonProcess.stderr.on('data', (data) => console.error(`[dev:python] ${data.toString().trim()}`));
+    this._pythonProcess.on('exit', (code) => { console.log(`[ProcessManager] Python exited with code ${code}`); this._pythonProcess = null; });
   }
 
   stopPython() {
-    if (this._pythonProcess) {
-      this._pythonProcess.kill('SIGTERM');
-      this._pythonProcess = null;
-    }
+    if (this._pythonProcess) { this._pythonProcess.kill('SIGTERM'); this._pythonProcess = null; }
   }
 
-  // Terminal PTY management
   createTerminal(id, mainWindow) {
+    this._mainWindow = mainWindow;
     try {
-      const shell = process.platform === 'win32' ? 'powershell.exe' : process.env.SHELL || '/bin/bash';
-      console.log(`[PTY] shell=${shell}, HOME=${process.env.HOME}, platform=${process.platform}`);
-
-      if (false && pty) {
-        // node-pty — 진짜 PTY
-        const shells = [shell, '/bin/zsh', '/bin/bash', '/bin/sh'];
-        let term = null;
-        let usedShell = '';
-        for (const sh of shells) {
-          try {
-            term = pty.spawn(sh, [], {
-              name: 'xterm-256color',
-              cols: 120,
-              rows: 30,
-              cwd: process.env.HOME || process.cwd(),
-              env: { ...process.env, TERM: 'xterm-256color' },
-            });
-            usedShell = sh;
-            console.log(`[PTY] spawn 성공: ${sh}`);
-            break;
-          } catch (e) {
-            console.log(`[PTY] spawn 실패 (${sh}): ${e.message}`);
-          }
-        }
-        if (!term) throw new Error('모든 셸 spawn 실패');
-
-        this._terminals.set(id, { type: 'pty', term });
-
-        term.onData((data) => {
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('terminal:data', { id, data });
-          }
+      this._ensurePtyWorker();
+      return new Promise((resolve) => {
+        this._pendingCreates.set(id, (result) => {
+          if (result.success) this._terminals.set(id, true);
+          resolve(result);
         });
-
-        term.onExit(({ exitCode }) => {
-          this._terminals.delete(id);
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('terminal:exit', { id, code: exitCode });
-          }
+        this._ptyWorker.send({
+          type: 'create', id,
+          shell: process.env.SHELL || '/bin/zsh',
+          cwd: process.env.HOME || process.cwd(),
+          cols: 120, rows: 30,
         });
-
-        return { success: true, id };
-      }
-
-      // child_process.spawn — pipe 모드 (echo는 xterm에서 처리)
-      const proc = spawn(shell, [], {
-        cwd: process.env.HOME || process.cwd(),
-        env: { ...process.env, TERM: 'dumb' },
-        stdio: ['pipe', 'pipe', 'pipe'],
+        // 5초 타임아웃
+        setTimeout(() => {
+          if (this._pendingCreates.has(id)) {
+            this._pendingCreates.delete(id);
+            resolve({ success: false, error: 'PTY 생성 타임아웃' });
+          }
+        }, 5000);
       });
-      console.log(`[PTY] spawn 성공: ${shell} (pid: ${proc.pid})`);
-
-      this._terminals.set(id, { type: 'spawn', term: proc });
-
-      proc.stdout.on('data', (data) => {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('terminal:data', { id, data: data.toString() });
-        }
-      });
-
-      proc.stderr.on('data', (data) => {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('terminal:data', { id, data: data.toString() });
-        }
-      });
-
-      proc.on('exit', (code) => {
-        this._terminals.delete(id);
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('terminal:exit', { id, code });
-        }
-      });
-
-      return { success: true, id };
     } catch (e) {
       return { success: false, error: e.message };
     }
   }
 
   writeTerminal(id, data) {
-    const entry = this._terminals.get(id);
-    if (!entry) return;
-    if (entry.type === 'pty') {
-      entry.term.write(data);
-    } else if (entry.term.stdin?.writable) {
-      entry.term.stdin.write(data);
+    if (this._ptyWorker && this._terminals.has(id)) {
+      this._ptyWorker.send({ type: 'write', id, data });
     }
   }
 
   killTerminal(id) {
-    const entry = this._terminals.get(id);
-    if (!entry) return;
-    if (entry.type === 'pty') {
-      entry.term.kill();
-    } else {
-      entry.term.kill('SIGTERM');
+    if (this._ptyWorker && this._terminals.has(id)) {
+      this._ptyWorker.send({ type: 'kill', id });
+      this._terminals.delete(id);
     }
-    this._terminals.delete(id);
   }
 
   stopAll() {
     this.stopPython();
-    for (const [id, entry] of this._terminals) {
-      if (entry.type === 'pty') entry.term.kill();
-      else entry.term.kill('SIGTERM');
-    }
+    if (this._ptyWorker) { this._ptyWorker.kill(); this._ptyWorker = null; }
     this._terminals.clear();
   }
 }
