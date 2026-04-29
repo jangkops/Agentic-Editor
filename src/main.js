@@ -2191,14 +2191,19 @@ function renderTerminalContent() {
 
   // xterm.js 로드 확인
   if (!window.Terminal) {
-    // CDN에서 로드
+    // 로컬 node_modules에서 로드 (CDN 불필요)
     const loadScript = (src) => new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = rej; document.head.appendChild(s); });
-    const link = document.createElement('link'); link.rel = 'stylesheet'; link.href = 'https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css'; document.head.appendChild(link);
-    loadScript('https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js')
-      .then(() => loadScript('https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js'))
+    if (!document.querySelector('link[href*="xterm.css"]')) {
+      const link = document.createElement('link'); link.rel = 'stylesheet'; link.href = '../node_modules/xterm/css/xterm.css'; document.head.appendChild(link);
+    }
+    loadScript('../node_modules/xterm/lib/xterm.js')
+      .then(() => loadScript('../node_modules/xterm-addon-fit/lib/xterm-addon-fit.js'))
       .then(() => renderTerminalContent())
-      .catch(() => { c.innerHTML = '<div style="padding:12px;color:var(--color-error)">xterm.js 로드 실패</div>'; });
-    c.innerHTML = '<div style="padding:12px;color:var(--color-text-muted)">터미널 로딩 중...</div>';
+      .catch((e) => {
+        console.error('[Terminal] xterm.js 로드 실패:', e);
+        c.innerHTML = '<div style="padding:12px;color:var(--color-error)">xterm.js 로드 실패 — npm install xterm xterm-addon-fit</div>';
+      });
+    c.innerHTML = '<div style="padding:12px;color:var(--color-text-muted)">터미널 초기화 중...</div>';
     return;
   }
 
