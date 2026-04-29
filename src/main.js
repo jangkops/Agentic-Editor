@@ -727,7 +727,7 @@ function renderChatTabs() {
 // ===== Chat + File Attach =====
 function initChat() {
   const input=document.getElementById('chat-input'),sendBtn=document.getElementById('send-btn');
-  input.onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMessage();}};
+  input.onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();sendMessage();}};
   input.oninput=()=>{input.style.height='auto';input.style.height=Math.min(input.scrollHeight,120)+'px';};
   sendBtn.onclick = () => {
     if (state.isStreaming) {
