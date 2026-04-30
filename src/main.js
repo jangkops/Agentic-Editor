@@ -1153,6 +1153,29 @@ async function runParallel(prompt) {
   const err = [...state.parallelResults.values()].filter(r => r.status === 'error').length;
   const parallelElapsed = Math.floor((Date.now() - (state._streamStartTime || Date.now())) / 1000);
   state.messages.push({ role:'system', content:`병렬 완료: ${done}개 성공, ${err}개 실패 (${fmtElapsed(parallelElapsed)}) — 가운데 패널에서 결과 확인` });
+
+  // === 병렬 결과를 assistant 메시지로 sessionMessages에 저장 (다음 턴 맥락 유지) ===
+  // 여러 모델 답변을 하나의 assistant 메시지로 합쳐서 push (user/assistant 교대 규칙 준수)
+  try {
+    const successResults = [];
+    for (const slot of state.parallelSlots) {
+      const r = state.parallelResults.get(slot.slotId);
+      if (r && r.status === 'done' && r.content) {
+        successResults.push({ modelName: r.modelName || slot.model?.name || slot.modelId, content: r.content });
+      }
+    }
+    if (successResults.length > 0) {
+      const combined = successResults.map((x, i) => `### [모델 ${i+1}] ${x.modelName}\n\n${x.content}`).join('\n\n---\n\n');
+      state.messages.push({
+        role: 'assistant',
+        content: combined,
+        isParallel: true,
+        parallelCount: successResults.length,
+        hiddenInChat: true  // 채팅 UI에는 표시 안 함 (가운데 패널에서 이미 보임), 맥락용으로만 저장
+      });
+    }
+  } catch (e) { console.error('[parallel] sessionMessages 저장 실패:', e); }
+
   saveParallelResults();
   renderMessages();
 }

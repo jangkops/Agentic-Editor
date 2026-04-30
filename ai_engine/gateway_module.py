@@ -84,7 +84,7 @@ class GatewayClient:
         else:
             self._try_us_prefix = False
             used_id = model_id
-        body = {"modelId": used_id, "messages": messages, "inferenceConfig": {"maxTokens": 8192}}
+        body = {"modelId": used_id, "messages": messages, "inferenceConfig": {"maxTokens": 32000}}
         if system_prompt:
             body["system"] = [{"text": system_prompt}]
         if tool_config:
@@ -237,7 +237,8 @@ class GatewayClient:
             yield {"type": "error", "error": str(e)}
             return
 
-        buf = ""
+        # UTF-8 멀티바이트 경계 안전: bytes 버퍼에 누적, 줄바꿈 단위로만 디코딩
+        buf_bytes = bytearray()
         while True:
             try:
                 chunk = await loop.run_in_executor(None, lambda: resp.read(4096))
@@ -245,10 +246,16 @@ class GatewayClient:
                 break
             if not chunk:
                 break
-            buf += chunk.decode('utf-8', errors='ignore')
-            while '\n' in buf:
-                line, buf = buf.split('\n', 1)
-                line = line.strip()
+            buf_bytes.extend(chunk)
+            while b'\n' in buf_bytes:
+                nl = buf_bytes.index(b'\n')
+                raw_line = bytes(buf_bytes[:nl])
+                del buf_bytes[:nl+1]
+                try:
+                    line = raw_line.decode('utf-8').strip()
+                except UnicodeDecodeError:
+                    # 완전한 줄임에도 디코드 실패 시에만 손실 허용
+                    line = raw_line.decode('utf-8', errors='replace').strip()
                 if not line or not line.startswith('data: '):
                     continue
                 try:
@@ -279,13 +286,17 @@ class GatewayClient:
                 req.add_header(k, v)
             try:
                 resp = urllib.request.urlopen(req, timeout=300)
-                chunks = []
+                # UTF-8 멀티바이트 경계 안전: bytes 전체 누적 후 한 번에 디코딩
+                raw_bytes = bytearray()
                 while True:
                     chunk = resp.read(4096)
                     if not chunk:
                         break
-                    chunks.append(chunk.decode('utf-8', errors='ignore'))
-                return "".join(chunks)
+                    raw_bytes.extend(chunk)
+                try:
+                    return bytes(raw_bytes).decode('utf-8')
+                except UnicodeDecodeError:
+                    return bytes(raw_bytes).decode('utf-8', errors='replace')
             except Exception as e:
                 return json.dumps({"error": str(e)})
 

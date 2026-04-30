@@ -472,19 +472,36 @@ async def run_agent_stream(request: Request):
     stream_model = model if model.startswith("us.") or model.startswith("eu.") else f"us.{model}"
 
     async def realtime_stream():
-        """Lambda SSE를 실시간으로 프론트엔드에 중계 — ChatGPT처럼 글자가 써지는 효과."""
+        """Lambda SSE를 실시간으로 프론트엔드에 중계 — ChatGPT처럼 글자가 써지는 효과.
+        max_tokens로 끊기면 자동으로 이어서 생성 (최대 5회)."""
+        nonlocal messages
+        max_continues = 5
         try:
-            async for evt in gw.stream_sse_realtime(model_id=stream_model, messages=messages, system_prompt=system_prompt):
-                evt_type = evt.get("type", "")
-                if evt_type == "content_block_delta":
-                    delta = evt.get("delta", {})
-                    if "text" in delta:
-                        yield f"data: {json.dumps({'text': delta['text']}, ensure_ascii=False)}\n\n"
-                elif evt_type == "settlement":
-                    rq = {"cost_krw": evt.get("remaining_quota_krw", 0)}
-                    _extract_quota({"remaining_quota": rq, "estimated_cost_krw": evt.get("estimated_cost_krw", 0)}, _quota_cache.get("user", ""))
-                elif evt_type == "error":
-                    yield f"data: {json.dumps({'error': evt.get('message', str(evt))}, ensure_ascii=False)}\n\n"
+            for cont in range(max_continues + 1):
+                text_parts = []
+                stop_reason = ""
+                async for evt in gw.stream_sse_realtime(model_id=stream_model, messages=messages, system_prompt=system_prompt):
+                    evt_type = evt.get("type", "")
+                    if evt_type == "content_block_delta":
+                        delta = evt.get("delta", {})
+                        if "text" in delta:
+                            text_parts.append(delta["text"])
+                            yield f"data: {json.dumps({'text': delta['text']}, ensure_ascii=False)}\n\n"
+                    elif evt_type in ("message_delta", "message_stop"):
+                        stop_reason = evt.get("delta", {}).get("stopReason", "") or evt.get("stop_reason", "") or evt.get("stopReason", "") or stop_reason
+                    elif evt_type == "settlement":
+                        rq = {"cost_krw": evt.get("remaining_quota_krw", 0)}
+                        _extract_quota({"remaining_quota": rq, "estimated_cost_krw": evt.get("estimated_cost_krw", 0)}, _quota_cache.get("user", ""))
+                    elif evt_type == "error":
+                        yield f"data: {json.dumps({'error': evt.get('message', str(evt))}, ensure_ascii=False)}\n\n"
+
+                # max_tokens로 끊김 → 이어서 생성
+                if stop_reason == "max_tokens" and cont < max_continues and text_parts:
+                    print(f"[Stream] max_tokens 도달 — 이어서 생성 ({cont+1}/{max_continues})")
+                    messages.append({"role": "assistant", "content": [{"text": "".join(text_parts)}]})
+                    messages.append({"role": "user", "content": [{"text": "계속 이어서 작성해주세요."}]})
+                    continue
+                break
         except Exception as e:
             yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
         yield "data: [DONE]\n\n"
@@ -650,7 +667,10 @@ async def run_agent_parallel(request: Request):
         except Exception as e:
             print(f"[RAG] 컨텍스트 빌드 실패 (무시): {e}")
 
-    messages = [{"role": "user", "content": [{"text": prompt}]}]
+    # 이전 대화 맥락(chatHistory) + 세션 메모리를 반영
+    chat_history = body.get("chatHistory", [])
+    session_id = body.get("sessionId", "default")
+    messages = _build_messages(chat_history, prompt, session_id)
 
     async def parallel_stream():
         async def call_model(slot):
