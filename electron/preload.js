@@ -52,6 +52,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Git
   gitLog: (dirPath, limit) => ipcRenderer.invoke('git:log', dirPath, limit),
   gitShow: (dirPath, hash) => ipcRenderer.invoke('git:show', dirPath, hash),
+  gitBranches: (dirPath) => ipcRenderer.invoke('git:branches', dirPath),
+  gitCheckout: (dirPath, branch, opts) => ipcRenderer.invoke('git:checkout', dirPath, branch, opts),
+  gitStatus: (dirPath) => ipcRenderer.invoke('git:status', dirPath),
 
   // Search
   projectSearch: (dirPath, query, options) => ipcRenderer.invoke('git:search', dirPath, query, options),

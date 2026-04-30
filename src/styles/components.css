@@ -110,6 +110,17 @@
   color:var(--color-text-secondary);background:var(--color-bg-primary);
   max-height:120px;overflow-y:auto;white-space:pre;
 }
+/* 도구 실행 중 커서 깜빡임 효과 */
+.tool-use-card.tool-streaming .tool-use-header .tool-badge{
+  background:var(--color-accent);animation:tool-pulse 1.2s ease-in-out infinite;
+}
+.tool-use-card.tool-streaming .tool-use-body::after{
+  content:'▊';color:var(--color-accent);animation:tool-blink 1s step-end infinite;
+}
+@keyframes tool-blink{50%{opacity:0}}
+@keyframes tool-pulse{0%,100%{opacity:1}50%{opacity:.6}}
+/* 분석 스텝 running 시 펄스 */
+.workflow-step.step-running .step-indicator.running{animation:tool-pulse 1.2s ease-in-out infinite;}
 
 /* ===== Usage Dashboard ===== */
 .usage-overlay{position:fixed;inset:0;background:var(--color-bg-overlay);display:flex;align-items:center;justify-content:center;z-index:1000;backdrop-filter:blur(4px);}
@@ -141,9 +152,46 @@
   font-size:10px;color:var(--color-text-muted);cursor:pointer;padding:1px 6px;
   border-radius:var(--radius-sm);transition:all var(--transition);opacity:0;
 }
-.skill-item:hover .sk-action{opacity:1;}
+.skill-item:hover .sk-action,
+.model-check-item:hover .sk-action,
+.model-card:hover .sk-action{opacity:1;}
 .sk-action:hover{background:var(--color-bg-hover);color:var(--color-text-primary);}
 .sk-action-del:hover{color:var(--color-error);background:var(--color-error-subtle);}
+
+/* ===== Icon-style close button — VS Code native look =====
+   병렬 모델 목록·카드의 제거(✕) 버튼.
+   평상시 은은하게, hover 시 섬세하게 강조 (채움 X → 아이콘 색만 변화) */
+.sk-action-icon{
+  opacity:1;
+  display:inline-flex;align-items:center;justify-content:center;
+  width:18px;height:18px;padding:0;
+  border:none;background:transparent;
+  border-radius:var(--radius-sm);
+  color:var(--color-text-muted);
+  flex-shrink:0;cursor:pointer;
+  transition:background-color var(--transition),color var(--transition);
+}
+.sk-action-icon .sk-icon{
+  display:block;transition:transform var(--transition);
+}
+.sk-action-icon:hover{
+  background:var(--color-bg-hover);
+  color:var(--color-error);
+}
+.sk-action-icon:active{
+  background:var(--color-bg-tertiary);
+}
+.sk-action-icon:active .sk-icon{
+  transform:scale(0.9);
+}
+.sk-action-icon:focus-visible{
+  outline:1px solid var(--color-accent);
+  outline-offset:1px;
+}
+
+/* 병렬 모델 컨텍스트에서는 항상 보이도록 (opacity:0 기본값 override) */
+.model-check-item .sk-action-icon,
+.model-card .sk-action-icon{opacity:1;}
 
 /* ===== Chat session tabs ===== */
 .chat-tab{
@@ -557,3 +605,28 @@
   animation:spin 600ms linear infinite;display:inline-block;
 }
 @keyframes spin{to{transform:rotate(360deg);}}
+
+/* ===== Step / Tool elapsed-time badges ===== */
+.step-timer {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--color-text-muted);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  line-height: 1.4;
+}
+.step-timer-running {
+  color: var(--color-success);
+  border-color: color-mix(in srgb, var(--color-success) 40%, transparent);
+  background: color-mix(in srgb, var(--color-success) 10%, transparent);
+  animation: step-timer-pulse 1.6s ease-in-out infinite;
+}
+@keyframes step-timer-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.65; }
+}

@@ -10,6 +10,8 @@ const EXT_COLORS = {
 let _projectStats = null;
 let _projectDeps = null;
 let _gitLog = [];
+let _gitBranches = { local: [], remote: [], current: null };
+let _gitSwitching = false;
 let _searchResults = [];
 let _activeView = 'editor';
 let _activeStatsTab = 'overview';
@@ -573,7 +575,13 @@ async function loadGitView() {
     return;
   }
   container.innerHTML = '<div style="text-align:center;padding:40px"><div class="spinner"></div><div style="margin-top:12px;color:var(--color-text-muted);font-size:12px">Git 로그 로딩 중...</div></div>';
-  _gitLog = await window.electronAPI?.gitLog(state.folderPath, 50) || [];
+  // 로그 + 브랜치 병렬 로드
+  const [log, branches] = await Promise.all([
+    window.electronAPI?.gitLog(state.folderPath, 50) || [],
+    window.electronAPI?.gitBranches?.(state.folderPath) || { local: [], remote: [], current: null }
+  ]);
+  _gitLog = log || [];
+  _gitBranches = branches || { local: [], remote: [], current: null };
   if (!_gitLog.length) {
     container.innerHTML = '<div style="text-align:center;padding:60px;color:var(--color-text-muted)">Git 저장소가 아니거나 커밋이 없습니다</div>';
     return;
@@ -583,9 +591,9 @@ async function loadGitView() {
 
 function renderGitView(container) {
   container.innerHTML = `
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
-      <div class="stats-section-title" style="margin:0">Git Graph <span style="font-size:11px;color:var(--color-text-muted);font-weight:400;margin-left:8px">${_gitLog.length} commits</span></div>
-      <button class="sm-btn" id="git-view-refresh" style="font-size:10px;padding:3px 8px">↻</button>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:8px">
+      <div class="stats-section-title" style="margin:0;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Git Graph <span style="font-size:11px;color:var(--color-text-muted);font-weight:400;margin-left:8px">${_gitLog.length} commits</span></div>
+      <button class="sm-btn" id="git-view-refresh" style="font-size:10px;padding:3px 8px;flex-shrink:0">↻</button>
     </div>
     <div class="git-commit-list" id="git-commit-list">
       ${_gitLog.map((c, i) => {
@@ -614,6 +622,64 @@ function renderGitView(container) {
     _gitLog = [];
     loadGitView();
   });
+}
+
+async function switchGitBranch(branchValue) {
+  if (_gitSwitching) return;
+  _gitSwitching = true;
+  const sel = document.getElementById('git-branch-selector');
+  const prevValue = _gitBranches.current || '';
+  try {
+    // 현재 브랜치면 무시
+    if (branchValue === _gitBranches.current) { _gitSwitching = false; return; }
+
+    // 1) dirty 체크 (백엔드: { clean, dirtyCount, entries })
+    const status = await window.electronAPI?.gitStatus?.(state.folderPath);
+    if (status && status.clean === false && status.dirtyCount > 0) {
+      const entries = (status.entries || []).slice(0, 10).join('\n');
+      const more = status.dirtyCount > 10 ? `\n... 외 ${status.dirtyCount - 10}개` : '';
+      const ok = confirm(`⚠️ 커밋되지 않은 변경사항이 ${status.dirtyCount}개 있습니다:\n\n${entries}${more}\n\n그래도 브랜치를 전환하시겠습니까?\n(변경사항이 유지되거나 충돌할 수 있습니다)`);
+      if (!ok) {
+        if (sel) sel.value = prevValue;
+        _gitSwitching = false;
+        return;
+      }
+    }
+
+    // 2) checkout (백엔드가 remote(origin/xxx) 자동 감지)
+    const res = await window.electronAPI?.gitCheckout?.(state.folderPath, branchValue);
+    if (res && res.ok) {
+      const finalName = res.current || branchValue.replace(/^[^/]+\//, '');
+      if (typeof addSystemMessage === 'function') {
+        addSystemMessage(`✅ 브랜치 전환: ${finalName}`);
+      }
+      _gitLog = [];
+      _gitSwitching = false;
+      await loadGitView();
+      // 좌측 소스 제어 패널도 갱신 (존재 시)
+      if (typeof renderSourceControlPanel === 'function') {
+        try { renderSourceControlPanel(); } catch {}
+      }
+      if (typeof loadCommitLog === 'function') {
+        try { loadCommitLog(); } catch {}
+      }
+      return;
+    } else {
+      const msg = (res && (res.error || res.output)) || '브랜치 전환 실패';
+      if (typeof addSystemMessage === 'function') {
+        addSystemMessage(`❌ 브랜치 전환 실패: ${msg}`);
+      } else {
+        alert('브랜치 전환 실패: ' + msg);
+      }
+      if (sel) sel.value = prevValue;
+    }
+  } catch (err) {
+    console.error('[switchGitBranch]', err);
+    if (sel) sel.value = prevValue;
+    alert('브랜치 전환 오류: ' + (err.message || err));
+  } finally {
+    _gitSwitching = false;
+  }
 }
 
 async function showGitDetail(hash) {
@@ -1287,3 +1353,6 @@ function showSearchInRightPanel() {
     });
   });
 }
+
+// 외부(main.js 소스제어 패널)에서도 호출 가능하도록 전역 노출
+window.switchGitBranch = switchGitBranch;

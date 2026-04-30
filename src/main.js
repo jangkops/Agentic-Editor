@@ -683,7 +683,7 @@ function renderParallelConfigGrid() {
   grid.innerHTML = '';
   state.parallelSlots.forEach(slot => {
     const card = document.createElement('div'); card.className = 'model-card fade-in';
-    card.innerHTML = `<div class="model-card-header"><span class="model-name">● ${slot.model.name}</span><span style="font-size:10px;color:var(--color-text-muted)">${slot.model.provider}</span><span class="sk-action sk-action-del" data-rm="${slot.slotId}">삭제</span></div>
+    card.innerHTML = `<div class="model-card-header"><span class="model-name">● ${slot.model.name}</span><span style="font-size:10px;color:var(--color-text-muted)">${slot.model.provider}</span><span class="sk-action sk-action-del sk-action-icon" data-rm="${slot.slotId}" title="제거"><svg class="sk-icon" width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2 2L8 8M8 2L2 8"/></svg></span></div>
       <div style="padding:10px 14px;display:flex;flex-direction:column;gap:6px"><label style="font-size:10px;color:var(--color-text-muted);font-weight:600">스킬</label>
         <select class="ss" style="width:100%;background:var(--color-bg-input);border:1px solid var(--color-border);border-radius:var(--radius-sm);color:var(--color-text-secondary);font-size:11px;padding:5px 8px;outline:none"><option value="">스킬 없음</option>${allSkills.map(s=>`<option value="${s.id}" ${slot.skillId===s.id?'selected':''}>${s.name}</option>`).join('')}</select>
         <label style="font-size:10px;color:var(--color-text-muted);font-weight:600">커스텀 Role</label>
@@ -702,7 +702,7 @@ function renderParallelSlotList() {
     const stText = r ? ({done:'완료',running:'실행 중',error:'실패',pending:'대기'}[r.status]||'') : '';
     const stColor = r ? ({done:'var(--color-success)',running:'var(--color-accent)',error:'var(--color-error)'}[r.status]||'') : '';
     const item = document.createElement('div'); item.className = 'model-check-item';
-    item.innerHTML = `<span class="dot" style="background:${stColor||'var(--color-accent)'}"></span><span style="flex:1">${slot.model.name}</span><span class="status" style="color:${stColor}">${stText}</span>${!state.isStreaming ? `<span class="sk-action sk-action-del" data-rm="${slot.slotId}" title="제거">x</span>` : ''}`;
+    item.innerHTML = `<span class="dot" style="background:${stColor||'var(--color-accent)'}"></span><span style="flex:1">${slot.model.name}</span><span class="status" style="color:${stColor}">${stText}</span>${!state.isStreaming ? `<span class="sk-action sk-action-del sk-action-icon" data-rm="${slot.slotId}" title="제거"><svg class="sk-icon" width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2 2L8 8M8 2L2 8"/></svg></span>` : ''}`;
     const rmBtn = item.querySelector('[data-rm]');
     if (rmBtn) rmBtn.onclick = () => removeParallelSlot(slot.slotId);
     list.appendChild(item);
@@ -893,23 +893,47 @@ function _apiBody(extra) {
       if (model) body.openFileContent = model.getValue().substring(0, 15000);
     } catch {}
   }
-  // 대화 히스토리 (최근 10개, 각 2000자 제한 — 토큰 절약)
-  //  - user 메시지: 항상 포함
-  //  - assistant 메시지: 오류가 아니고 content가 있으면 포함
-  //    · hiddenInChat(병렬 결과 합본)도 맥락 유지를 위해 포함
-  //    · isConsensus(합의 답변)도 포함 — 이전 턴 맥락 끊김 방지
-  //  - map 단계에서 { role, content }만 남겨 isParallel/hiddenInChat 등 비표준 필드 제거 (서버/LLM 호환)
+  // 대화 히스토리 (최근 10개) — 역할별 토큰 예산 차등 적용 [Fix #1]
+  //  - user 메시지: 6000자 (긴 질문/코드 맥락 유지)
+  //  - 병렬 합본 (hiddenInChat + isParallel): 800자로 축소 — 토큰 폭발 방지 핵심
+  //  - 합의/일반 assistant: 4000자
+  //  - 오류 메시지 제외
+  const _truncateMsg = (m) => {
+    const c = m.content || '';
+    if (m.role === 'user') return c.substring(0, 6000);
+    if (m.isParallel && m.hiddenInChat) {
+      // 병렬 합본은 첫 N모델 이름만 남긴 초압축 요약으로
+      const head = c.substring(0, 400);
+      return head + (c.length > 400 ? `\n\n…[병렬 합본 축약됨: ${m.parallelCount || '?'}개 모델, 원본 ${c.length}자]` : '');
+    }
+    if (m.isConsensus) return c.substring(0, 4000);
+    return c.substring(0, 4000);
+  };
   const history = (state.messages || [])
     .filter(m =>
       m.role === 'user' ||
       (m.role === 'assistant' && m.content && !m.content.includes('[오류:') && !m.content.includes('[합의 오류:'))
     )
     .slice(-10)
-    .map(m => ({ role: m.role, content: (m.content || '').substring(0, 2000) }));
+    .map(m => ({ role: m.role, content: _truncateMsg(m) }));
   if (history.length) body.chatHistory = history;
   // 세션 ID
   body.sessionId = chatSessions[activeSessionIdx]?.id || 'default';
   return body;
+}
+
+// [Fix #2] SSE idle timeout 헬퍼 — 서버가 응답 중 끊겨도 60초 내 감지
+//   reader.read()를 60초 내에 해결 못 하면 강제로 에러 발생 → catch에서 UI 알림
+async function _readWithIdleTimeout(reader, idleMs = 60000) {
+  let timer;
+  const timeoutP = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`스트림 ${Math.floor(idleMs/1000)}초 무응답 — 끊김 감지`)), idleMs);
+  });
+  try {
+    return await Promise.race([reader.read(), timeoutP]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // SSE 스트림 읽기 공통 함수
@@ -917,7 +941,7 @@ async function readSSEStream(resp, { onText, onTool, onSlot, onError, onRaw } = 
   const reader = resp.body.getReader(), dec = new TextDecoder();
   let buf = '';
   while (true) {
-    const { done, value } = await reader.read();
+    const { done, value } = await _readWithIdleTimeout(reader);
     if (done) break;
     buf += dec.decode(value, { stream: true });
     const events = buf.split('\n\n');
@@ -999,7 +1023,7 @@ async function runSimpleChat(prompt) {
     const reader = resp.body.getReader(), dec = new TextDecoder();
     let buf = '';
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await _readWithIdleTimeout(reader);
       if (done) break;
       buf += dec.decode(value, { stream:true });
       const events = buf.split('\n\n'); buf = events.pop() || '';
@@ -1061,10 +1085,11 @@ async function runAgentWorkflow(prompt) {
   const timeoutId = setTimeout(() => { if (state._abortController) state._abortController.abort(); }, 300000);
   addLiveLog('request', `에이전트: ${state.selectedModel.name}`, prompt.substring(0, 100));
   const wfId = 'wf-' + Date.now();
+  const _wfNow = Date.now();
   const wf = { id:wfId, steps:[
-    { name:'분석', status:'running', detail:'' },
-    { name:'도구 실행', status:'pending', detail:'' },
-    { name:'완료', status:'pending', detail:'' },
+    { name:'분석', status:'running', detail:'', startedAt:_wfNow, endedAt:null },
+    { name:'도구 실행', status:'pending', detail:'', startedAt:null, endedAt:null },
+    { name:'완료', status:'pending', detail:'', startedAt:null, endedAt:null },
   ]};
   const msg = { role:'assistant', content:'', workflow:wf, toolUses:[] };
   state.messages.push(msg);
@@ -1079,10 +1104,10 @@ async function runAgentWorkflow(prompt) {
     if (!resp.ok) throw new Error(`서버 응답 오류: ${resp.status}`);
     const reader = resp.body.getReader(), dec = new TextDecoder();
     let buf = '', toolCount = 0;
-    wf.steps[0].status = 'done'; wf.steps[0].detail = prompt.substring(0, 80);
+    wf.steps[0].status = 'done'; wf.steps[0].endedAt = Date.now(); wf.steps[0].detail = prompt.substring(0, 80); wf.steps[1].status = 'running'; wf.steps[1].startedAt = Date.now();
     renderMessages();
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await _readWithIdleTimeout(reader);
       if (done) break;
       buf += dec.decode(value, { stream:true });
       const events = buf.split('\n\n'); buf = events.pop() || '';
@@ -1097,12 +1122,23 @@ async function runAgentWorkflow(prompt) {
           else if (p.tool && p.status === 'running') {
             // 도구 실행 시작 — 채팅에 표시하지 않음
             toolCount++;
-            wf.steps[1].status = 'running';
+            if (wf.steps[1].status !== 'running') { wf.steps[1].status = 'running'; wf.steps[1].startedAt = Date.now(); }
             wf.steps[1].detail = `도구 실행 중... (${toolCount}번째)`;
+            // 개별 도구 카드에도 startedAt 기록
+            msg.toolUses.push({ name: p.tool, path: p.path || '', content: p.input ? JSON.stringify(p.input, null, 2) : '', status:'running', startedAt: Date.now(), endedAt:null });
           }
           else if (p.tool && p.status === 'done') {
             // 도구 실행 완료 — 채팅에 표시하지 않음
             wf.steps[1].detail = `도구 ${toolCount}개 완료`;
+            // 가장 최근 running 도구 카드를 done으로
+            for (let _i = msg.toolUses.length - 1; _i >= 0; _i--) {
+              if (msg.toolUses[_i].status === 'running') {
+                msg.toolUses[_i].status = 'done';
+                msg.toolUses[_i].endedAt = Date.now();
+                if (p.output != null) msg.toolUses[_i].output = typeof p.output === 'string' ? p.output : JSON.stringify(p.output, null, 2);
+                break;
+              }
+            }
           }
           else if (p.text) { msg.content += p.text; }
           else { msg.content += d; }
@@ -1110,9 +1146,11 @@ async function runAgentWorkflow(prompt) {
       }
       renderMessages();
     }
-    if (toolCount > 0) wf.steps[1].status = 'done';
-    else wf.steps[1].detail = '도구 사용 없음';
-    wf.steps[2].status = 'done'; wf.steps[2].detail = '완료';
+    if (toolCount > 0) { wf.steps[1].status = 'done'; wf.steps[1].endedAt = Date.now(); }
+    else { wf.steps[1].detail = '도구 사용 없음'; wf.steps[1].status = 'done'; wf.steps[1].startedAt = wf.steps[1].startedAt || Date.now(); wf.steps[1].endedAt = Date.now(); }
+    wf.steps[2].status = 'done'; wf.steps[2].startedAt = Date.now(); wf.steps[2].endedAt = Date.now(); wf.steps[2].detail = '완료';
+    // 혹시 아직 running인 도구가 있으면 종료 처리
+    for (const t of msg.toolUses) { if (t.status === 'running') { t.status = 'done'; t.endedAt = Date.now(); } }
     trackUsage(prompt.length, msg.content.length);
     addLiveLog('response', `에이전트 완료: ${state.selectedModel.name}`, `${msg.content.length}자`);
   } catch (e) {
@@ -1120,7 +1158,8 @@ async function runAgentWorkflow(prompt) {
     const errMsg = e.name === 'AbortError' ? '요청 시간 초과 또는 취소됨' : e.message;
     msg.content += `\n[오류: ${errMsg}]`;
     const r = wf.steps.find(s => s.status === 'running');
-    if (r) r.status = 'failed';
+    if (r) { r.status = 'failed'; r.endedAt = Date.now(); }
+    for (const t of msg.toolUses) { if (t.status === 'running') { t.status = 'failed'; t.endedAt = Date.now(); } }
     addLiveLog('error', `에이전트 실패: ${errMsg}`);
   }
   state.isStreaming = false;
@@ -1176,7 +1215,7 @@ async function runParallel(prompt) {
     const reader = resp.body.getReader(), dec = new TextDecoder();
     let buf = '';
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await _readWithIdleTimeout(reader);
       if (done) break;
       buf += dec.decode(value, { stream:true });
       const events = buf.split('\n\n'); buf = events.pop() || '';
@@ -1202,13 +1241,25 @@ async function runParallel(prompt) {
   } catch (e) {
     clearTimeout(timeoutId);
     const errMsg = e.name === 'AbortError' ? '요청 시간 초과 또는 취소됨' : e.message;
-    // 모든 running 슬롯을 error로 변경
+    // [Fix #3] 모든 running 슬롯을 error로 변경하되, 이미 부분 수신한 content는 보존
     for (const [sid, r] of state.parallelResults) {
       if (r.status === 'running' || r.status === 'pending') {
-        state.parallelResults.set(sid, { ...r, status:'error', content: errMsg });
+        const preserved = r.content || '';
+        state.parallelResults.set(sid, {
+          ...r,
+          status: 'error',
+          content: preserved ? `${preserved}\n\n---\n⚠️ 중단됨: ${errMsg}` : `⚠️ ${errMsg}`
+        });
       }
     }
-    state.messages.push({ role:'system', content:`병렬 실행 오류: ${errMsg}` });
+    // 재시도 가능한 system 메시지로 표시 (renderMessages에서 버튼 렌더)
+    state.messages.push({
+      role: 'system',
+      content: `병렬 실행 오류: ${errMsg}`,
+      _retryable: true,
+      _retryType: 'parallel',
+      _retryPrompt: prompt
+    });
     addLiveLog('error', `병렬 호출 실패: ${errMsg}`);
   }
 
@@ -1232,13 +1283,19 @@ async function runParallel(prompt) {
       }
     }
     if (successResults.length > 0) {
-      const combined = successResults.map((x, i) => `### [모델 ${i+1}] ${x.modelName}\n\n${x.content}`).join('\n\n---\n\n');
+      // [Fix #1] 합본은 각 모델 600자씩만 저장 → 다음 턴 토큰 폭발 방지
+      //  (원본은 state.parallelResults에 그대로 보존됨 — 가운데 패널용)
+      const combined = successResults.map((x, i) => {
+        const snippet = (x.content || '').substring(0, 600);
+        const ellipsis = (x.content || '').length > 600 ? '\n…[축약]' : '';
+        return `### [모델 ${i+1}] ${x.modelName}\n\n${snippet}${ellipsis}`;
+      }).join('\n\n---\n\n');
       state.messages.push({
         role: 'assistant',
         content: combined,
         isParallel: true,
         parallelCount: successResults.length,
-        hiddenInChat: true  // 채팅 UI에는 표시 안 함 (가운데 패널에서 이미 보임), 맥락용으로만 저장
+        hiddenInChat: true
       });
     }
   } catch (e) { console.error('[parallel] sessionMessages 저장 실패:', e); }
@@ -1463,7 +1520,7 @@ ${dr.map((r, i) => `### 모델 ${i + 1}: ${r.model}\n${r.content.substring(0, 30
     const reader = resp.body.getReader(), dec = new TextDecoder();
     let buf = '';
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await _readWithIdleTimeout(reader);
       if (done) break;
       buf += dec.decode(value, { stream:true });
       const events = buf.split('\n\n'); buf = events.pop() || '';
@@ -1482,9 +1539,25 @@ ${dr.map((r, i) => `### 모델 ${i + 1}: ${r.model}\n${r.content.substring(0, 30
       renderMessages();
     }
     addLiveLog('response', `합의 완료: ${consensusModelName}`, `${msg.content.length}자`);
+    // [Fix #3] 스트림은 끝났는데 응답이 비어있으면 (idle timeout 등) 경고 + 재시도 마킹
+    if (!msg.content || msg.content.trim().length < 10) {
+      msg.content = (msg.content || '') + `\n⚠️ 합의 모델 응답이 비어있습니다 (모델: ${consensusModelName}). 네트워크 또는 토큰 만료 가능성이 있습니다.`;
+      msg._retryable = true;
+      msg._retryType = 'consensus';
+      addLiveLog('error', `합의 응답 비어있음 — 재시도 권장`);
+    }
   } catch (e) {
-    msg.content += `\n[합의 오류: ${e.message}]`;
-    addLiveLog('error', `합의 실패: ${e.message}`);
+    // [Fix #3] 합의 실패 시 부분 결과 보존 + 재시도 메타 추가
+    const errMsg = e.message || String(e);
+    if (!msg.content || msg.content.trim().length === 0) {
+      msg.content = `⚠️ 합의 도출 실패: ${errMsg}`;
+    } else {
+      msg.content += `\n\n---\n⚠️ 합의 도중 중단됨: ${errMsg} (위는 부분 결과)`;
+    }
+    msg._retryable = true;
+    msg._retryType = 'consensus';
+    msg._retryError = errMsg;
+    addLiveLog('error', `합의 실패: ${errMsg}`);
   }
   msg._elapsed = Math.floor((Date.now() - (state._streamStartTime || Date.now())) / 1000);
   state.isStreaming = false;
@@ -1729,6 +1802,16 @@ function _inPlaceUpdateSideCards(assistantNode, msg){
             }
           }
         }
+        // step timer 갱신 (running → done 전환 시 즉시 반영)
+        const timerEl = stepNodes[i].querySelector('.step-timer');
+        if(timerEl && s.startedAt){
+          if(s.endedAt){
+            timerEl.textContent = fmtElapsedMs(s.endedAt - s.startedAt);
+            timerEl.classList.remove('step-timer-running');
+          } else {
+            timerEl.textContent = fmtElapsedMs(Date.now() - s.startedAt);
+          }
+        }
       }
     }
     if(msg.toolUses){
@@ -1746,6 +1829,9 @@ function _inPlaceUpdateSideCards(assistantNode, msg){
           body.textContent = txt;
           body.setAttribute('data-body-len', String(txt.length));
         }
+        // streaming 클래스 토글 — running이면 커서 깜빡임, done이면 제거
+        const isRunning = t.status === 'running' || (!t.endedAt && t.startedAt);
+        toolNodes[i].classList.toggle('tool-streaming', isRunning);
       }
     }
   } catch(_){}
@@ -1768,7 +1854,27 @@ function renderMessages(){
       addCopySupport(d, msg.content);
       c.appendChild(d);
     }else if(msg.role==='system'){
-      const d=document.createElement('div');d.className=`chat-msg system ${FI}`;d.textContent=msg.content;c.appendChild(d);
+      const d=document.createElement('div');d.className=`chat-msg system ${FI}`;
+      d.textContent=msg.content;
+      // [Fix #3] 재시도 가능한 에러 메시지에 재시도 버튼 추가
+      if (msg._retryable && !state.isStreaming) {
+        const retryBar = document.createElement('div');
+        retryBar.style.cssText = 'margin-top:8px;display:flex;gap:6px;justify-content:center';
+        const retryBtn = document.createElement('button');
+        retryBtn.className = 'sm-btn';
+        retryBtn.style.cssText = 'background:var(--color-accent);color:#fff;border:none;padding:5px 12px;border-radius:5px;font-size:11px;cursor:pointer';
+        retryBtn.textContent = '🔄 재시도';
+        retryBtn.addEventListener('click', () => {
+          if (msg._retryType === 'parallel' && msg._retryPrompt) {
+            runParallel(msg._retryPrompt);
+          } else if (msg._retryType === 'consensus') {
+            runConsensus();
+          }
+        });
+        retryBar.appendChild(retryBtn);
+        d.appendChild(retryBar);
+      }
+      c.appendChild(d);
     }else{
       if(msg.modelName){
         const d=document.createElement('div');
@@ -1827,6 +1933,22 @@ function renderMessages(){
             parallelBtn.addEventListener('click', () => keepParallelMode());
             actions.appendChild(lockBtn);
             actions.appendChild(parallelBtn);
+            // [Fix #3] 합의 응답이 불완전하면 재시도 버튼 추가
+            if (msg._retryable) {
+              const retryBtn = document.createElement('button');
+              retryBtn.className = 'sm-btn';
+              retryBtn.style.cssText = 'background:var(--color-warning,#f59e0b);color:#fff;border:none;padding:6px 12px;border-radius:6px;font-size:12px;cursor:pointer';
+              retryBtn.textContent = '🔄 합의 재시도';
+              retryBtn.title = msg._retryError ? `이전 오류: ${msg._retryError}` : '합의를 다시 생성합니다';
+              retryBtn.addEventListener('click', () => {
+                // 기존 불완전 메시지 제거 후 재실행
+                const idx = state.messages.indexOf(msg);
+                if (idx >= 0) state.messages.splice(idx, 1);
+                renderMessages();
+                runConsensus();
+              });
+              actions.appendChild(retryBtn);
+            }
             mc.appendChild(actions);
           }
         } else if (state.isStreaming) {
@@ -1836,7 +1958,7 @@ function renderMessages(){
         c.appendChild(d);
       } else {
         if(msg.workflow){const jc=document.createElement('div');jc.className=`async-job-card ${FI}`;jc.innerHTML=`<div class="job-header"><span class="job-title">에이전트 작업</span></div><div class="job-body">실행 중... 모델: ${state.selectedModel?.name||'?'} Job: ${msg.workflow.id}</div>`;c.appendChild(jc);renderWorkflow(c,msg.workflow);}
-        if(msg.toolUses?.length)for(const t of msg.toolUses)renderToolUseCard(c,t);
+        if(msg.toolUses?.length)renderToolSummary(c,msg.toolUses);
         if(msg.content){
           const d=document.createElement('div');d.className=`chat-msg assistant ${FI}`;
           const isError = msg.content.includes('[오류:') || msg.content.includes('[합의 오류:');
@@ -1963,8 +2085,55 @@ function addCopySupport(el, text) {
 
   mc.appendChild(bar);
 }
-function renderWorkflow(c,wf){for(const s of wf.steps){const d=document.createElement('div');const sc={done:'step-done',running:'step-running',failed:'step-failed'}[s.status]||'';d.className=`workflow-step ${sc} ${state.isStreaming?'':'fade-in'}`;const ic={done:'done',running:'running',failed:'failed'}[s.status]||'';const bc={done:'step-badge-done',running:'step-badge-running',failed:'step-badge-failed'}[s.status]||'';const bt={done:'완료',running:'진행 중',failed:'실패'}[s.status]||'';d.innerHTML=`<div class="workflow-step-header"><span class="step-indicator ${ic}"></span><span class="step-title">● ${s.name}</span>${bt?`<span class="step-badge ${bc}">${bt}</span>`:''}</div>${s.detail?`<div class="workflow-step-body">${esc(s.detail)}</div>`:''}`;c.appendChild(d);}}
-function renderToolUseCard(c,t){const card=document.createElement('div');card.className=`tool-use-card ${state.isStreaming?'':'fade-in'}`;card.innerHTML=`<div class="tool-use-header"><span class="tool-badge">도구</span><span class="tool-label">파일 쓰기: ${esc(t.path||t.name||'')}</span></div><div class="tool-use-body">${esc(t.content||t.diff||JSON.stringify(t,null,2))}</div>`;c.appendChild(card);}
+function renderWorkflow(c, wf) {
+  for (const s of wf.steps) {
+    const d = document.createElement('div');
+    const sc = { done:'step-done', running:'step-running', failed:'step-failed' }[s.status] || '';
+    d.className = `workflow-step ${sc} ${state.isStreaming ? '' : 'fade-in'}`;
+    const ic = { done:'done', running:'running', failed:'failed' }[s.status] || '';
+    const bc = { done:'step-badge-done', running:'step-badge-running', failed:'step-badge-failed' }[s.status] || '';
+    const bt = { done:'완료', running:'진행 중', failed:'실패' }[s.status] || '';
+    // 타이머 계산
+    let timerHtml = '';
+    if (s.startedAt) {
+      d.setAttribute('data-step-started', String(s.startedAt));
+      if (s.endedAt) {
+        d.setAttribute('data-step-ended', String(s.endedAt));
+        timerHtml = `<span class="step-timer" data-step-timer style="margin-left:8px;font-size:10px;color:var(--color-text-muted);font-variant-numeric:tabular-nums">${fmtElapsedMs(s.endedAt - s.startedAt)}</span>`;
+      } else {
+        // running — 실시간 갱신 대상
+        timerHtml = `<span class="step-timer step-timer-running" data-step-timer style="margin-left:8px;font-size:10px;color:var(--color-success);font-variant-numeric:tabular-nums">${fmtElapsedMs(Date.now() - s.startedAt)}</span>`;
+      }
+    }
+    d.innerHTML = `<div class="workflow-step-header"><span class="step-indicator ${ic}"></span><span class="step-title">● ${esc(s.name)}</span>${bt ? `<span class="step-badge ${bc}">${bt}</span>` : ''}${timerHtml}</div>${s.detail ? `<div class="workflow-step-body">${esc(s.detail)}</div>` : ''}`;
+    c.appendChild(d);
+  }
+  if (wf.steps.some(x => x.status === 'running')) _ensureStepTimer();
+}
+function renderToolUseCard(c, t) {
+  const card = document.createElement('div');
+  const isRunning = t.status === 'running' || (!t.endedAt && t.startedAt);
+  card.className = `tool-use-card ${isRunning ? 'tool-streaming' : ''} ${state.isStreaming ? '' : 'fade-in'}`;
+  const status = t.status || (t.endedAt ? 'done' : (t.startedAt ? 'running' : ''));
+  let timerHtml = '';
+  if (t.startedAt) {
+    card.setAttribute('data-step-started', String(t.startedAt));
+    if (t.endedAt) {
+      card.setAttribute('data-step-ended', String(t.endedAt));
+      timerHtml = `<span class="step-timer" data-step-timer style="margin-left:8px;font-size:10px;color:var(--color-text-muted);font-variant-numeric:tabular-nums">${fmtElapsedMs(t.endedAt - t.startedAt)}</span>`;
+    } else {
+      timerHtml = `<span class="step-timer step-timer-running" data-step-timer style="margin-left:8px;font-size:10px;color:var(--color-success);font-variant-numeric:tabular-nums">${fmtElapsedMs(Date.now() - t.startedAt)}</span>`;
+    }
+  }
+  const statusBadge = status === 'running' ? '<span class="step-badge step-badge-running" style="margin-left:6px">실행 중</span>'
+    : status === 'done' ? '<span class="step-badge step-badge-done" style="margin-left:6px">완료</span>'
+    : status === 'failed' ? '<span class="step-badge step-badge-failed" style="margin-left:6px">실패</span>' : '';
+  const label = t.path ? `파일: ${esc(t.path)}` : esc(t.name || '도구');
+  const bodyTxt = t.content || t.diff || (t.output ? String(t.output) : '') || '';
+  card.innerHTML = `<div class="tool-use-header"><span class="tool-badge">${esc(t.name || '도구')}</span><span class="tool-label">${label}</span>${statusBadge}${timerHtml}</div>${bodyTxt ? `<div class="tool-use-body">${esc(bodyTxt)}</div>` : ''}`;
+  c.appendChild(card);
+  if (status === 'running') _ensureStepTimer();
+}
 function fmtMd(t){
   let h=esc(t);
   // 코드 블록
@@ -1999,10 +2168,42 @@ function fmtMd(t){
   return h;
 }
 function fmtElapsed(secs) {
+  if (secs === 0) return '0s';
   if (!secs || secs < 1) return '';
   if (secs >= 3600) return `${Math.floor(secs/3600)}h ${Math.floor((secs%3600)/60)}m`;
   if (secs >= 60) return `${Math.floor(secs/60)}m ${secs%60}s`;
   return `${secs}s`;
+}
+// ms 기반 경과시간 — 소수점 1자리 (1초 미만은 0.3s 등으로)
+function fmtElapsedMs(ms) {
+  if (ms == null || ms < 0) return '';
+  const secs = ms / 1000;
+  if (secs < 1) return `${secs.toFixed(1)}s`;
+  if (secs < 60) return `${Math.floor(secs)}s`;
+  if (secs < 3600) return `${Math.floor(secs/60)}m ${Math.floor(secs%60)}s`;
+  return `${Math.floor(secs/3600)}h ${Math.floor((secs%3600)/60)}m`;
+}
+// 전역 step 타이머 — 1초마다 running step/tool의 [data-step-timer] 요소 갱신
+let _stepTimerInterval = null;
+function _ensureStepTimer() {
+  if (_stepTimerInterval) return;
+  _stepTimerInterval = setInterval(() => {
+    const nodes = document.querySelectorAll('[data-step-started]');
+    let hasRunning = false;
+    const now = Date.now();
+    nodes.forEach(n => {
+      if (n.getAttribute('data-step-ended')) return; // 종료된 노드는 스킵
+      const started = parseInt(n.getAttribute('data-step-started'), 10);
+      if (!started) return;
+      hasRunning = true;
+      const timerEl = n.querySelector('[data-step-timer]');
+      if (timerEl) timerEl.textContent = fmtElapsedMs(now - started);
+    });
+    if (!hasRunning && !state.isStreaming) {
+      clearInterval(_stepTimerInterval);
+      _stepTimerInterval = null;
+    }
+  }, 1000);
 }
 function esc(t){if(!t)return'';return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 
@@ -2993,9 +3194,21 @@ async function renderSourceControlPanel() {
       <div class="git-panel-section">
         <div class="git-panel-title">소스 제어</div>
         <div class="git-branch-bar">
-          <span class="git-branch-icon">⎇</span>
-          <span class="git-branch-name">${esc(branch)}</span>
-          <button class="sm-btn" id="git-refresh-btn" style="font-size:10px;padding:2px 6px">↻</button>
+          <div class="model-dropdown-wrapper scm-branch-wrapper">
+            <button type="button" id="scm-branch-btn" class="model-dropdown-btn scm-branch-btn" title="브랜치 전환">
+              <span class="scm-branch-btn-label"><span class="git-branch-icon">⎇</span> ${esc(branch)}</span>
+              <span class="model-dropdown-arrow">▾</span>
+            </button>
+            <div id="scm-branch-menu" class="model-dropdown-menu scm-branch-menu" style="display:none">
+              <div class="model-dropdown-search">
+                <input type="text" id="scm-branch-search" class="model-search-input" placeholder="브랜치 검색...">
+              </div>
+              <div id="scm-branch-list" class="model-dropdown-list scm-branch-list">
+                <div class="model-dropdown-empty" style="padding:10px 12px;font-size:11px;color:var(--color-text-muted)">불러오는 중...</div>
+              </div>
+            </div>
+          </div>
+          <button class="sm-btn" id="git-refresh-btn" style="font-size:10px;padding:2px 6px" title="새로고침">↻</button>
         </div>
       </div>
       <div class="git-panel-section">
@@ -3020,6 +3233,94 @@ async function renderSourceControlPanel() {
         <pre id="git-output-text" style="font-size:11px;color:var(--color-text-secondary);background:var(--color-bg-primary);padding:8px;border-radius:var(--radius-sm);max-height:150px;overflow-y:auto;white-space:pre-wrap;border:1px solid var(--color-border)"></pre>
       </div>
     </div>`;
+
+  // === 브랜치 드롭다운 (모델 드롭다운과 동일한 UI/UX) ===
+  (async () => {
+    const btn = panel.querySelector('#scm-branch-btn');
+    const menu = panel.querySelector('#scm-branch-menu');
+    const listEl = panel.querySelector('#scm-branch-list');
+    const searchEl = panel.querySelector('#scm-branch-search');
+    const labelEl = panel.querySelector('.scm-branch-btn-label');
+    if (!btn || !menu || !listEl || !searchEl) return;
+
+    let allBranches = { current: branch, local: [], remote: [] };
+
+    const renderList = (query = '') => {
+      const q = (query || '').trim().toLowerCase();
+      const cur = allBranches.current || branch;
+      const local = (allBranches.local || []).filter(b => !q || b.toLowerCase().includes(q));
+      const remote = (allBranches.remote || []).filter(b => !q || b.toLowerCase().includes(q));
+      let html = '';
+      if (local.length) {
+        html += '<div class="model-dropdown-group-title">로컬 브랜치</div>';
+        html += local.map(b => {
+          const sel = b === cur ? ' selected' : '';
+          const check = b === cur ? '<span style="margin-left:auto;color:var(--color-accent);font-weight:600">✓</span>' : '';
+          return `<div class="model-dropdown-item${sel}" data-branch="${esc(b)}"><span>${esc(b)}</span>${check}</div>`;
+        }).join('');
+      }
+      if (remote.length) {
+        html += '<div class="model-dropdown-group-title">원격 브랜치</div>';
+        html += remote.map(b => `<div class="model-dropdown-item" data-branch="${esc(b)}"><span>${esc(b)}</span></div>`).join('');
+      }
+      if (!html) html = '<div class="model-dropdown-empty" style="padding:10px 12px;font-size:11px;color:var(--color-text-muted)">브랜치 없음</div>';
+      listEl.innerHTML = html;
+      // 항목 클릭 → 브랜치 전환
+      listEl.querySelectorAll('.model-dropdown-item[data-branch]').forEach(item => {
+        item.addEventListener('click', async () => {
+          const target = item.dataset.branch;
+          if (!target) return;
+          closeMenu();
+          if (typeof window.switchGitBranch === 'function') {
+            await window.switchGitBranch(target);
+          }
+          renderSourceControlPanel();
+        });
+      });
+    };
+
+    const openMenu = () => {
+      menu.style.display = 'block';
+      btn.classList.add('open');
+      searchEl.value = '';
+      renderList('');
+      setTimeout(() => searchEl.focus(), 0);
+      document.addEventListener('mousedown', onDocDown, true);
+      document.addEventListener('keydown', onKey, true);
+    };
+    const closeMenu = () => {
+      menu.style.display = 'none';
+      btn.classList.remove('open');
+      document.removeEventListener('mousedown', onDocDown, true);
+      document.removeEventListener('keydown', onKey, true);
+    };
+    const onDocDown = (ev) => {
+      if (!menu.contains(ev.target) && !btn.contains(ev.target)) closeMenu();
+    };
+    const onKey = (ev) => { if (ev.key === 'Escape') closeMenu(); };
+
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      if (menu.style.display === 'none' || !menu.style.display) openMenu();
+      else closeMenu();
+    });
+    searchEl.addEventListener('input', () => renderList(searchEl.value));
+
+    // 비동기로 브랜치 목록 로드
+    if (window.electronAPI?.gitBranches) {
+      try {
+        const br = await window.electronAPI.gitBranches(state.folderPath);
+        if (br) {
+          allBranches = {
+            current: br.current || branch,
+            local: Array.isArray(br.local) ? br.local : [],
+            remote: Array.isArray(br.remote) ? br.remote : [],
+          };
+          if (labelEl) labelEl.innerHTML = `<span class="git-branch-icon">⎇</span> ${esc(allBranches.current)}`;
+        }
+      } catch (e) { console.warn('[SCM branches]', e); }
+    }
+  })();
 
   // Git 새로고침
   panel.querySelector('#git-refresh-btn')?.addEventListener('click', () => renderSourceControlPanel());

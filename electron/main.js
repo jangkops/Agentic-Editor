@@ -284,3 +284,80 @@ ipcMain.handle('git:search', async (_, dirPath, query, options) => {
     return matches;
   } catch { return []; }
 });
+
+// ===== Git Branch IPC =====
+ipcMain.handle('git:branches', async (_, dirPath) => {
+  const { execSync } = require('child_process');
+  if (!dirPath) return { current: null, local: [], remote: [], error: 'no_dir' };
+  try {
+    // 현재 브랜치 (detached HEAD면 HEAD 반환)
+    let current = null;
+    try {
+      current = execSync('git rev-parse --abbrev-ref HEAD', { cwd: dirPath, encoding: 'utf-8', timeout: 5000 }).trim();
+    } catch {}
+
+    // 로컬 브랜치
+    const localRaw = execSync('git branch --format="%(refname:short)"', { cwd: dirPath, encoding: 'utf-8', timeout: 5000 });
+    const local = localRaw.split('\n').map(s => s.trim()).filter(Boolean);
+
+    // 원격 브랜치 (HEAD 포인터 제외)
+    let remote = [];
+    try {
+      const remoteRaw = execSync('git branch -r --format="%(refname:short)"', { cwd: dirPath, encoding: 'utf-8', timeout: 5000 });
+      remote = remoteRaw.split('\n').map(s => s.trim()).filter(s => s && !s.includes('HEAD'));
+    } catch {}
+
+    return { current, local, remote };
+  } catch (e) {
+    return { current: null, local: [], remote: [], error: String(e.message || e) };
+  }
+});
+
+ipcMain.handle('git:status', async (_, dirPath) => {
+  const { execSync } = require('child_process');
+  if (!dirPath) return { clean: false, error: 'no_dir' };
+  try {
+    const out = execSync('git status --porcelain', { cwd: dirPath, encoding: 'utf-8', timeout: 5000 });
+    const lines = out.split('\n').filter(Boolean);
+    return { clean: lines.length === 0, dirtyCount: lines.length, entries: lines.slice(0, 50) };
+  } catch (e) {
+    return { clean: false, error: String(e.message || e) };
+  }
+});
+
+ipcMain.handle('git:checkout', async (_, dirPath, branch, options) => {
+  const { execSync } = require('child_process');
+  if (!dirPath || !branch) return { ok: false, error: 'invalid_args' };
+  try {
+    // 원격 브랜치(origin/xxx)인 경우 로컬 tracking 브랜치로 checkout
+    const isRemote = branch.includes('/') && !branch.startsWith('refs/heads/');
+    let cmd;
+    if (isRemote) {
+      // "origin/feature-x" -> local "feature-x"
+      const localName = branch.replace(/^[^/]+\//, '');
+      // 이미 로컬에 동일 이름이 있는지 확인
+      let hasLocal = false;
+      try {
+        execSync(`git rev-parse --verify --quiet "refs/heads/${localName}"`, { cwd: dirPath, encoding: 'utf-8', timeout: 3000 });
+        hasLocal = true;
+      } catch {}
+      if (hasLocal) {
+        cmd = `git checkout ${localName}`;
+      } else {
+        cmd = `git checkout -b ${localName} --track ${branch}`;
+      }
+    } else {
+      cmd = `git checkout ${branch}`;
+    }
+    const out = execSync(cmd + ' 2>&1', { cwd: dirPath, encoding: 'utf-8', timeout: 15000 });
+    // 전환 후 현재 브랜치 재조회
+    let current = null;
+    try {
+      current = execSync('git rev-parse --abbrev-ref HEAD', { cwd: dirPath, encoding: 'utf-8', timeout: 5000 }).trim();
+    } catch {}
+    return { ok: true, output: out, current };
+  } catch (e) {
+    const msg = String(e.stdout || e.stderr || e.message || e);
+    return { ok: false, error: msg };
+  }
+});
