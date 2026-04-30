@@ -223,8 +223,19 @@ class GatewayClient:
         signed_headers = dict(aws_req.headers)
 
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=30.0)) as client:
+            # read timeout 120s — Lambda 응답이 120초 이상 무응답이면 끊김 감지
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(300.0, connect=30.0, read=120.0)
+            ) as client:
                 async with client.stream("POST", url, content=body_bytes, headers=signed_headers) as resp:
+                    if resp.status_code != 200:
+                        body_text = ""
+                        async for chunk in resp.aiter_text():
+                            body_text += chunk
+                            if len(body_text) > 500:
+                                break
+                        yield {"type": "error", "message": f"Lambda HTTP {resp.status_code}: {body_text[:300]}"}
+                        return
                     buf = ""
                     async for chunk in resp.aiter_text():
                         buf += chunk
@@ -237,6 +248,12 @@ class GatewayClient:
                                 yield json.loads(line[6:])
                             except json.JSONDecodeError:
                                 continue
+        except httpx.ReadTimeout:
+            yield {"type": "error", "message": "Lambda 응답 타임아웃 (120초 무응답)"}
+        except httpx.ConnectTimeout:
+            yield {"type": "error", "message": "Lambda 연결 타임아웃"}
+        except httpx.RemoteProtocolError as e:
+            yield {"type": "error", "message": f"Lambda 연결 끊김: {e}"}
         except Exception as e:
             yield {"type": "error", "error": str(e)}
 

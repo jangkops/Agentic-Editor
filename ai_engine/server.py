@@ -4,6 +4,7 @@ import json
 import uuid
 import asyncio
 import subprocess
+import re
 from datetime import datetime
 
 from fastapi import FastAPI, Request
@@ -507,7 +508,15 @@ async def run_agent_stream(request: Request):
         yield "data: [DONE]\n\n"
         asyncio.create_task(_maybe_summarize(body.get("sessionId", "default"), body.get("chatHistory", []), gw))
 
-    return StreamingResponse(realtime_stream(), media_type="text/event-stream")
+    return StreamingResponse(
+        realtime_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @app.post("/api/agents/run-agent")
@@ -543,97 +552,155 @@ async def run_agent_with_tools(request: Request):
         except Exception as e:
             print(f"[Agent] RAG 실패 (무시): {e}")
 
-    messages = _build_messages(body.get("chatHistory", []), prompt, body.get("sessionId", "default"))
-
     async def agent_stream():
-        nonlocal messages
-        max_turns = 10
-
-        for turn in range(max_turns):
-            print(f"[Agent] turn={turn}, realtime stream + toolConfig")
-            text_parts = []
-            tool_use_blocks = []
-            current_tool = {}
-            stop_reason = ""
-
+        """에이전트 루프 — 최상위 try/finally 로 어떤 예외에도 [DONE] 송출 보장.
+        ERR_INCOMPLETE_CHUNKED_ENCODING 방지 핵심."""
+        done_sent = False
+        try:
+            # ── 메시지 구성 (실패해도 스트림은 이미 시작된 상태) ──
             try:
-                async for evt in gw.stream_sse_realtime(
-                    model_id=stream_model, messages=messages,
-                    system_prompt=system_prompt, tool_config=AGENT_TOOLS,
-                ):
-                    evt_type = evt.get("type", "")
-                    if evt_type == "content_block_delta":
-                        delta = evt.get("delta", {})
-                        if "text" in delta:
-                            text_parts.append(delta["text"])
-                            yield f"data: {json.dumps({'text': delta['text']}, ensure_ascii=False)}\n\n"
-                        elif "toolUse" in delta:
-                            if current_tool:
-                                current_tool["_input_json"] = current_tool.get("_input_json", "") + delta["toolUse"].get("input", "")
-                    elif evt_type == "content_block_start":
-                        cb = evt.get("content_block") or evt.get("contentBlock") or {}
-                        if "toolUse" in cb:
-                            tu = cb["toolUse"]
-                            current_tool = {"toolUseId": tu.get("toolUseId", ""), "name": tu.get("name", ""), "_input_json": ""}
-                    elif evt_type == "content_block_stop":
-                        if current_tool and current_tool.get("name"):
-                            try:
-                                inp = json.loads(current_tool.get("_input_json", "{}"))
-                            except json.JSONDecodeError:
-                                inp = {}
-                            tool_use_blocks.append({
-                                "toolUse": {"toolUseId": current_tool["toolUseId"], "name": current_tool["name"], "input": inp}
-                            })
-                            current_tool = {}
-                    elif evt_type in ("message_delta", "message_stop"):
-                        stop_reason = evt.get("delta", {}).get("stopReason", "") or evt.get("stop_reason", "") or evt.get("stopReason", "")
-                    elif evt_type == "settlement":
-                        _extract_quota({"remaining_quota": {"cost_krw": evt.get("remaining_quota_krw", 0)}, "estimated_cost_krw": evt.get("estimated_cost_krw", 0)}, _quota_cache.get("user", ""))
-                    elif evt_type == "error":
-                        yield f"data: {json.dumps({'error': evt.get('message', str(evt))}, ensure_ascii=False)}\n\n"
+                messages = _build_messages(body.get("chatHistory", []), prompt, body.get("sessionId", "default"))
             except Exception as e:
-                yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
-                break
+                print(f"[Agent] _build_messages 실패: {e}")
+                yield f"data: {json.dumps({'error': f'message build failed: {e}'}, ensure_ascii=False)}\n\n"
+                return
 
-            # content_blocks 조합
-            content_blocks = []
-            if text_parts:
-                content_blocks.append({"text": "".join(text_parts)})
-            content_blocks.extend(tool_use_blocks)
+            max_turns = 10
+            refreshed_once = False  # 자격증명 만료 자동복구 1회만
 
-            print(f"[Agent] turn={turn}, stopReason={stop_reason}, text={len(text_parts)}parts, tools={len(tool_use_blocks)}")
+            for turn in range(max_turns):
+                print(f"[Agent] turn={turn}, realtime stream + toolConfig")
+                text_parts = []
+                tool_use_blocks = []
+                current_tool = {}
+                stop_reason = ""
+                turn_error = None
 
-            if not content_blocks:
-                break
+                try:
+                    async for evt in gw.stream_sse_realtime(
+                        model_id=stream_model, messages=messages,
+                        system_prompt=system_prompt, tool_config=AGENT_TOOLS,
+                    ):
+                        evt_type = evt.get("type", "")
+                        if evt_type == "content_block_delta":
+                            delta = evt.get("delta", {})
+                            if "text" in delta:
+                                text_parts.append(delta["text"])
+                                yield f"data: {json.dumps({'text': delta['text']}, ensure_ascii=False)}\n\n"
+                            elif "toolUse" in delta:
+                                if current_tool:
+                                    current_tool["_input_json"] = current_tool.get("_input_json", "") + delta["toolUse"].get("input", "")
+                        elif evt_type == "content_block_start":
+                            cb = evt.get("content_block") or evt.get("contentBlock") or {}
+                            if "toolUse" in cb:
+                                tu = cb["toolUse"]
+                                current_tool = {"toolUseId": tu.get("toolUseId", ""), "name": tu.get("name", ""), "_input_json": ""}
+                        elif evt_type == "content_block_stop":
+                            if current_tool and current_tool.get("name"):
+                                try:
+                                    inp = json.loads(current_tool.get("_input_json", "{}"))
+                                except json.JSONDecodeError:
+                                    inp = {}
+                                tool_use_blocks.append({
+                                    "toolUse": {"toolUseId": current_tool["toolUseId"], "name": current_tool["name"], "input": inp}
+                                })
+                                current_tool = {}
+                        elif evt_type in ("message_delta", "message_stop"):
+                            stop_reason = evt.get("delta", {}).get("stopReason", "") or evt.get("stop_reason", "") or evt.get("stopReason", "")
+                        elif evt_type == "settlement":
+                            _extract_quota({"remaining_quota": {"cost_krw": evt.get("remaining_quota_krw", 0)}, "estimated_cost_krw": evt.get("estimated_cost_krw", 0)}, _quota_cache.get("user", ""))
+                        elif evt_type == "error":
+                            msg = evt.get("message", str(evt))
+                            turn_error = msg
+                            # 자격증명 만료 자동 복구 후 현재 turn 재시도
+                            if (not refreshed_once) and _is_expired_error(msg):
+                                refreshed_once = True
+                                print("[Agent] 자격증명 만료 감지 — 자동 갱신 시도")
+                                ok = await _refresh_and_retry_gw(gw, aws_profile, bedrock_user)
+                                if ok:
+                                    yield f"data: {json.dumps({'info': 'credentials refreshed, retrying'}, ensure_ascii=False)}\n\n"
+                                    break  # async for 를 벗어나 현재 turn 재시도
+                            yield f"data: {json.dumps({'error': msg}, ensure_ascii=False)}\n\n"
+                except asyncio.CancelledError:
+                    # 클라이언트가 중단한 경우 — 조용히 종료
+                    print("[Agent] 클라이언트 중단")
+                    return
+                except Exception as e:
+                    import traceback
+                    print(f"[Agent] stream 내부 예외: {e}\n{traceback.format_exc()}")
+                    yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
+                    break
 
-            messages.append({"role": "assistant", "content": content_blocks})
-
-            if not tool_use_blocks:
-                # max_tokens로 끊긴 경우 → 이어서 생성
-                if stop_reason == "max_tokens" and turn < max_turns - 1:
-                    print(f"[Agent] max_tokens 도달 — 이어서 생성 (turn {turn+1})")
-                    messages.append({"role": "user", "content": [{"text": "계속 이어서 작성해주세요."}]})
+                # 자격증명 갱신 후 재시도 케이스
+                if turn_error and _is_expired_error(turn_error) and refreshed_once and not text_parts and not tool_use_blocks:
+                    # 같은 turn 인덱스를 다시 쓰기 위해 range 를 못 돌리므로, messages 는 그대로 두고 continue 로 다음 turn 에서 재호출
                     continue
-                break
 
-            # 도구 실행
-            tool_results = []
-            for block in tool_use_blocks:
-                tu = block["toolUse"]
-                tool_name = tu.get("name", "")
-                tool_id = tu.get("toolUseId", "")
-                tool_input = tu.get("input", {})
-                yield f"data: {json.dumps({'tool': tool_name, 'input': tool_input, 'status': 'running'}, ensure_ascii=False)}\n\n"
-                tool_output = await asyncio.to_thread(_execute_tool, tool_name, tool_input, project_path)
-                print(f"[Agent] 도구 실행: {tool_name} → {len(tool_output)}자")
-                yield f"data: {json.dumps({'tool': tool_name, 'output': tool_output[:500], 'status': 'done'}, ensure_ascii=False)}\n\n"
-                tool_results.append({"toolResult": {"toolUseId": tool_id, "content": [{"text": tool_output[:15000]}]}})
+                # content_blocks 조합
+                content_blocks = []
+                if text_parts:
+                    content_blocks.append({"text": "".join(text_parts)})
+                content_blocks.extend(tool_use_blocks)
 
-            messages.append({"role": "user", "content": tool_results})
+                print(f"[Agent] turn={turn}, stopReason={stop_reason}, text={len(text_parts)}parts, tools={len(tool_use_blocks)}")
 
-        yield "data: [DONE]\n\n"
+                if not content_blocks:
+                    break
 
-    return StreamingResponse(agent_stream(), media_type="text/event-stream")
+                messages.append({"role": "assistant", "content": content_blocks})
+
+                if not tool_use_blocks:
+                    if stop_reason == "max_tokens" and turn < max_turns - 1:
+                        print(f"[Agent] max_tokens 도달 — 이어서 생성 (turn {turn+1})")
+                        messages.append({"role": "user", "content": [{"text": "계속 이어서 작성해주세요."}]})
+                        continue
+                    break
+
+                # 도구 실행
+                tool_results = []
+                for block in tool_use_blocks:
+                    tu = block["toolUse"]
+                    tool_name = tu.get("name", "")
+                    tool_id = tu.get("toolUseId", "")
+                    tool_input = tu.get("input", {})
+                    yield f"data: {json.dumps({'tool': tool_name, 'input': tool_input, 'status': 'running'}, ensure_ascii=False)}\n\n"
+                    try:
+                        tool_output = await asyncio.to_thread(_execute_tool, tool_name, tool_input, project_path)
+                    except Exception as e:
+                        tool_output = f"도구 실행 예외: {e}"
+                    print(f"[Agent] 도구 실행: {tool_name} → {len(tool_output)}자")
+                    yield f"data: {json.dumps({'tool': tool_name, 'output': tool_output[:500], 'status': 'done'}, ensure_ascii=False)}\n\n"
+                    tool_results.append({"toolResult": {"toolUseId": tool_id, "content": [{"text": tool_output[:15000]}]}})
+
+                messages.append({"role": "user", "content": tool_results})
+        except asyncio.CancelledError:
+            print("[Agent] stream cancelled")
+            return
+        except Exception as e:
+            import traceback
+            print(f"[Agent] 최상위 예외: {e}\n{traceback.format_exc()}")
+            try:
+                yield f"data: {json.dumps({'error': f'fatal: {e}'}, ensure_ascii=False)}\n\n"
+            except Exception:
+                pass
+        finally:
+            # 어떤 경로로 끝나든 [DONE] 을 반드시 송출 → ERR_INCOMPLETE_CHUNKED_ENCODING 방지
+            if not done_sent:
+                done_sent = True
+                try:
+                    yield "data: [DONE]\n\n"
+                except Exception:
+                    pass
+
+    return StreamingResponse(
+        agent_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @app.post("/api/agents/run-parallel")
@@ -723,6 +790,333 @@ async def run_agent_parallel(request: Request):
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(parallel_stream(), media_type="text/event-stream")
+
+
+# ─────────────────────────────────────────────────────────────────
+# Multi-Agent Orchestrator  (Role Split + Parallel Tool-Using Agents)
+# ─────────────────────────────────────────────────────────────────
+
+ORCHESTRATOR_PLANNER_PROMPT = """당신은 멀티-에이전트 시스템의 플래너입니다.
+사용자의 요청을 서로 독립적으로 병렬 실행 가능한 N개의 하위 작업(subtask)으로 분해하세요.
+
+규칙:
+1. 각 subtask는 서로 파일/코드 영역이 겹치지 않아야 합니다 (충돌 방지).
+2. 각 subtask는 하나의 에이전트가 도구(read_file, write_file, list_directory, run_command, search_files)를 사용해 독립적으로 완료할 수 있어야 합니다.
+3. subtask 개수는 요청 내용에 맞게 결정하되, 최대 {max_agents}개를 넘지 마세요.
+4. 사용자가 "수정 1~4" 처럼 명시한 번호/단계가 있으면 그대로 따르세요.
+
+반드시 아래 JSON 형식으로만 응답하세요 (마크다운 코드블록 없이):
+{{
+  "subtasks": [
+    {{
+      "id": "A",
+      "role": "역할명 (예: Tagger, Builder, Connector, Anchor)",
+      "title": "간결한 제목",
+      "description": "이 에이전트가 수행해야 할 작업의 상세 지시",
+      "target_files": ["상대경로 or 절대경로", ...]
+    }},
+    ...
+  ]
+}}
+"""
+
+ORCHESTRATOR_AGENT_PROMPT = """당신은 멀티-에이전트 시스템의 전문 작업자입니다.
+
+[할당된 역할] {role}
+[작업 ID] {task_id}
+[작업 제목] {title}
+[대상 파일] {target_files}
+
+[지시사항]
+{description}
+
+[규칙]
+- 반드시 제공된 도구(read_file, write_file, list_directory, run_command, search_files)를 사용하여 실제로 작업을 수행하세요.
+- 대상 파일 외의 파일은 수정하지 마세요.
+- 작업이 끝나면 "[완료] <한 줄 요약>" 형태로 마무리하세요.
+- 다른 에이전트의 작업 영역을 침범하지 마세요.
+"""
+
+ORCHESTRATOR_MERGER_PROMPT = """당신은 멀티-에이전트 결과를 통합하는 리뷰어입니다.
+아래 각 에이전트의 작업 결과를 검토하고:
+1. 성공/실패 여부를 판정
+2. 충돌이나 누락이 있으면 지적
+3. 사용자에게 전달할 최종 요약 보고서를 마크다운으로 작성
+
+보고서 형식:
+## ✅ 최종 통합 결과
+| 에이전트 | 역할 | 상태 | 요약 |
+|---------|------|------|------|
+...
+
+### 세부 사항
+- (각 에이전트별 핵심 변경점)
+
+### ⚠️ 주의/후속 작업
+- (있다면)
+"""
+
+
+async def _orchestrator_plan(gw, stream_model, user_prompt: str, system_prompt: str, max_agents: int) -> dict:
+    """Planner 호출 — subtask 분해."""
+    plan_sys = ORCHESTRATOR_PLANNER_PROMPT.format(max_agents=max_agents)
+    if system_prompt:
+        plan_sys = system_prompt + "\n\n" + plan_sys
+    messages = [{"role": "user", "content": [{"text": user_prompt}]}]
+    result = await asyncio.wait_for(
+        gw.converse(model_id=stream_model, messages=messages, system_prompt=plan_sys),
+        timeout=120,
+    )
+    if result.get("decision") != "ALLOW":
+        raise RuntimeError(f"Planner 실패: {result.get('error') or result.get('decision')}")
+    output = result.get("output", {}).get("message", {}).get("content", [])
+    text = "\n".join(c.get("text", "") for c in output if "text" in c).strip()
+    # JSON 추출
+    m = re.search(r"\{[\s\S]*\}", text)
+    if not m:
+        raise RuntimeError(f"Planner 응답에서 JSON을 찾을 수 없음: {text[:300]}")
+    plan = json.loads(m.group(0))
+    if not isinstance(plan.get("subtasks"), list) or not plan["subtasks"]:
+        raise RuntimeError("Planner가 subtasks를 생성하지 않았습니다.")
+    return plan
+
+
+async def _orchestrator_run_agent(
+    gw, stream_model: str, subtask: dict, project_path: str,
+    base_system_prompt: str, emit_queue: asyncio.Queue,
+):
+    """하나의 하위 에이전트 실행 — 도구 루프 포함."""
+    task_id = subtask.get("id", "?")
+    role = subtask.get("role", "Worker")
+    title = subtask.get("title", "")
+    description = subtask.get("description", "")
+    target_files = subtask.get("target_files", [])
+
+    sys_prompt = ORCHESTRATOR_AGENT_PROMPT.format(
+        role=role, task_id=task_id, title=title,
+        target_files=", ".join(target_files) if target_files else "(없음)",
+        description=description,
+    )
+    if base_system_prompt:
+        sys_prompt = base_system_prompt + "\n\n" + sys_prompt
+
+    messages = [{"role": "user", "content": [{"text": f"작업 {task_id} ({role}): {title}\n\n{description}"}]}]
+    max_turns = 8
+    final_text_parts = []
+    tool_log = []
+
+    await emit_queue.put({"type": "agent_start", "taskId": task_id, "role": role, "title": title, "targetFiles": target_files})
+
+    try:
+        for turn in range(max_turns):
+            text_parts = []
+            tool_use_blocks = []
+            current_tool = {}
+            stop_reason = ""
+
+            try:
+                async for evt in gw.stream_sse_realtime(
+                    model_id=stream_model, messages=messages,
+                    system_prompt=sys_prompt, tool_config=AGENT_TOOLS,
+                ):
+                    etype = evt.get("type", "")
+                    if etype == "content_block_delta":
+                        delta = evt.get("delta", {})
+                        if "text" in delta:
+                            text_parts.append(delta["text"])
+                            await emit_queue.put({"type": "agent_delta", "taskId": task_id, "text": delta["text"]})
+                        elif "toolUse" in delta:
+                            if current_tool:
+                                current_tool["_input_json"] = current_tool.get("_input_json", "") + delta["toolUse"].get("input", "")
+                    elif etype == "content_block_start":
+                        cb = evt.get("content_block") or evt.get("contentBlock") or {}
+                        if "toolUse" in cb:
+                            tu = cb["toolUse"]
+                            current_tool = {"toolUseId": tu.get("toolUseId", ""), "name": tu.get("name", ""), "_input_json": ""}
+                    elif etype == "content_block_stop":
+                        if current_tool and current_tool.get("name"):
+                            try:
+                                inp = json.loads(current_tool.get("_input_json", "{}"))
+                            except json.JSONDecodeError:
+                                inp = {}
+                            tool_use_blocks.append({"toolUse": {"toolUseId": current_tool["toolUseId"], "name": current_tool["name"], "input": inp}})
+                            current_tool = {}
+                    elif etype in ("message_delta", "message_stop"):
+                        stop_reason = evt.get("delta", {}).get("stopReason", "") or evt.get("stop_reason", "") or evt.get("stopReason", "")
+                    elif etype == "error":
+                        await emit_queue.put({"type": "agent_error", "taskId": task_id, "error": evt.get("message", "")})
+            except Exception as e:
+                await emit_queue.put({"type": "agent_error", "taskId": task_id, "error": str(e)})
+                break
+
+            content_blocks = []
+            if text_parts:
+                content_blocks.append({"text": "".join(text_parts)})
+                final_text_parts.extend(text_parts)
+            content_blocks.extend(tool_use_blocks)
+            if not content_blocks:
+                break
+            messages.append({"role": "assistant", "content": content_blocks})
+            if not tool_use_blocks:
+                break
+
+            tool_results = []
+            for block in tool_use_blocks:
+                tu = block["toolUse"]
+                tname = tu.get("name", "")
+                tid = tu.get("toolUseId", "")
+                tinput = tu.get("input", {})
+                await emit_queue.put({"type": "agent_tool", "taskId": task_id, "tool": tname, "input": tinput, "status": "running"})
+                tout = await asyncio.to_thread(_execute_tool, tname, tinput, project_path)
+                tool_log.append({"name": tname, "input": tinput, "output": tout[:400]})
+                await emit_queue.put({"type": "agent_tool", "taskId": task_id, "tool": tname, "status": "done", "output": tout[:300]})
+                tool_results.append({"toolResult": {"toolUseId": tid, "content": [{"text": tout[:15000]}]}})
+            messages.append({"role": "user", "content": tool_results})
+
+        final_text = "".join(final_text_parts).strip()
+        await emit_queue.put({"type": "agent_done", "taskId": task_id, "summary": final_text[-1200:], "toolCount": len(tool_log)})
+        return {"taskId": task_id, "role": role, "title": title, "status": "done", "summary": final_text, "tools": tool_log}
+    except Exception as e:
+        await emit_queue.put({"type": "agent_error", "taskId": task_id, "error": str(e)})
+        return {"taskId": task_id, "role": role, "title": title, "status": "error", "summary": str(e), "tools": tool_log}
+
+
+async def _orchestrator_merge(gw, stream_model, user_prompt, agent_results: list, base_system_prompt: str) -> str:
+    """Merger 호출 — 최종 보고서 생성."""
+    summary_input = {
+        "userRequest": user_prompt[:2000],
+        "agents": [
+            {
+                "taskId": r["taskId"], "role": r["role"], "title": r["title"],
+                "status": r["status"], "summary": (r.get("summary") or "")[:1500],
+                "toolCount": len(r.get("tools", [])),
+            }
+            for r in agent_results
+        ],
+    }
+    sys_prompt = ORCHESTRATOR_MERGER_PROMPT
+    if base_system_prompt:
+        sys_prompt = base_system_prompt + "\n\n" + sys_prompt
+    messages = [{"role": "user", "content": [{"text": json.dumps(summary_input, ensure_ascii=False, indent=2)}]}]
+    try:
+        result = await asyncio.wait_for(
+            gw.converse(model_id=stream_model, messages=messages, system_prompt=sys_prompt),
+            timeout=120,
+        )
+        if result.get("decision") == "ALLOW":
+            output = result.get("output", {}).get("message", {}).get("content", [])
+            return "\n".join(c.get("text", "") for c in output if "text" in c).strip()
+        return f"(Merger 실패: {result.get('error') or result.get('decision')})"
+    except Exception as e:
+        return f"(Merger 예외: {e})"
+
+
+@app.post("/api/agents/run-orchestrated")
+async def run_agent_orchestrated(request: Request):
+    """Multi-Agent Role Split — Planner → N Parallel Agents (with tools) → Merger.
+
+    요청 본문:
+    {
+      "prompt": "...",
+      "plannerModel": "claude-opus-4-...",   // 선택
+      "workerModel":  "claude-sonnet-4-6",   // 선택
+      "mergerModel":  "claude-opus-4-...",   // 선택
+      "maxAgents": 4,
+      "awsProfile": "bedrock-gw",
+      "bedrockUser": "...",
+      "projectPath": "...",
+      "openFile": "...", "openFileContent": "...",
+      "systemPrompt": "...",                 // 선택 (스킬)
+      "chatHistory": [...], "sessionId": "..."
+    }
+
+    응답: SSE
+      data: {"type":"plan", "subtasks":[...]}
+      data: {"type":"agent_start", "taskId":"A", ...}
+      data: {"type":"agent_delta", "taskId":"A", "text":"..."}
+      data: {"type":"agent_tool",  "taskId":"A", "tool":"write_file", "status":"running|done", ...}
+      data: {"type":"agent_done",  "taskId":"A", "summary":"...", "toolCount":3}
+      data: {"type":"merge", "report":"..."}
+      data: [DONE]
+    """
+    body = await request.json()
+    user_prompt = body.get("prompt", "")
+    planner_model = body.get("plannerModel") or body.get("model") or "claude-sonnet-4-6"
+    worker_model = body.get("workerModel") or body.get("model") or "claude-sonnet-4-6"
+    merger_model = body.get("mergerModel") or planner_model
+    max_agents = int(body.get("maxAgents", 4))
+    base_sys = body.get("systemPrompt", "") or ""
+    aws_profile = body.get("awsProfile", os.environ.get("AWS_PROFILE", "bedrock-gw"))
+    bedrock_user = body.get("bedrockUser", os.environ.get("BEDROCK_USER", ""))
+    project_path = body.get("projectPath", "")
+    open_file = body.get("openFile", "")
+    open_file_content = body.get("openFileContent", "")
+
+    gw = _get_gw(aws_profile, bedrock_user)
+
+    def _with_prefix(mid: str) -> str:
+        return mid if mid.startswith("us.") or mid.startswith("eu.") else f"us.{mid}"
+
+    planner_id = _with_prefix(planner_model)
+    worker_id = _with_prefix(worker_model)
+    merger_id = _with_prefix(merger_model)
+
+    # RAG (코드 관련 질문만)
+    if project_path and _is_code_related(user_prompt):
+        try:
+            from ai_engine.rag.context_builder import build_system_prompt
+            base_sys = build_system_prompt(
+                project_path=project_path, query=user_prompt,
+                open_file=open_file, open_file_content=open_file_content,
+                base_system_prompt=base_sys,
+                aws_profile=aws_profile, bedrock_user=bedrock_user, gateway_client=gw,
+            )
+        except Exception as e:
+            print(f"[Orchestrator] RAG 실패(무시): {e}")
+
+    async def orchestrated_stream():
+        emit_queue: asyncio.Queue = asyncio.Queue()
+
+        async def pipeline():
+            # 1) Planner
+            try:
+                plan = await _orchestrator_plan(gw, planner_id, user_prompt, base_sys, max_agents)
+            except Exception as e:
+                await emit_queue.put({"type": "error", "stage": "planner", "message": str(e)})
+                await emit_queue.put({"type": "__END__"})
+                return
+
+            subtasks = plan["subtasks"][:max_agents]
+            await emit_queue.put({"type": "plan", "subtasks": subtasks})
+
+            # 2) Parallel Agents
+            tasks = [
+                asyncio.create_task(
+                    _orchestrator_run_agent(gw, worker_id, st, project_path, base_sys, emit_queue)
+                )
+                for st in subtasks
+            ]
+            agent_results = await asyncio.gather(*tasks, return_exceptions=False)
+
+            # 3) Merger
+            report = await _orchestrator_merge(gw, merger_id, user_prompt, agent_results, base_sys)
+            await emit_queue.put({"type": "merge", "report": report, "results": agent_results})
+            await emit_queue.put({"type": "__END__"})
+
+        pipe_task = asyncio.create_task(pipeline())
+
+        try:
+            while True:
+                evt = await emit_queue.get()
+                if evt.get("type") == "__END__":
+                    break
+                yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
+        finally:
+            if not pipe_task.done():
+                pipe_task.cancel()
+            yield "data: [DONE]\n\n"
+
+    return StreamingResponse(orchestrated_stream(), media_type="text/event-stream")
 
 
 @app.post("/api/agents/run")
