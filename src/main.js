@@ -844,15 +844,18 @@ async function sendMessage() {
     state._pinAnchorSet = true;
     return Math.abs(actual - desired) < 2;
   };
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      if(!_anchorUserToTop()){
-        // 재시도 (레이아웃/이미지 로딩으로 offsetTop이 변할 수 있음)
-        setTimeout(_anchorUserToTop, 16);
-        setTimeout(_anchorUserToTop, 80);
-      }
-    });
-  });
+  // [Fix: 순서 뒤집힘 방지] 긴 질문 입력 시 assistant placeholder가 user보다 먼저 DOM에
+  //  커밋되어 "답변이 질문 위에 보이는" 현상 발생. 반드시 await로 user 메시지 DOM commit +
+  //  스크롤 anchor를 확정한 뒤에 runSingle/runParallel(→ assistant push)로 진입해야 함.
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  if (!_anchorUserToTop()) {
+    // 이미지/폰트 로딩으로 offsetTop이 밀리는 경우 한 프레임 더 대기
+    await new Promise(r => requestAnimationFrame(r));
+    _anchorUserToTop();
+  }
+  // 스트리밍 초반 assistant 렌더로 레이아웃이 변할 때 재보정
+  setTimeout(_anchorUserToTop, 80);
+  setTimeout(_anchorUserToTop, 240);
 
   const sendBtn = document.getElementById('send-btn');
   sendBtn.textContent = '취소';
@@ -2110,6 +2113,110 @@ function renderWorkflow(c, wf) {
   }
   if (wf.steps.some(x => x.status === 'running')) _ensureStepTimer();
 }
+// 도구 인자를 한 줄 라벨로 포맷
+function formatToolArg(t) {
+  if (!t || !t.input) return '—';
+  const inp = t.input;
+  
+  // 도구별 메인 인자 추출
+  const toolName = (t.name || '').toLowerCase();
+  
+  if (toolName.includes('read')) return `Read · ${inp.file_path || inp.path || '—'}`;
+  if (toolName.includes('write')) return `Write · ${inp.file_path || inp.path || '—'}`;
+  if (toolName.includes('edit')) return `Edit · ${inp.file_path || inp.path || '—'}`;
+  if (toolName.includes('bash')) {
+    const cmd = inp.command || '';
+    return `Bash · ${cmd.substring(0, 40)}${cmd.length > 40 ? '…' : ''}`;
+  }
+  if (toolName.includes('grep')) return `Grep · ${inp.pattern || '—'}`;
+  if (toolName.includes('fetch') || toolName.includes('web')) return `WebFetch · ${inp.url || '—'}`;
+  
+  // 기본: JSON 요약
+  try {
+    const json = JSON.stringify(inp).substring(0, 60);
+    return `${t.name || '도구'} · ${json}…`;
+  } catch {
+    return t.name || '도구';
+  }
+}
+
+// 모든 toolUses를 한 접이식 컨테이너로 렌더
+function renderToolSummary(c, toolUses) {
+  if (!toolUses || !toolUses.length) return;
+  
+  const details = document.createElement('details');
+  details.className = 'tool-summary-card';
+  
+  // startedAt/endedAt 범위 계산
+  const validTools = toolUses.filter(t => t.startedAt);
+  let minStart = validTools.length ? Math.min(...validTools.map(t => t.startedAt)) : null;
+  let maxEnd = validTools.length ? Math.max(...validTools.map(t => t.endedAt || Date.now())) : null;
+  
+  // 상태: running 있으면 running, 아니면 failed > done
+  const hasRunning = validTools.some(t => t.status === 'running' || (!t.endedAt && t.startedAt));
+  const hasFailed = toolUses.some(t => t.status === 'failed');
+  const statusIcon = hasRunning ? '⏳' : hasFailed ? '❌' : '✓';
+  const statusClass = hasRunning ? 'tool-summary-running' : hasFailed ? 'tool-summary-failed' : 'tool-summary-done';
+  
+  // 전체 경과시간
+  let elapsedHtml = '';
+  if (minStart && maxEnd) {
+    const elapsed = maxEnd - minStart;
+    elapsedHtml = ` · <span class="tool-summary-timer" data-tool-started="${minStart}" data-tool-ended="${maxEnd !== Date.now() ? maxEnd : ''}" style="font-variant-numeric:tabular-nums">${hasRunning ? '⏱ ' : ''}${fmtElapsedMs(elapsed)}</span>`;
+  }
+  
+  // 요약 텍스트
+  const summaryHtml = `⚙ 도구 ${toolUses.length}개${elapsedHtml} ▸`;
+  const summary = document.createElement('summary');
+  summary.className = `tool-summary-header ${statusClass}`;
+  summary.innerHTML = summaryHtml;
+  
+  // 펼칠 때만 타이머 활성화
+  details.addEventListener('toggle', () => {
+    if (details.open && hasRunning) _ensureStepTimer();
+  });
+  
+  details.appendChild(summary);
+  
+  // 도구별 라인
+  toolUses.forEach((t, idx) => {
+    const toolLine = document.createElement('div');
+    toolLine.className = 'tool-summary-line';
+    
+    const status = t.status || (t.endedAt ? 'done' : (t.startedAt ? 'running' : ''));
+    const isRunning = status === 'running' || (!t.endedAt && t.startedAt);
+    toolLine.className += ` tool-line-${status}`;
+    
+    const arg = formatToolArg(t);
+    let timerHtml = '';
+    
+    if (t.startedAt) {
+      toolLine.setAttribute('data-step-started', String(t.startedAt));
+      if (t.endedAt) {
+        toolLine.setAttribute('data-step-ended', String(t.endedAt));
+        const elapsed = fmtElapsedMs(t.endedAt - t.startedAt);
+        timerHtml = `<span style="margin-left:auto;font-size:10px;color:var(--color-text-muted);font-variant-numeric:tabular-nums">${elapsed}</span>`;
+      } else {
+        timerHtml = `<span class="step-timer step-timer-running" data-step-timer style="margin-left:auto;font-size:10px;color:var(--color-success);font-variant-numeric:tabular-nums">${fmtElapsedMs(Date.now() - t.startedAt)}</span>`;
+      }
+    }
+    
+    const statusBadge = isRunning ? '◌' : status === 'failed' ? '✕' : '✓';
+    const statusColor = isRunning ? 'var(--color-success)' : status === 'failed' ? 'var(--color-error)' : 'var(--color-text-muted)';
+    
+    toolLine.innerHTML = `<span style="color:${statusColor};margin-right:8px">${statusBadge}</span><span>${arg}</span>${timerHtml}`;
+    details.appendChild(toolLine);
+  });
+  
+  // 세 줄 표기 개수 제한 시 scroll
+  const content = document.createElement('div');
+  content.style.overflow = 'auto';
+  content.style.maxHeight = 'none';
+  
+  c.appendChild(details);
+  if (hasRunning) _ensureStepTimer();
+}
+
 function renderToolUseCard(c, t) {
   const card = document.createElement('div');
   const isRunning = t.status === 'running' || (!t.endedAt && t.startedAt);
@@ -2130,7 +2237,21 @@ function renderToolUseCard(c, t) {
     : status === 'failed' ? '<span class="step-badge step-badge-failed" style="margin-left:6px">실패</span>' : '';
   const label = t.path ? `파일: ${esc(t.path)}` : esc(t.name || '도구');
   const bodyTxt = t.content || t.diff || (t.output ? String(t.output) : '') || '';
-  card.innerHTML = `<div class="tool-use-header"><span class="tool-badge">${esc(t.name || '도구')}</span><span class="tool-label">${label}</span>${statusBadge}${timerHtml}</div>${bodyTxt ? `<div class="tool-use-body">${esc(bodyTxt)}</div>` : ''}`;
+  // 펼침 화살표 — 기본 접힘, 클릭 시 토글
+  const chevron = bodyTxt ? '<span class="tool-chevron" style="margin-right:6px;font-size:10px;color:var(--color-text-muted);transition:transform 150ms ease;display:inline-block">▶</span>' : '';
+  card.innerHTML = `<div class="tool-use-header" style="cursor:${bodyTxt ? 'pointer' : 'default'}">${chevron}<span class="tool-badge">${esc(t.name || '도구')}</span><span class="tool-label">${label}</span>${statusBadge}${timerHtml}</div>${bodyTxt ? `<div class="tool-use-body" style="display:none">${esc(bodyTxt)}</div>` : ''}`;
+  // 헤더 클릭 → body 토글
+  if (bodyTxt) {
+    const header = card.querySelector('.tool-use-header');
+    header.addEventListener('click', () => {
+      const body = card.querySelector('.tool-use-body');
+      const chev = card.querySelector('.tool-chevron');
+      if (!body) return;
+      const isOpen = body.style.display !== 'none';
+      body.style.display = isOpen ? 'none' : '';
+      if (chev) chev.style.transform = isOpen ? '' : 'rotate(90deg)';
+    });
+  }
   c.appendChild(card);
   if (status === 'running') _ensureStepTimer();
 }

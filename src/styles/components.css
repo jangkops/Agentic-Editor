@@ -99,7 +99,9 @@
 .tool-use-header{
   display:flex;align-items:center;gap:8px;padding:8px 14px;
   background:var(--color-bg-tertiary);font-size:var(--font-size-sm);
+  transition:background var(--transition);user-select:none;
 }
+.tool-use-header:hover{background:var(--color-bg-hover);}
 .tool-use-header .tool-badge{
   background:var(--color-success);color:#fff;font-size:10px;
   padding:2px 10px;border-radius:20px;font-weight:700;
