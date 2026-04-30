@@ -212,7 +212,7 @@ class GatewayClient:
         return result
 
     async def stream_sse_realtime(self, model_id, messages, system_prompt="", tool_config=None):
-        """Lambda Function URL — 실시간 SSE 이터레이터. 각 이벤트를 즉시 yield."""
+        """Lambda Function URL — 실시간 SSE 이터레이터 (httpx 비동기, 스레드 고갈 없음)."""
         url = self.STREAM_URL
         payload = self._build_payload(model_id, messages, system_prompt, tool_config)
         body_bytes = json.dumps(payload).encode()
@@ -222,46 +222,23 @@ class GatewayClient:
         BotocoreSigV4(creds, "lambda", self.region).add_auth(aws_req)
         signed_headers = dict(aws_req.headers)
 
-        import urllib.request
-        loop = asyncio.get_event_loop()
-
-        def _open():
-            req = urllib.request.Request(url, data=body_bytes, method="POST")
-            for k, v in signed_headers.items():
-                req.add_header(k, v)
-            return urllib.request.urlopen(req, timeout=300)
-
         try:
-            resp = await loop.run_in_executor(None, _open)
+            async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=30.0)) as client:
+                async with client.stream("POST", url, content=body_bytes, headers=signed_headers) as resp:
+                    buf = ""
+                    async for chunk in resp.aiter_text():
+                        buf += chunk
+                        while '\n' in buf:
+                            line, buf = buf.split('\n', 1)
+                            line = line.strip()
+                            if not line or not line.startswith('data: '):
+                                continue
+                            try:
+                                yield json.loads(line[6:])
+                            except json.JSONDecodeError:
+                                continue
         except Exception as e:
             yield {"type": "error", "error": str(e)}
-            return
-
-        # UTF-8 멀티바이트 경계 안전: bytes 버퍼에 누적, 줄바꿈 단위로만 디코딩
-        buf_bytes = bytearray()
-        while True:
-            try:
-                chunk = await loop.run_in_executor(None, lambda: resp.read(4096))
-            except Exception:
-                break
-            if not chunk:
-                break
-            buf_bytes.extend(chunk)
-            while b'\n' in buf_bytes:
-                nl = buf_bytes.index(b'\n')
-                raw_line = bytes(buf_bytes[:nl])
-                del buf_bytes[:nl+1]
-                try:
-                    line = raw_line.decode('utf-8').strip()
-                except UnicodeDecodeError:
-                    # 완전한 줄임에도 디코드 실패 시에만 손실 허용
-                    line = raw_line.decode('utf-8', errors='replace').strip()
-                if not line or not line.startswith('data: '):
-                    continue
-                try:
-                    yield json.loads(line[6:])
-                except json.JSONDecodeError:
-                    continue
 
     async def _converse_stream_live_once(self, model_id, messages, system_prompt="", tool_config=None):
         """Lambda Function URL을 통한 실시간 스트리밍 (1회 시도)."""
