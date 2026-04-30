@@ -124,6 +124,115 @@
 /* 분석 스텝 running 시 펄스 */
 .workflow-step.step-running .step-indicator.running{animation:tool-pulse 1.2s ease-in-out infinite;}
 
+/* ===== Tool Summary (접이식 작업 실행 패널) ===== */
+/*
+ * - 기본 상태: 한 줄 요약 ("◌ 작업 3개 · 2.1s ▸")
+ * - 클릭 시 펼쳐져서 각 작업별 줄이 노출
+ * - 각 줄 클릭 시 입력/출력 상세 토글
+ */
+.tool-summary-card{
+  margin:6px 16px;border:1px solid var(--color-border);
+  border-radius:var(--radius-md);overflow:hidden;
+  background:var(--color-bg-tertiary);
+}
+.tool-summary-card[open]{border-color:var(--color-border);}
+.tool-summary-header{
+  display:flex;align-items:center;gap:8px;padding:6px 12px;
+  font-size:12px;cursor:pointer;user-select:none;
+  transition:background var(--transition);
+  list-style:none;line-height:1.6;
+}
+.tool-summary-header::-webkit-details-marker{display:none;}
+.tool-summary-header:hover{background:var(--color-bg-hover);}
+.tool-summary-icon{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:16px;height:16px;font-size:11px;font-weight:700;
+  color:var(--color-success);
+}
+.tool-summary-running .tool-summary-icon{
+  color:var(--color-accent);animation:tool-pulse 1.2s ease-in-out infinite;
+}
+.tool-summary-failed .tool-summary-icon{color:var(--color-error);}
+.tool-summary-label{color:var(--color-text-primary);font-weight:600;font-size:12px;}
+.tool-summary-count{
+  font-size:10px;padding:1px 7px;border-radius:10px;
+  background:var(--color-accent-subtle);color:var(--color-accent);
+  font-weight:600;
+}
+.tool-summary-running .tool-summary-count{background:var(--color-accent-subtle);color:var(--color-accent);}
+.tool-summary-failed .tool-summary-count{background:rgba(244,71,71,0.15);color:var(--color-error);}
+.tool-summary-done .tool-summary-count{background:var(--color-success-subtle);color:var(--color-success);}
+.tool-summary-dot{color:var(--color-text-muted);font-size:10px;}
+.tool-summary-timer{
+  font-size:10px;color:var(--color-text-muted);
+  font-variant-numeric:tabular-nums;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+.tool-summary-chevron{
+  margin-left:auto;font-size:10px;color:var(--color-text-muted);
+  transition:transform 150ms ease;display:inline-block;
+}
+.tool-summary-card[open] .tool-summary-chevron{transform:rotate(90deg);}
+.tool-summary-body{
+  border-top:1px solid var(--color-border-light);
+  background:var(--color-bg-primary);
+}
+.tool-summary-line{
+  border-bottom:1px solid var(--color-border-light);
+  font-size:12px;
+}
+.tool-summary-line:last-child{border-bottom:none;}
+.tool-line-header{
+  display:flex;align-items:center;gap:8px;padding:5px 12px 5px 14px;
+  transition:background var(--transition);
+}
+.tool-line-header:hover{background:var(--color-bg-hover);}
+.tool-line-chevron{
+  font-size:9px;color:var(--color-text-muted);
+  transition:transform 150ms ease;display:inline-block;
+  width:10px;text-align:center;flex-shrink:0;
+}
+.tool-line-chevron-spacer{display:inline-block;width:10px;flex-shrink:0;}
+.tool-line-status{
+  font-size:11px;font-weight:700;width:14px;text-align:center;flex-shrink:0;
+}
+.tool-line-running .tool-line-status{animation:tool-pulse 1.2s ease-in-out infinite;}
+.tool-line-arg{
+  color:var(--color-text-secondary);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  flex:1;min-width:0;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:11px;
+}
+.tool-line-failed .tool-line-arg{color:var(--color-error);}
+.tool-line-timer{
+  margin-left:auto;font-size:10px;color:var(--color-text-muted);
+  font-variant-numeric:tabular-nums;flex-shrink:0;
+}
+.tool-line-detail{
+  padding:6px 12px 10px 36px;
+  background:var(--color-bg-secondary);
+  border-top:1px dashed var(--color-border-light);
+}
+.tool-line-detail-section{margin-top:6px;}
+.tool-line-detail-section:first-child{margin-top:0;}
+.tool-line-detail-title{
+  font-size:10px;font-weight:600;
+  color:var(--color-text-muted);
+  text-transform:uppercase;letter-spacing:0.5px;
+  margin-bottom:3px;
+}
+.tool-line-detail-content{
+  margin:0;padding:6px 10px;
+  background:var(--color-bg-primary);
+  border:1px solid var(--color-border-light);
+  border-radius:var(--radius-sm);
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:11px;color:var(--color-text-secondary);
+  white-space:pre-wrap;word-break:break-all;
+  max-height:300px;overflow:auto;line-height:1.5;
+}
+
 /* ===== Usage Dashboard ===== */
 .usage-overlay{position:fixed;inset:0;background:var(--color-bg-overlay);display:flex;align-items:center;justify-content:center;z-index:1000;backdrop-filter:blur(4px);}
 .usage-dashboard{

@@ -84,7 +84,7 @@ class GatewayClient:
         else:
             self._try_us_prefix = False
             used_id = model_id
-        body = {"modelId": used_id, "messages": messages, "inferenceConfig": {"maxTokens": 32000}}
+        body = {"modelId": used_id, "messages": messages, "inferenceConfig": {"maxTokens": int(os.environ.get("AE_MAX_TOKENS", "64000"))}}
         if system_prompt:
             body["system"] = [{"text": system_prompt}]
         if tool_config:

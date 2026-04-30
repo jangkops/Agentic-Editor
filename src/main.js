@@ -1091,7 +1091,7 @@ async function runAgentWorkflow(prompt) {
   const _wfNow = Date.now();
   const wf = { id:wfId, steps:[
     { name:'분석', status:'running', detail:'', startedAt:_wfNow, endedAt:null },
-    { name:'도구 실행', status:'pending', detail:'', startedAt:null, endedAt:null },
+    { name:'작업 실행', status:'pending', detail:'', startedAt:null, endedAt:null },
     { name:'완료', status:'pending', detail:'', startedAt:null, endedAt:null },
   ]};
   const msg = { role:'assistant', content:'', workflow:wf, toolUses:[] };
@@ -1126,13 +1126,13 @@ async function runAgentWorkflow(prompt) {
             // 도구 실행 시작 — 채팅에 표시하지 않음
             toolCount++;
             if (wf.steps[1].status !== 'running') { wf.steps[1].status = 'running'; wf.steps[1].startedAt = Date.now(); }
-            wf.steps[1].detail = `도구 실행 중... (${toolCount}번째)`;
+            wf.steps[1].detail = `작업 실행 중... (${toolCount}번째)`;
             // 개별 도구 카드에도 startedAt 기록
-            msg.toolUses.push({ name: p.tool, path: p.path || '', content: p.input ? JSON.stringify(p.input, null, 2) : '', status:'running', startedAt: Date.now(), endedAt:null });
+            msg.toolUses.push({ name: p.tool, path: p.path || '', input: p.input || null, content: p.input ? JSON.stringify(p.input, null, 2) : '', status:'running', startedAt: Date.now(), endedAt:null });
           }
           else if (p.tool && p.status === 'done') {
             // 도구 실행 완료 — 채팅에 표시하지 않음
-            wf.steps[1].detail = `도구 ${toolCount}개 완료`;
+            wf.steps[1].detail = `작업 ${toolCount}개 완료`;
             // 가장 최근 running 도구 카드를 done으로
             for (let _i = msg.toolUses.length - 1; _i >= 0; _i--) {
               if (msg.toolUses[_i].status === 'running') {
@@ -1150,7 +1150,7 @@ async function runAgentWorkflow(prompt) {
       renderMessages();
     }
     if (toolCount > 0) { wf.steps[1].status = 'done'; wf.steps[1].endedAt = Date.now(); }
-    else { wf.steps[1].detail = '도구 사용 없음'; wf.steps[1].status = 'done'; wf.steps[1].startedAt = wf.steps[1].startedAt || Date.now(); wf.steps[1].endedAt = Date.now(); }
+    else { wf.steps[1].detail = '작업 없음'; wf.steps[1].status = 'done'; wf.steps[1].startedAt = wf.steps[1].startedAt || Date.now(); wf.steps[1].endedAt = Date.now(); }
     wf.steps[2].status = 'done'; wf.steps[2].startedAt = Date.now(); wf.steps[2].endedAt = Date.now(); wf.steps[2].detail = '완료';
     // 혹시 아직 running인 도구가 있으면 종료 처리
     for (const t of msg.toolUses) { if (t.status === 'running') { t.status = 'done'; t.endedAt = Date.now(); } }
@@ -1790,7 +1790,7 @@ function _inPlaceUpdateSideCards(assistantNode, msg){
       // assistantNode 이후의 workflow-step 노드들을 순서대로 매칭
       const stepNodes = [];
       let sib = assistantNode.nextElementSibling;
-      while(sib && (sib.classList.contains('workflow-step') || sib.classList.contains('tool-use-card') || sib.classList.contains('async-job-card'))){
+      while(sib && (sib.classList.contains('workflow-step') || sib.classList.contains('tool-use-card') || sib.classList.contains('tool-summary-card') || sib.classList.contains('async-job-card'))){
         if(sib.classList.contains('workflow-step')) stepNodes.push(sib);
         sib = sib.nextElementSibling;
       }
@@ -1817,24 +1817,60 @@ function _inPlaceUpdateSideCards(assistantNode, msg){
         }
       }
     }
-    if(msg.toolUses){
-      const toolNodes = [];
+    if(msg.toolUses && msg.toolUses.length){
+      // tool-summary-card (하나의 접이식 컨테이너) in-place 갱신
       let sib = assistantNode.nextElementSibling;
+      let summaryCard = null;
       while(sib){
-        if(sib.classList.contains('tool-use-card')) toolNodes.push(sib);
+        if(sib.classList.contains('tool-summary-card')) { summaryCard = sib; break; }
         sib = sib.nextElementSibling;
       }
-      for(let i=0;i<msg.toolUses.length && i<toolNodes.length;i++){
-        const t = msg.toolUses[i];
-        const body = toolNodes[i].querySelector('.tool-use-body');
-        const txt = t.content || t.diff || '';
-        if(body && body.getAttribute('data-body-len') !== String(txt.length)){
-          body.textContent = txt;
-          body.setAttribute('data-body-len', String(txt.length));
+      if(summaryCard){
+        const lines = summaryCard.querySelectorAll('.tool-summary-line');
+        for(let i=0;i<msg.toolUses.length && i<lines.length;i++){
+          const t = msg.toolUses[i];
+          const line = lines[i];
+          // 상태 클래스 갱신
+          const status = t.status || (t.endedAt ? 'done' : (t.startedAt ? 'running' : ''));
+          line.className = `tool-summary-line tool-line-${status}`;
+          // 타이머 갱신
+          const timerEl = line.querySelector('.tool-line-timer');
+          if(timerEl && t.startedAt){
+            if(t.endedAt){
+              timerEl.textContent = fmtElapsedMs(t.endedAt - t.startedAt);
+              timerEl.classList.remove('step-timer-running');
+            } else {
+              timerEl.textContent = fmtElapsedMs(Date.now() - t.startedAt);
+            }
+          }
+          // 상태 뱃지 (◌/✓/✕)
+          const statusEl = line.querySelector('.tool-line-status');
+          if(statusEl){
+            const isRunning = status === 'running' || (!t.endedAt && t.startedAt);
+            statusEl.textContent = isRunning ? '◌' : status === 'failed' ? '✕' : '✓';
+            statusEl.style.color = isRunning ? 'var(--color-success)' : status === 'failed' ? 'var(--color-error)' : 'var(--color-success)';
+          }
         }
-        // streaming 클래스 토글 — running이면 커서 깜빡임, done이면 제거
-        const isRunning = t.status === 'running' || (!t.endedAt && t.startedAt);
-        toolNodes[i].classList.toggle('tool-streaming', isRunning);
+        // 헤더 집계 갱신 (작업 N개 · 경과시간)
+        const header = summaryCard.querySelector('.tool-summary-header');
+        if(header){
+          const hasRunning = msg.toolUses.some(t => t.status === 'running' || (!t.endedAt && t.startedAt));
+          const hasFailed  = msg.toolUses.some(t => t.status === 'failed');
+          const statusClass = hasRunning ? 'tool-summary-running' : hasFailed ? 'tool-summary-failed' : 'tool-summary-done';
+          header.className = `tool-summary-header ${statusClass}`;
+          const cntEl = header.querySelector('.tool-summary-count');
+          if(cntEl) cntEl.textContent = `${msg.toolUses.length}개`;
+          const iconEl = header.querySelector('.tool-summary-icon');
+          if(iconEl) iconEl.textContent = hasRunning ? '◌' : hasFailed ? '✕' : '✓';
+          // 전체 경과 갱신
+          const validTools = msg.toolUses.filter(t => t.startedAt);
+          if(validTools.length){
+            const minStart = Math.min(...validTools.map(t => t.startedAt));
+            const maxEnd   = Math.max(...validTools.map(t => t.endedAt || Date.now()));
+            const tEl = header.querySelector('.tool-summary-timer');
+            if(tEl) tEl.textContent = fmtElapsedMs(maxEnd - minStart);
+          }
+        }
       }
     }
   } catch(_){}
@@ -1961,7 +1997,7 @@ function renderMessages(){
         c.appendChild(d);
       } else {
         if(msg.workflow){const jc=document.createElement('div');jc.className=`async-job-card ${FI}`;jc.innerHTML=`<div class="job-header"><span class="job-title">에이전트 작업</span></div><div class="job-body">실행 중... 모델: ${state.selectedModel?.name||'?'} Job: ${msg.workflow.id}</div>`;c.appendChild(jc);renderWorkflow(c,msg.workflow);}
-        if(msg.toolUses?.length) msg.toolUses.forEach(t => renderToolUseCard(c, t));
+        if(msg.toolUses?.length) renderToolSummary(c, msg.toolUses);
         if(msg.content){
           const d=document.createElement('div');d.className=`chat-msg assistant ${FI}`;
           const isError = msg.content.includes('[오류:') || msg.content.includes('[합의 오류:');
@@ -2113,106 +2149,175 @@ function renderWorkflow(c, wf) {
   }
   if (wf.steps.some(x => x.status === 'running')) _ensureStepTimer();
 }
-// 도구 인자를 한 줄 라벨로 포맷
-function formatToolArg(t) {
-  if (!t || !t.input) return '—';
-  const inp = t.input;
-  
-  // 도구별 메인 인자 추출
-  const toolName = (t.name || '').toLowerCase();
-  
-  if (toolName.includes('read')) return `Read · ${inp.file_path || inp.path || '—'}`;
-  if (toolName.includes('write')) return `Write · ${inp.file_path || inp.path || '—'}`;
-  if (toolName.includes('edit')) return `Edit · ${inp.file_path || inp.path || '—'}`;
-  if (toolName.includes('bash')) {
-    const cmd = inp.command || '';
-    return `Bash · ${cmd.substring(0, 40)}${cmd.length > 40 ? '…' : ''}`;
-  }
-  if (toolName.includes('grep')) return `Grep · ${inp.pattern || '—'}`;
-  if (toolName.includes('fetch') || toolName.includes('web')) return `WebFetch · ${inp.url || '—'}`;
-  
-  // 기본: JSON 요약
-  try {
-    const json = JSON.stringify(inp).substring(0, 60);
-    return `${t.name || '도구'} · ${json}…`;
-  } catch {
-    return t.name || '도구';
-  }
+// 도구 이름을 친숙한 한글 라벨로 변환
+// — 편집기 맥락에 맞는 명확한 동사형: "파일 읽기", "명령 실행" 등
+function toolDisplayName(rawName) {
+  const n = (rawName || '').toLowerCase();
+  if (n.includes('read_file') || n === 'read')         return '파일 읽기';
+  if (n.includes('write_file') || n === 'write')       return '파일 쓰기';
+  if (n.includes('edit_file') || n === 'edit')         return '파일 편집';
+  if (n.includes('search_files') || n.includes('grep'))return '파일 검색';
+  if (n.includes('list_directory') || n.includes('ls'))return '폴더 목록';
+  if (n.includes('run_command') || n.includes('bash') || n.includes('shell')) return '명령 실행';
+  if (n.includes('fetch') || n.includes('web'))        return '웹 조회';
+  if (n.includes('apply') || n.includes('patch'))      return '패치 적용';
+  if (n.includes('delete') || n.includes('rm'))        return '파일 삭제';
+  if (n.includes('move') || n.includes('rename'))      return '파일 이동';
+  if (n.includes('copy') || n.includes('cp'))          return '파일 복사';
+  return rawName || '작업';
 }
 
-// 모든 toolUses를 한 접이식 컨테이너로 렌더
+// 도구 인자를 한 줄 라벨로 포맷 — 어떤 파일/명령인지 한눈에
+function formatToolArg(t) {
+  if (!t) return '—';
+  const label = toolDisplayName(t.name);
+  const inp = t.input || {};
+  const n = (t.name || '').toLowerCase();
+
+  // 파일 계열: path 우선, 없으면 t.path fallback
+  const filePath = inp.file_path || inp.path || t.path || '';
+
+  if (n.includes('read_file') || n === 'read')   return `${label} · ${filePath || '—'}`;
+  if (n.includes('write_file') || n === 'write') return `${label} · ${filePath || '—'}`;
+  if (n.includes('edit_file') || n === 'edit')   return `${label} · ${filePath || '—'}`;
+  if (n.includes('list_directory') || n.includes('ls')) return `${label} · ${filePath || '.'}`;
+  if (n.includes('search_files') || n.includes('grep')) {
+    const q = inp.query || inp.pattern || '';
+    const scope = inp.path ? ` (${inp.path})` : '';
+    return `${label} · ${q ? '"' + q.substring(0,40) + (q.length > 40 ? '…' : '') + '"' : '—'}${scope}`;
+  }
+  if (n.includes('run_command') || n.includes('bash') || n.includes('shell')) {
+    const cmd = inp.command || '';
+    return `${label} · ${cmd.substring(0, 50)}${cmd.length > 50 ? '…' : ''}`;
+  }
+  if (n.includes('fetch') || n.includes('web')) return `${label} · ${inp.url || '—'}`;
+
+  // 기본: path가 있으면 그걸 사용, 없으면 JSON 요약
+  if (filePath) return `${label} · ${filePath}`;
+  try {
+    const json = JSON.stringify(inp);
+    if (json && json !== '{}') {
+      return `${label} · ${json.substring(0, 60)}${json.length > 60 ? '…' : ''}`;
+    }
+  } catch {}
+  return label;
+}
+
+// 모든 toolUses를 하나의 접이식 컨테이너로 렌더
+//  ┌─ 기본 접힘 ─ "⚙ 작업 3개 · 2.1s ▸"
+//  └─ 클릭 시 펼침 → 각 줄 클릭 시 상세(입력/출력) 토글
 function renderToolSummary(c, toolUses) {
   if (!toolUses || !toolUses.length) return;
-  
+
   const details = document.createElement('details');
   details.className = 'tool-summary-card';
-  
+
   // startedAt/endedAt 범위 계산
   const validTools = toolUses.filter(t => t.startedAt);
-  let minStart = validTools.length ? Math.min(...validTools.map(t => t.startedAt)) : null;
-  let maxEnd = validTools.length ? Math.max(...validTools.map(t => t.endedAt || Date.now())) : null;
-  
-  // 상태: running 있으면 running, 아니면 failed > done
+  const minStart = validTools.length ? Math.min(...validTools.map(t => t.startedAt)) : null;
+  const maxEnd   = validTools.length ? Math.max(...validTools.map(t => t.endedAt || Date.now())) : null;
+
+  // 집계 상태 — running > failed > done 순 우선
   const hasRunning = validTools.some(t => t.status === 'running' || (!t.endedAt && t.startedAt));
-  const hasFailed = toolUses.some(t => t.status === 'failed');
-  const statusIcon = hasRunning ? '⏳' : hasFailed ? '❌' : '✓';
+  const hasFailed  = toolUses.some(t => t.status === 'failed');
   const statusClass = hasRunning ? 'tool-summary-running' : hasFailed ? 'tool-summary-failed' : 'tool-summary-done';
-  
+  const statusIcon  = hasRunning ? '◌' : hasFailed ? '✕' : '✓';
+
   // 전체 경과시간
   let elapsedHtml = '';
   if (minStart && maxEnd) {
-    const elapsed = maxEnd - minStart;
-    elapsedHtml = ` · <span class="tool-summary-timer" data-tool-started="${minStart}" data-tool-ended="${maxEnd !== Date.now() ? maxEnd : ''}" style="font-variant-numeric:tabular-nums">${hasRunning ? '⏱ ' : ''}${fmtElapsedMs(elapsed)}</span>`;
+    const elapsedMs = maxEnd - minStart;
+    elapsedHtml = `<span class="tool-summary-timer" ${hasRunning ? 'data-tool-started="'+minStart+'"' : ''} style="font-variant-numeric:tabular-nums">${fmtElapsedMs(elapsedMs)}</span>`;
   }
-  
-  // 요약 텍스트
-  const summaryHtml = `⚙ 도구 ${toolUses.length}개${elapsedHtml} ▸`;
+
+  // 스트리밍 중에는 기본 펼침, 끝나면 접힘 (사용자 요청: 평상시 1줄 요약)
+  if (hasRunning) details.open = true;
+
+  // 요약 헤더 (클릭 가능)
   const summary = document.createElement('summary');
   summary.className = `tool-summary-header ${statusClass}`;
-  summary.innerHTML = summaryHtml;
-  
-  // 펼칠 때만 타이머 활성화
-  details.addEventListener('toggle', () => {
-    if (details.open && hasRunning) _ensureStepTimer();
-  });
-  
+  summary.innerHTML = `
+    <span class="tool-summary-icon">${statusIcon}</span>
+    <span class="tool-summary-label">작업</span>
+    <span class="tool-summary-count">${toolUses.length}개</span>
+    ${elapsedHtml ? `<span class="tool-summary-dot">·</span>${elapsedHtml}` : ''}
+    <span class="tool-summary-chevron">▸</span>
+  `;
   details.appendChild(summary);
-  
-  // 도구별 라인
+
+  // 상세 영역
+  const body = document.createElement('div');
+  body.className = 'tool-summary-body';
+
   toolUses.forEach((t, idx) => {
     const toolLine = document.createElement('div');
-    toolLine.className = 'tool-summary-line';
-    
     const status = t.status || (t.endedAt ? 'done' : (t.startedAt ? 'running' : ''));
     const isRunning = status === 'running' || (!t.endedAt && t.startedAt);
-    toolLine.className += ` tool-line-${status}`;
-    
+    toolLine.className = `tool-summary-line tool-line-${status}`;
+
     const arg = formatToolArg(t);
+
+    // 라인 타이머
     let timerHtml = '';
-    
     if (t.startedAt) {
       toolLine.setAttribute('data-step-started', String(t.startedAt));
       if (t.endedAt) {
         toolLine.setAttribute('data-step-ended', String(t.endedAt));
-        const elapsed = fmtElapsedMs(t.endedAt - t.startedAt);
-        timerHtml = `<span style="margin-left:auto;font-size:10px;color:var(--color-text-muted);font-variant-numeric:tabular-nums">${elapsed}</span>`;
+        timerHtml = `<span class="tool-line-timer">${fmtElapsedMs(t.endedAt - t.startedAt)}</span>`;
       } else {
-        timerHtml = `<span class="step-timer step-timer-running" data-step-timer style="margin-left:auto;font-size:10px;color:var(--color-success);font-variant-numeric:tabular-nums">${fmtElapsedMs(Date.now() - t.startedAt)}</span>`;
+        timerHtml = `<span class="step-timer step-timer-running tool-line-timer" data-step-timer>${fmtElapsedMs(Date.now() - t.startedAt)}</span>`;
       }
     }
-    
+
+    // 상세 내용 (입력/출력)
+    const inputTxt = t.content || (t.input ? JSON.stringify(t.input, null, 2) : '');
+    const outputTxt = t.output ? (typeof t.output === 'string' ? t.output : JSON.stringify(t.output, null, 2)) : '';
+    const hasDetail = !!(inputTxt || outputTxt);
+
     const statusBadge = isRunning ? '◌' : status === 'failed' ? '✕' : '✓';
-    const statusColor = isRunning ? 'var(--color-success)' : status === 'failed' ? 'var(--color-error)' : 'var(--color-text-muted)';
-    
-    toolLine.innerHTML = `<span style="color:${statusColor};margin-right:8px">${statusBadge}</span><span>${arg}</span>${timerHtml}`;
-    details.appendChild(toolLine);
+    const statusColor = isRunning ? 'var(--color-success)' : status === 'failed' ? 'var(--color-error)' : 'var(--color-success)';
+
+    toolLine.innerHTML = `
+      <div class="tool-line-header" style="cursor:${hasDetail ? 'pointer' : 'default'}">
+        ${hasDetail ? '<span class="tool-line-chevron">▶</span>' : '<span class="tool-line-chevron-spacer"></span>'}
+        <span class="tool-line-status" style="color:${statusColor}">${statusBadge}</span>
+        <span class="tool-line-arg">${esc(arg)}</span>
+        ${timerHtml}
+      </div>
+      ${hasDetail ? `<div class="tool-line-detail" style="display:none">
+        ${inputTxt ? `<div class="tool-line-detail-section">
+          <div class="tool-line-detail-title">입력</div>
+          <pre class="tool-line-detail-content">${esc(inputTxt)}</pre>
+        </div>` : ''}
+        ${outputTxt ? `<div class="tool-line-detail-section">
+          <div class="tool-line-detail-title">출력</div>
+          <pre class="tool-line-detail-content">${esc(outputTxt.substring(0, 8000))}${outputTxt.length > 8000 ? '\n…[' + (outputTxt.length - 8000) + '자 더 있음]' : ''}</pre>
+        </div>` : ''}
+      </div>` : ''}
+    `;
+
+    if (hasDetail) {
+      const header = toolLine.querySelector('.tool-line-header');
+      const detail = toolLine.querySelector('.tool-line-detail');
+      const chev = toolLine.querySelector('.tool-line-chevron');
+      header.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const isOpen = detail.style.display !== 'none';
+        detail.style.display = isOpen ? 'none' : '';
+        if (chev) chev.style.transform = isOpen ? '' : 'rotate(90deg)';
+      });
+    }
+
+    body.appendChild(toolLine);
   });
-  
-  // 세 줄 표기 개수 제한 시 scroll
-  const content = document.createElement('div');
-  content.style.overflow = 'auto';
-  content.style.maxHeight = 'none';
-  
+
+  details.appendChild(body);
+
+  // 펼칠 때만 타이머 활성화
+  details.addEventListener('toggle', () => {
+    if (details.open && hasRunning) _ensureStepTimer();
+  });
+
   c.appendChild(details);
   if (hasRunning) _ensureStepTimer();
 }

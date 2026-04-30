@@ -111,8 +111,9 @@ def _execute_tool(tool_name: str, tool_input: dict, project_path: str = "") -> s
                 return f"파일 없음: {path}"
             with open(path, 'r', encoding='utf-8', errors='ignore') as f:
                 content = f.read()
-            if len(content) > 30000:
-                content = content[:30000] + f"\n... (총 {len(content)}자, 30000자까지 표시)"
+            _rf_max = int(os.environ.get("AE_READ_FILE_MAX", "120000"))
+            if len(content) > _rf_max:
+                content = content[:_rf_max] + f"\n... (총 {len(content)}자, {_rf_max}자까지 표시)"
             return content
 
         elif tool_name == "write_file":
@@ -149,8 +150,9 @@ def _execute_tool(tool_name: str, tool_input: dict, project_path: str = "") -> s
                 env={**os.environ, "PATH": os.environ.get("PATH", "")},
             )
             output = result.stdout + result.stderr
-            if len(output) > 10000:
-                output = output[:10000] + "\n... (출력 잘림)"
+            _rc_max = int(os.environ.get("AE_RUN_CMD_MAX", "40000"))
+            if len(output) > _rc_max:
+                output = output[:_rc_max] + f"\n... (출력 잘림, 총 {len(output)}자 중 {_rc_max}자 표시)"
             return output or "(출력 없음)"
 
         elif tool_name == "search_files":
@@ -476,7 +478,7 @@ async def run_agent_stream(request: Request):
         """Lambda SSE를 실시간으로 프론트엔드에 중계 — ChatGPT처럼 글자가 써지는 효과.
         max_tokens로 끊기면 자동으로 이어서 생성 (최대 5회)."""
         nonlocal messages
-        max_continues = 5
+        max_continues = int(os.environ.get("AE_MAX_CONTINUES", "50"))
         try:
             for cont in range(max_continues + 1):
                 text_parts = []
@@ -565,7 +567,7 @@ async def run_agent_with_tools(request: Request):
                 yield f"data: {json.dumps({'error': f'message build failed: {e}'}, ensure_ascii=False)}\n\n"
                 return
 
-            max_turns = 10
+            max_turns = int(os.environ.get("AE_MAX_AGENT_TURNS", "50"))
             refreshed_once = False  # 자격증명 만료 자동복구 1회만
 
             for turn in range(max_turns):
@@ -670,7 +672,8 @@ async def run_agent_with_tools(request: Request):
                         tool_output = f"도구 실행 예외: {e}"
                     print(f"[Agent] 도구 실행: {tool_name} → {len(tool_output)}자")
                     yield f"data: {json.dumps({'tool': tool_name, 'output': tool_output[:500], 'status': 'done'}, ensure_ascii=False)}\n\n"
-                    tool_results.append({"toolResult": {"toolUseId": tool_id, "content": [{"text": tool_output[:15000]}]}})
+                    _tr_max = int(os.environ.get("AE_TOOL_RESULT_MAX", "80000"))
+                    tool_results.append({"toolResult": {"toolUseId": tool_id, "content": [{"text": tool_output[:_tr_max]}]}})
 
                 messages.append({"role": "user", "content": tool_results})
         except asyncio.CancelledError:
@@ -901,7 +904,7 @@ async def _orchestrator_run_agent(
         sys_prompt = base_system_prompt + "\n\n" + sys_prompt
 
     messages = [{"role": "user", "content": [{"text": f"작업 {task_id} ({role}): {title}\n\n{description}"}]}]
-    max_turns = 8
+    max_turns = int(os.environ.get("AE_MAX_ORCH_TURNS", "50"))
     final_text_parts = []
     tool_log = []
 
@@ -958,6 +961,10 @@ async def _orchestrator_run_agent(
                 break
             messages.append({"role": "assistant", "content": content_blocks})
             if not tool_use_blocks:
+                if stop_reason == "max_tokens" and text_parts and turn < max_turns - 1:
+                    print(f"[Orchestrator] max_tokens 도달 — 이어서 생성 (task={task_id}, turn={turn+1})")
+                    messages.append({"role": "user", "content": [{"text": "계속 이어서 작성해주세요."}]})
+                    continue
                 break
 
             tool_results = []
@@ -970,7 +977,8 @@ async def _orchestrator_run_agent(
                 tout = await asyncio.to_thread(_execute_tool, tname, tinput, project_path)
                 tool_log.append({"name": tname, "input": tinput, "output": tout[:400]})
                 await emit_queue.put({"type": "agent_tool", "taskId": task_id, "tool": tname, "status": "done", "output": tout[:300]})
-                tool_results.append({"toolResult": {"toolUseId": tid, "content": [{"text": tout[:15000]}]}})
+                _tr_max = int(os.environ.get("AE_TOOL_RESULT_MAX", "80000"))
+                tool_results.append({"toolResult": {"toolUseId": tid, "content": [{"text": tout[:_tr_max]}]}})
             messages.append({"role": "user", "content": tool_results})
 
         final_text = "".join(final_text_parts).strip()
