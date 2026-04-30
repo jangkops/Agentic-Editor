@@ -80,12 +80,17 @@ def main():
         os.environ[k] = v
 
     # Start uvicorn
+    # reload=True는 개발 편의지만, 파일 수정 시 진행 중인 SSE 스트림이 끊김
+    # → ERR_INCOMPLETE_CHUNKED_ENCODING 유발. reload_dirs를 ai_engine만으로 제한하고,
+    #   환경변수 NO_RELOAD=1 로 완전 비활성화 가능.
+    use_reload = os.environ.get("NO_RELOAD", "") != "1"
     import uvicorn
     uvicorn.run(
         "ai_engine.server:app",
         host="0.0.0.0",
         port=8765,
-        reload=True,
+        reload=use_reload,
+        reload_dirs=["ai_engine"] if use_reload else None,
         log_level="info",
     )
 
