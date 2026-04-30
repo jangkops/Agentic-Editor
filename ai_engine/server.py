@@ -624,7 +624,7 @@ async def run_agent_with_tools(request: Request):
                 tool_id = tu.get("toolUseId", "")
                 tool_input = tu.get("input", {})
                 yield f"data: {json.dumps({'tool': tool_name, 'input': tool_input, 'status': 'running'}, ensure_ascii=False)}\n\n"
-                tool_output = _execute_tool(tool_name, tool_input, project_path)
+                tool_output = await asyncio.to_thread(_execute_tool, tool_name, tool_input, project_path)
                 print(f"[Agent] 도구 실행: {tool_name} → {len(tool_output)}자")
                 yield f"data: {json.dumps({'tool': tool_name, 'output': tool_output[:500], 'status': 'done'}, ensure_ascii=False)}\n\n"
                 tool_results.append({"toolResult": {"toolUseId": tool_id, "content": [{"text": tool_output[:15000]}]}})
