@@ -3,8 +3,8 @@
   "version": "0.3.0",
   "main": "electron/main.js",
   "scripts": {
-    "predev": "node scripts/setup-venv.js",
-    "dev:python": "ai_engine/.venv/bin/python -m uvicorn ai_engine.server:app --reload --port 8765",
+    "predev": "node scripts/setup-venv.js && (lsof -ti:8765 | xargs kill -9 2>/dev/null || true)",
+    "dev:python": "ai_engine/.venv/bin/python -m uvicorn ai_engine.server:app --reload --port 8765 --workers 1 --timeout-keep-alive 300",
     "dev:electron": "wait-on http://localhost:8765/health && electron .",
     "dev": "concurrently \"npm:dev:python\" \"npm:dev:electron\"",
     "setup:venv": "node scripts/setup-venv.js",

@@ -241,43 +241,23 @@ class GatewayClient:
             yield {"type": "error", "error": str(e)}
 
     async def _converse_stream_live_once(self, model_id, messages, system_prompt="", tool_config=None):
-        """Lambda Function URL을 통한 실시간 스트리밍 (1회 시도)."""
+        """Lambda Function URL을 통한 스트리밍 (1회 시도, httpx 비동기)."""
         url = self.STREAM_URL
         payload = self._build_payload(model_id, messages, system_prompt, tool_config)
         body_bytes = json.dumps(payload).encode()
 
-        # Lambda Function URL은 'lambda' 서비스로 SigV4 서명
         creds = self._get_creds()
         aws_req = AWSRequest(method="POST", url=url, data=body_bytes,
                              headers={"Content-Type": "application/json"})
         BotocoreSigV4(creds, "lambda", self.region).add_auth(aws_req)
         headers = dict(aws_req.headers)
 
-        loop = asyncio.get_event_loop()
-
-        def _stream_call():
-            """동기 HTTP 스트리밍 호출."""
-            import urllib.request
-            req = urllib.request.Request(url, data=body_bytes, method="POST")
-            for k, v in headers.items():
-                req.add_header(k, v)
-            try:
-                resp = urllib.request.urlopen(req, timeout=300)
-                # UTF-8 멀티바이트 경계 안전: bytes 전체 누적 후 한 번에 디코딩
-                raw_bytes = bytearray()
-                while True:
-                    chunk = resp.read(4096)
-                    if not chunk:
-                        break
-                    raw_bytes.extend(chunk)
-                try:
-                    return bytes(raw_bytes).decode('utf-8')
-                except UnicodeDecodeError:
-                    return bytes(raw_bytes).decode('utf-8', errors='replace')
-            except Exception as e:
-                return json.dumps({"error": str(e)})
-
-        raw = await loop.run_in_executor(None, _stream_call)
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=30.0)) as client:
+                resp = await client.post(url, content=body_bytes, headers=headers)
+                raw = resp.text
+        except Exception as e:
+            return {"decision": "ERROR", "error": str(e)}
 
         # SSE 스트림 파싱 — data: {...} 형식
         text_parts = []
