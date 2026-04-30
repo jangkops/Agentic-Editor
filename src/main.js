@@ -837,9 +837,17 @@ function _apiBody(extra) {
       if (model) body.openFileContent = model.getValue().substring(0, 15000);
     } catch {}
   }
-  // 대화 히스토리 (최근 6개, 각 1000자 제한 — 토큰 절약)
+  // 대화 히스토리 (최근 10개, 각 2000자 제한 — 토큰 절약)
+  //  - user 메시지: 항상 포함
+  //  - assistant 메시지: 오류가 아니고 content가 있으면 포함
+  //    · hiddenInChat(병렬 결과 합본)도 맥락 유지를 위해 포함
+  //    · isConsensus(합의 답변)도 포함 — 이전 턴 맥락 끊김 방지
+  //  - map 단계에서 { role, content }만 남겨 isParallel/hiddenInChat 등 비표준 필드 제거 (서버/LLM 호환)
   const history = (state.messages || [])
-    .filter(m => m.role === 'user' || (m.role === 'assistant' && m.content && !m.isConsensus && !m.content.includes('[오류:')))
+    .filter(m =>
+      m.role === 'user' ||
+      (m.role === 'assistant' && m.content && !m.content.includes('[오류:') && !m.content.includes('[합의 오류:'))
+    )
     .slice(-10)
     .map(m => ({ role: m.role, content: (m.content || '').substring(0, 2000) }));
   if (history.length) body.chatHistory = history;
@@ -1508,6 +1516,8 @@ function renderParallelResultGrid() {
 function renderMessages(){
   const c=document.getElementById('chat-messages');c.innerHTML='';
   for(const msg of state.messages){
+    // 병렬 결과 합본 등 내부 컨텍스트 전용 메시지는 채팅에 렌더하지 않음
+    if(msg.hiddenInChat) continue;
     if(msg.role==='user'){
       const d=document.createElement('div');d.className='chat-msg user fade-in';
       let ah='';if(msg.attachments?.length)ah=msg.attachments.map(a=>['png','jpg','jpeg'].includes(a.ext)?`<img src="${a.data}" style="max-width:200px;max-height:150px;border-radius:8px;margin-bottom:6px;display:block">`:`<div style="font-size:11px;color:rgba(255,255,255,0.7);margin-bottom:4px">+ ${a.name}</div>`).join('');
