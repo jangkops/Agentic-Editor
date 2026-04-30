@@ -1958,7 +1958,7 @@ function renderMessages(){
         c.appendChild(d);
       } else {
         if(msg.workflow){const jc=document.createElement('div');jc.className=`async-job-card ${FI}`;jc.innerHTML=`<div class="job-header"><span class="job-title">에이전트 작업</span></div><div class="job-body">실행 중... 모델: ${state.selectedModel?.name||'?'} Job: ${msg.workflow.id}</div>`;c.appendChild(jc);renderWorkflow(c,msg.workflow);}
-        if(msg.toolUses?.length)renderToolSummary(c,msg.toolUses);
+        if(msg.toolUses?.length) msg.toolUses.forEach(t => renderToolUseCard(c, t));
         if(msg.content){
           const d=document.createElement('div');d.className=`chat-msg assistant ${FI}`;
           const isError = msg.content.includes('[오류:') || msg.content.includes('[합의 오류:');
