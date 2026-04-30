@@ -57,24 +57,7 @@ const state = {
   terminals:[], activeTerminalIdx:0,
   usageData:{inputTokens:0,outputTokens:0,cost:0,history:[]},
   settings:null, authenticated:false, attachedFiles:[],
-  // 합의 모델 잠금: 합의 도출 후 사용자가 '이 모델로 계속 대화' 선택 시 단일 모드로 전환되며 기억되는 모델
-  lastConsensusModel:null,
 };
-
-
-// === user 메시지 핀 유틸 (sendChat ↔ 종료 지점 공통) ===
-function _releaseUserPin(){
-  state._pinAnchorSet = false;
-  state._pinUserMsgIdx = -1;
-  state._pinSpacerPx = 0;
-  try {
-    const cc = document.getElementById('chat-messages');
-    if(cc){
-      cc.style.paddingBottom = '';
-      cc.style.scrollPaddingBottom = '';
-    }
-  } catch(_) {}
-}
 
 // ===== Fix 1: SSO — select 드롭다운으로 프로파일 선택 =====
 document.addEventListener('DOMContentLoaded', async () => {
@@ -751,7 +734,6 @@ function initChat() {
       // 취소
       if (state._abortController) { state._abortController.abort(); state._abortController = null; }
       state.isStreaming = false;
-      _releaseUserPin();
       sendBtn.textContent = '전송';
       sendBtn.style.background = 'var(--color-accent)';
       state.messages.push({ role:'system', content:'사용자가 요청을 취소했습니다.' });
@@ -814,45 +796,7 @@ async function sendMessage() {
     }).join('\n')+(text?'\n\n'+text:'');
   }
   const userMsg={role:'user',content,attachments:[...state.attachedFiles]};
-  state.messages.push(userMsg);state.attachedFiles=[];renderAttachedFiles();
-  // 이 user 메시지를 뷰포트 최상단에 고정할 핀 인덱스 기록 (스트리밍 중 자동 스크롤 억제용)
-  state._pinUserMsgIdx = state.messages.length - 1;
-  state._pinAnchorSet = false;
-  // 컨테이너 하단에 여유 공간(padding-bottom)을 미리 확보 → 답변이 짧아도 user 메시지를 뷰포트 최상단으로 올릴 수 있음
-  // (이게 없으면 scrollHeight가 부족해 브라우저가 scrollTop을 clamp → 질문이 뷰포트 아래쪽에 머물러있게 됨)
-  {
-    const cc0 = document.getElementById('chat-messages');
-    if(cc0){
-      const spacer = Math.max(0, cc0.clientHeight - 80);
-      cc0.style.scrollPaddingBottom = spacer + 'px';
-      cc0.style.paddingBottom = spacer + 'px';
-      state._pinSpacerPx = spacer;
-    }
-  }
-  renderMessages();
-  // user 메시지 노드를 뷰포트 최상단으로 스크롤 — 레이아웃 안정화 후 수행
-  const _anchorUserToTop = () => {
-    const cc = document.getElementById('chat-messages');
-    if(!cc) return false;
-    const userNodes = cc.querySelectorAll('.chat-msg.user');
-    const target = userNodes[userNodes.length-1];
-    if(!target) return false;
-    const desired = Math.max(0, target.offsetTop - 4);
-    cc.scrollTop = desired;
-    // 실제 clamp 후 값 확인 — 근접하면 성공
-    const actual = cc.scrollTop;
-    state._pinAnchorSet = true;
-    return Math.abs(actual - desired) < 2;
-  };
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      if(!_anchorUserToTop()){
-        // 재시도 (레이아웃/이미지 로딩으로 offsetTop이 변할 수 있음)
-        setTimeout(_anchorUserToTop, 16);
-        setTimeout(_anchorUserToTop, 80);
-      }
-    });
-  });
+  state.messages.push(userMsg);state.attachedFiles=[];renderAttachedFiles();renderMessages();
 
   const sendBtn = document.getElementById('send-btn');
   sendBtn.textContent = '취소';
@@ -1048,7 +992,6 @@ async function runSimpleChat(prompt) {
   msg._elapsed = Math.floor((Date.now() - _chatStartTime) / 1000);
   clearInterval(thinkingTimer);
   state.isStreaming = false;
-  _releaseUserPin();
   renderMessages();
   saveConversation();
 }
@@ -1124,7 +1067,6 @@ async function runAgentWorkflow(prompt) {
     addLiveLog('error', `에이전트 실패: ${errMsg}`);
   }
   state.isStreaming = false;
-  _releaseUserPin();
   renderMessages();
   saveConversation();
 }
@@ -1213,7 +1155,6 @@ async function runParallel(prompt) {
   }
 
   state.isStreaming = false;
-  _releaseUserPin();
   renderParallelResultGrid(); renderParallelSlotList(); updateConsensus();
 
   const done = [...state.parallelResults.values()].filter(r => r.status === 'done').length;
@@ -1354,57 +1295,6 @@ function pickConsensusModel() {
 // 합의 이력 저장
 let _consensusHistory = [];
 
-// ===== [합의 모델 이어가기] 액션 핸들러 =====
-// 사용자가 합의 카드의 "🔗 이 모델로 계속 대화" 클릭 시 호출
-function continueWithConsensusModel(modelId, modelName) {
-  const model = ALL_MODELS.find(m => m.id === modelId);
-  if (!model) {
-    state.messages.push({ role:'system', content:`⚠️ 모델을 찾을 수 없음: ${modelName}` });
-    renderMessages();
-    return;
-  }
-  // 1) 모드를 단일로 전환
-  state.mode = 'single';
-  state.selectedModel = model;
-  state.lastConsensusModel = { id: modelId, name: modelName };
-
-  // 2) UI 동기화 — 모드 토글 버튼 active 변경
-  document.querySelectorAll('.mode-toggle-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === 'single'));
-  const sBar = document.getElementById('single-model-bar');
-  const pBar = document.getElementById('parallel-model-bar');
-  const pList = document.getElementById('parallel-selected-list');
-  if (sBar) sBar.style.display = 'block';
-  if (pBar) pBar.style.display = 'none';
-  if (pList) pList.style.display = 'none';
-  try { hideParallelResults(); } catch(_) {}
-
-  // 3) 단일 모델 드롭다운 버튼 텍스트 갱신
-  const mBtn = document.getElementById('model-dropdown-btn');
-  if (mBtn) mBtn.textContent = (model.name || modelName) + ' ▾';
-
-  // 4) 시스템 메시지로 전환 사실 알림
-  state.messages.push({
-    role:'system',
-    content:`🔗 합의 모델로 전환: ${modelName} — 다음 메시지부터 이 모델만 호출됩니다 (모드 전환 버튼으로 병렬로 되돌릴 수 있음)`
-  });
-  renderMessages();
-  saveConversation();
-}
-
-// 사용자가 "🔀 병렬 모드 유지" 클릭 시 호출 (명시적 확인 용도)
-function keepParallelMode() {
-  // 이미 병렬 모드이므로 상태는 그대로, 간단한 안내 메시지만 추가
-  state.messages.push({
-    role:'system',
-    content:'🔀 병렬 모드 유지 — 다음 메시지는 선택된 모델들에 병렬로 호출됩니다'
-  });
-  renderMessages();
-}
-
-// window에 노출 (HTML onclick에서도 호출 가능하게)
-window.continueWithConsensusModel = continueWithConsensusModel;
-window.keepParallelMode = keepParallelMode;
-
 async function runConsensus() {
   const dr = [...state.parallelResults.entries()]
     .filter(([_, r]) => r.status === 'done')
@@ -1450,8 +1340,7 @@ ${dr.map((r, i) => `### 모델 ${i + 1}: ${r.model}\n${r.content.substring(0, 30
 
   state.isStreaming = true;
   state._streamStartTime = Date.now();
-  // [합의 모델 이어가기] 메시지에 모델 정보 포함 → 합의 카드 하단에 버튼 렌더 시 사용
-  const msg = { role:'assistant', content:'', isConsensus: true, consensusModelId, consensusModelName };
+  const msg = { role:'assistant', content:'', isConsensus: true };
   state.messages.push(msg);
 
   try {
@@ -1488,7 +1377,6 @@ ${dr.map((r, i) => `### 모델 ${i + 1}: ${r.model}\n${r.content.substring(0, 30
   }
   msg._elapsed = Math.floor((Date.now() - (state._streamStartTime || Date.now())) / 1000);
   state.isStreaming = false;
-  _releaseUserPin();
 
   // 합의 이력 저장
   const now = new Date();
@@ -1625,150 +1513,19 @@ function renderParallelResultGrid() {
 }
 
 // ===== Render Messages =====
-// 스트리밍 깜빡임 방지용 상태: 마지막 렌더 시점의 메시지 스냅샷
-const _renderCache = { count: 0, lastIdx: -1, lastLen: 0, lastKind: '', wfKey: '', toolKey: '', lastContentLen: 0 };
-
-function _streamFastPath(){
-  // 스트리밍 중이 아니면 fast-path 불가
-  if(!state.isStreaming) return false;
-  const msgs = state.messages.filter(m=>!m.hiddenInChat);
-  if(msgs.length === 0) return false;
-  // 마지막 메시지가 assistant가 아니면 불가
-  const last = msgs[msgs.length-1];
-  if(last.role !== 'assistant') return false;
-  // 메시지 개수가 달라졌으면 fast-path 불가 (새 메시지 추가/삭제)
-  if(msgs.length !== _renderCache.count) return false;
-  // modelName(병렬 결과 카드)은 보수적으로 전체 재렌더
-  if(last.modelName) return false;
-  // workflow/toolUses가 있어도 step 상태·tool 개수가 변하지 않았다면 in-place 허용
-  // status/개수만 키로 사용 — detail·content 길이는 in-place 갱신하므로 제외 (흔들림 방지)
-  const _wfKey = last.workflow ? (last.workflow.steps||[]).map(st=>st.status+':'+(st.name||'')).join('|') : '';
-  const _toolKey = last.toolUses ? last.toolUses.map(t=>(t.path||t.name||'')).join('|') + ':' + last.toolUses.length : '';
-  if(_wfKey !== _renderCache.wfKey) return false;
-  if(_toolKey !== _renderCache.toolKey) return false;
-
-  const c = document.getElementById('chat-messages');
-  if(!c) return false;
-  const nodes = c.querySelectorAll('.chat-msg.assistant');
-  const node = nodes[nodes.length-1];
-  if(!node) return false;
-
-  // content가 비어있다가 생긴 경우: thinking → 실제 본문 전환
-  const hasThinking = !!node.querySelector('.thinking-indicator');
-  if(last.content && hasThinking){
-    // 전환은 전체 재렌더에 맡김
-    return false;
-  }
-  // content가 계속 비어있는 동안 thinking 타이머만 갱신
-  if(!last.content){
-    const ind = node.querySelector('.thinking-indicator');
-    if(!ind) return false;
-    const elapsed = Math.floor((Date.now() - (state._streamStartTime || Date.now())) / 1000);
-    const timeText = elapsed >= 3600 ? `${Math.floor(elapsed/3600)}h ${Math.floor((elapsed%3600)/60)}m` : elapsed >= 60 ? `${Math.floor(elapsed/60)}m ${elapsed%60}s` : `${elapsed}s`;
-    // 텍스트 노드만 갱신 (dots span은 유지)
-    const dots = ind.querySelector('.thinking-dots');
-    ind.innerHTML = '';
-    if(dots) ind.appendChild(dots);
-    ind.appendChild(document.createTextNode(' thinking ' + timeText));
-    return true;
-  }
-  // 본문이 있고 계속 스트리밍 중 → .md-body 또는 .msg-content만 교체
-  const mc = node.querySelector('.msg-content');
-  if(!mc) return false;
-  // 오류 메시지는 보수적으로 전체 재렌더
-  if(last.content.includes('[오류:') || last.content.includes('[합의 오류:')) return false;
-  // consensus 등 특수 케이스는 전체 재렌더
-  if(last.isConsensus) return false;
-
-  // in-place 교체: .msg-content의 innerHTML만 갱신 (node 자체는 유지 → 깜빡임 없음)
-  const elapsedHtml = last._elapsed ? `<div style="font-size:10px;color:var(--color-text-muted);margin-top:4px;text-align:right">${fmtElapsed(last._elapsed)}</div>` : '';
-  const newHtml = `${fmtMd(last.content)}${elapsedHtml}`;
-  // 동일하면 skip
-  if(mc.getAttribute('data-stream-len') === String(last.content.length)) { _inPlaceUpdateSideCards(node, last); return true; }
-  // 기존 action bar(복사/재생성 버튼)가 있으면 구조하여 innerHTML 교체 후 재첨부 → 버튼 유지
-  const existingBar = mc.querySelector(':scope > .msg-action-bar');
-  mc.innerHTML = newHtml;
-  if(existingBar) mc.appendChild(existingBar);
-  mc.setAttribute('data-stream-len', String(last.content.length));
-  // workflow step detail / tool card body도 in-place 갱신 (카드 재생성 X → 흔들림 0)
-  _inPlaceUpdateSideCards(node, last);
-  // 스크롤 정책:
-  // - 핀 활성: user 메시지가 뷰포트 최상단에 고정되도록 유지 (자동 스크롤 X)
-  //   fast-path는 DOM을 파괴하지 않으므로 scrollTop이 유지되지만,
-  //   답변이 길어지면서 scrollHeight가 늘어나도 scrollTop은 손대지 않는다.
-  // - 핀 비활성 & 사용자가 하단 근처: 하단 추종
-  if(!state._pinAnchorSet){
-    const nearBottom = (c.scrollHeight - c.scrollTop - c.clientHeight) < 80;
-    if(nearBottom) c.scrollTop = c.scrollHeight;
-  }
-  return true;
-}
-
-// fast-path 중 workflow step detail / tool card body를 in-place로 갱신 (요소 재생성 금지 → 흔들림 제거)
-function _inPlaceUpdateSideCards(assistantNode, msg){
-  try {
-    // 형제 노드 중 workflow-step / tool-use-card 갱신
-    const parent = assistantNode.parentElement;
-    if(!parent) return;
-    if(msg.workflow && msg.workflow.steps){
-      // assistantNode 이후의 workflow-step 노드들을 순서대로 매칭
-      const stepNodes = [];
-      let sib = assistantNode.nextElementSibling;
-      while(sib && (sib.classList.contains('workflow-step') || sib.classList.contains('tool-use-card') || sib.classList.contains('async-job-card'))){
-        if(sib.classList.contains('workflow-step')) stepNodes.push(sib);
-        sib = sib.nextElementSibling;
-      }
-      for(let i=0;i<msg.workflow.steps.length && i<stepNodes.length;i++){
-        const s = msg.workflow.steps[i];
-        const body = stepNodes[i].querySelector('.workflow-step-body');
-        if(s.detail){
-          if(body){
-            if(body.getAttribute('data-detail-len') !== String(s.detail.length)){
-              body.textContent = s.detail;
-              body.setAttribute('data-detail-len', String(s.detail.length));
-            }
-          }
-        }
-      }
-    }
-    if(msg.toolUses){
-      const toolNodes = [];
-      let sib = assistantNode.nextElementSibling;
-      while(sib){
-        if(sib.classList.contains('tool-use-card')) toolNodes.push(sib);
-        sib = sib.nextElementSibling;
-      }
-      for(let i=0;i<msg.toolUses.length && i<toolNodes.length;i++){
-        const t = msg.toolUses[i];
-        const body = toolNodes[i].querySelector('.tool-use-body');
-        const txt = t.content || t.diff || '';
-        if(body && body.getAttribute('data-body-len') !== String(txt.length)){
-          body.textContent = txt;
-          body.setAttribute('data-body-len', String(txt.length));
-        }
-      }
-    }
-  } catch(_){}
-}
-
 function renderMessages(){
-  // 스트리밍 중이면 fast-path 시도 (전체 재렌더 회피 → 깜빡임 제거)
-  if(_streamFastPath()) return;
-
-  const FI = state.isStreaming ? '' : 'fade-in';
   const c=document.getElementById('chat-messages');c.innerHTML='';
-
   for(const msg of state.messages){
     // 병렬 결과 합본 등 내부 컨텍스트 전용 메시지는 채팅에 렌더하지 않음
     if(msg.hiddenInChat) continue;
     if(msg.role==='user'){
-      const d=document.createElement('div');d.className=`chat-msg user ${FI}`;
+      const d=document.createElement('div');d.className='chat-msg user fade-in';
       let ah='';if(msg.attachments?.length)ah=msg.attachments.map(a=>['png','jpg','jpeg'].includes(a.ext)?`<img src="${a.data}" style="max-width:200px;max-height:150px;border-radius:8px;margin-bottom:6px;display:block">`:`<div style="font-size:11px;color:rgba(255,255,255,0.7);margin-bottom:4px">+ ${a.name}</div>`).join('');
       d.innerHTML=`<div class="msg-content">${ah}${esc(msg.content)}</div>`;
       addCopySupport(d, msg.content);
       c.appendChild(d);
     }else if(msg.role==='system'){
-      const d=document.createElement('div');d.className=`chat-msg system ${FI}`;d.textContent=msg.content;c.appendChild(d);
+      const d=document.createElement('div');d.className='chat-msg system fade-in';d.textContent=msg.content;c.appendChild(d);
     }else{
       if(msg.modelName){
         const d=document.createElement('div');
@@ -1792,7 +1549,7 @@ function renderMessages(){
         if(cpBtn)cpBtn.addEventListener('click',e=>{e.stopPropagation();navigator.clipboard.writeText(msg.content).then(()=>{cpBtn.innerHTML=SVG_CHECK;setTimeout(()=>{cpBtn.innerHTML=SVG_COPY;},1200);}).catch(()=>{});});
         c.appendChild(d);
       } else if(msg.isConsensus){
-        const d=document.createElement('div');d.className=`chat-msg assistant ${FI}`;
+        const d=document.createElement('div');d.className='chat-msg assistant fade-in';
         if (msg.content) {
           const elapsedHtml = msg._elapsed ? `<div style="font-size:10px;color:var(--color-text-muted);margin-top:6px;text-align:right">${fmtElapsed(msg._elapsed)}</div>` : '';
           d.innerHTML=`<div class="msg-content" style="border-left:3px solid var(--color-success);background:var(--color-success-subtle)">
@@ -1809,36 +1566,16 @@ function renderMessages(){
             });
           });
           bar.appendChild(copyBtn); mc.appendChild(bar);
-          // [합의 모델 이어가기] 액션 버튼 2개 — 합의 완료 후(스트리밍 아님)에만 노출
-          if (!state.isStreaming && msg.consensusModelId) {
-            const actions = document.createElement('div');
-            actions.style.cssText = 'display:flex;gap:8px;margin-top:12px;padding-top:10px;border-top:1px dashed var(--color-border);flex-wrap:wrap';
-            const lockBtn = document.createElement('button');
-            lockBtn.className = 'sm-btn';
-            lockBtn.style.cssText = 'background:var(--color-success);color:#fff;border:none;padding:6px 12px;border-radius:6px;font-size:12px;cursor:pointer';
-            lockBtn.textContent = '🔗 이 모델로 계속 대화';
-            lockBtn.title = `${msg.consensusModelName} 단일 모드로 전환하여 이 모델로만 대화를 이어갑니다`;
-            lockBtn.addEventListener('click', () => continueWithConsensusModel(msg.consensusModelId, msg.consensusModelName));
-            const parallelBtn = document.createElement('button');
-            parallelBtn.className = 'sm-btn';
-            parallelBtn.style.cssText = 'background:transparent;color:var(--color-text-secondary);border:1px solid var(--color-border);padding:6px 12px;border-radius:6px;font-size:12px;cursor:pointer';
-            parallelBtn.textContent = '🔀 병렬 모드 유지';
-            parallelBtn.title = '다음 메시지도 병렬로 여러 모델에 호출합니다 (기본 동작)';
-            parallelBtn.addEventListener('click', () => keepParallelMode());
-            actions.appendChild(lockBtn);
-            actions.appendChild(parallelBtn);
-            mc.appendChild(actions);
-          }
         } else if (state.isStreaming) {
           d.innerHTML=`<div class="msg-content thinking-indicator" style="border-left:3px solid var(--color-success);background:var(--color-success-subtle)">
             <span class="thinking-dots"><span></span><span></span><span></span></span> 합의 도출 중</div>`;
         }
         c.appendChild(d);
       } else {
-        if(msg.workflow){const jc=document.createElement('div');jc.className=`async-job-card ${FI}`;jc.innerHTML=`<div class="job-header"><span class="job-title">에이전트 작업</span></div><div class="job-body">실행 중... 모델: ${state.selectedModel?.name||'?'} Job: ${msg.workflow.id}</div>`;c.appendChild(jc);renderWorkflow(c,msg.workflow);}
+        if(msg.workflow){const jc=document.createElement('div');jc.className='async-job-card fade-in';jc.innerHTML=`<div class="job-header"><span class="job-title">에이전트 작업</span></div><div class="job-body">실행 중... 모델: ${state.selectedModel?.name||'?'} Job: ${msg.workflow.id}</div>`;c.appendChild(jc);renderWorkflow(c,msg.workflow);}
         if(msg.toolUses?.length)for(const t of msg.toolUses)renderToolUseCard(c,t);
         if(msg.content){
-          const d=document.createElement('div');d.className=`chat-msg assistant ${FI}`;
+          const d=document.createElement('div');d.className='chat-msg assistant fade-in';
           const isError = msg.content.includes('[오류:') || msg.content.includes('[합의 오류:');
           if (isError) {
             const errorText = msg.content.match(/\[오류:\s*(.+?)\]/)?.[1] || msg.content;
@@ -1856,7 +1593,7 @@ function renderMessages(){
           addCopySupport(d, msg.content);
           c.appendChild(d);
         } else if(!msg.workflow && state.isStreaming) {
-          const d=document.createElement('div');d.className=`chat-msg assistant ${FI}`;
+          const d=document.createElement('div');d.className='chat-msg assistant fade-in';
           const elapsed = Math.floor((Date.now() - (state._streamStartTime || Date.now())) / 1000);
           const timeText = elapsed >= 3600 ? `${Math.floor(elapsed/3600)}h ${Math.floor((elapsed%3600)/60)}m` : elapsed >= 60 ? `${Math.floor(elapsed/60)}m ${elapsed%60}s` : `${elapsed}s`;
           d.innerHTML=`<div class="msg-content thinking-indicator"><span class="thinking-dots"><span></span><span></span><span></span></span> thinking ${timeText}</div>`;
@@ -1865,41 +1602,7 @@ function renderMessages(){
       }
     }
   }
-  // 렌더 캐시 업데이트 (스트리밍 fast-path 판단용)
-  const visible = state.messages.filter(m=>!m.hiddenInChat);
-  _renderCache.count = visible.length;
-  const lastV = visible[visible.length-1];
-  _renderCache.lastLen = lastV && lastV.content ? lastV.content.length : 0;
-  _renderCache.lastKind = lastV ? lastV.role : '';
-  _renderCache.lastContentLen = lastV && lastV.content ? lastV.content.length : 0;
-  // fast-path 판정 키와 100% 일치해야 함 (불일치 시 매번 전체 재렌더 → 스크롤 리셋 버그)
-  _renderCache.wfKey = (lastV && lastV.workflow) ? (lastV.workflow.steps||[]).map(st=>st.status+':'+(st.name||'')).join('|') : '';
-  _renderCache.toolKey = (lastV && lastV.toolUses) ? lastV.toolUses.map(t=>(t.path||t.name||'')).join('|') + ':' + lastV.toolUses.length : '';
-  // 스크롤 정책:
-  // 1) user 메시지 핀이 활성화 & 앵커가 아직 설정 전이면 여기서는 손대지 않음 (sendChat의 rAF가 처리)
-  // 2) 핀이 이미 설정된 상태(스트리밍 중)에는 자동 스크롤 억제 — 사용자 질문 위치 유지
-  // 3) 그 외엔 하단 근처일 때만 따라감
-  if(state._pinAnchorSet){
-    // 핀 활성화 동안: DOM이 재생성(innerHTML='')되면 scrollTop이 0으로 리셋되므로
-    // 매 렌더마다 해당 user 메시지 노드를 뷰포트 최상단으로 재앵커링한다.
-    // (이걸 안 하면 질문이 "아래쪽에 머물러있다가 완료 후 제자리 찾는" 현상 발생)
-    // 전체 재렌더로 style이 날아갈 일은 없지만, 혹시 모르니 padding-bottom을 재보장.
-    if(state._pinSpacerPx && state._pinSpacerPx > 0){
-      if(c.style.paddingBottom !== state._pinSpacerPx + 'px'){
-        c.style.paddingBottom = state._pinSpacerPx + 'px';
-      }
-    }
-    const userNodes = c.querySelectorAll('.chat-msg.user');
-    const target = userNodes[userNodes.length-1];
-    if(target){
-      const desired = Math.max(0, target.offsetTop - 4);
-      // 이미 같은 위치면 건너뛰어 불필요한 레이아웃 방지
-      if(Math.abs(c.scrollTop - desired) > 1) c.scrollTop = desired;
-    }
-  } else {
-    const nearBottom = (c.scrollHeight - c.scrollTop - c.clientHeight) < 80;
-    if(nearBottom) c.scrollTop = c.scrollHeight;
-  }
+  c.scrollTop=c.scrollHeight;
 }
 
 // SVG 아이콘
@@ -1963,8 +1666,8 @@ function addCopySupport(el, text) {
 
   mc.appendChild(bar);
 }
-function renderWorkflow(c,wf){for(const s of wf.steps){const d=document.createElement('div');const sc={done:'step-done',running:'step-running',failed:'step-failed'}[s.status]||'';d.className=`workflow-step ${sc} ${state.isStreaming?'':'fade-in'}`;const ic={done:'done',running:'running',failed:'failed'}[s.status]||'';const bc={done:'step-badge-done',running:'step-badge-running',failed:'step-badge-failed'}[s.status]||'';const bt={done:'완료',running:'진행 중',failed:'실패'}[s.status]||'';d.innerHTML=`<div class="workflow-step-header"><span class="step-indicator ${ic}"></span><span class="step-title">● ${s.name}</span>${bt?`<span class="step-badge ${bc}">${bt}</span>`:''}</div>${s.detail?`<div class="workflow-step-body">${esc(s.detail)}</div>`:''}`;c.appendChild(d);}}
-function renderToolUseCard(c,t){const card=document.createElement('div');card.className=`tool-use-card ${state.isStreaming?'':'fade-in'}`;card.innerHTML=`<div class="tool-use-header"><span class="tool-badge">도구</span><span class="tool-label">파일 쓰기: ${esc(t.path||t.name||'')}</span></div><div class="tool-use-body">${esc(t.content||t.diff||JSON.stringify(t,null,2))}</div>`;c.appendChild(card);}
+function renderWorkflow(c,wf){for(const s of wf.steps){const d=document.createElement('div');const sc={done:'step-done',running:'step-running',failed:'step-failed'}[s.status]||'';d.className=`workflow-step ${sc} fade-in`;const ic={done:'done',running:'running',failed:'failed'}[s.status]||'';const bc={done:'step-badge-done',running:'step-badge-running',failed:'step-badge-failed'}[s.status]||'';const bt={done:'완료',running:'진행 중',failed:'실패'}[s.status]||'';d.innerHTML=`<div class="workflow-step-header"><span class="step-indicator ${ic}"></span><span class="step-title">● ${s.name}</span>${bt?`<span class="step-badge ${bc}">${bt}</span>`:''}</div>${s.detail?`<div class="workflow-step-body">${esc(s.detail)}</div>`:''}`;c.appendChild(d);}}
+function renderToolUseCard(c,t){const card=document.createElement('div');card.className='tool-use-card fade-in';card.innerHTML=`<div class="tool-use-header"><span class="tool-badge">도구</span><span class="tool-label">파일 쓰기: ${esc(t.path||t.name||'')}</span></div><div class="tool-use-body">${esc(t.content||t.diff||JSON.stringify(t,null,2))}</div>`;c.appendChild(card);}
 function fmtMd(t){
   let h=esc(t);
   // 코드 블록

@@ -1,0 +1,57 @@
+// 스트리밍 중 깜빡임 제거를 위한 경량 in-place 업데이터.
+// 마지막 assistant 메시지의 본문만 바뀐 경우 전체 재렌더 없이 해당 DOM만 갱신한다.
+// 실패 시 false 반환 → 호출부에서 full renderMessages()로 폴백.
+let _lastRenderSnapshot = { count: 0, lastContentLen: 0, lastToolCount: 0, lastRole: '' };
+
+function _visibleMessages() {
+  return state.messages.filter(m => !m.hiddenInChat);
+}
+
+function tryInPlaceStreamUpdate() {
+  const vis = _visibleMessages();
+  if (vis.length === 0) return false;
+  const last = vis[vis.length - 1];
+  // 모델 배지/합의/시스템 메시지는 in-place 대상 아님 (레이아웃 변화 가능)
+  if (last.role !== 'assistant') return false;
+  if (last.modelName || last.isConsensus) return false;
+  if (last.workflow) return false; // workflow 카드는 전체 렌더에 의존
+  if (last.toolUses && last.toolUses.length !== _lastRenderSnapshot.lastToolCount) return false;
+  // 메시지 개수가 변했으면 append/제거 필요 → 전체 렌더
+  if (vis.length !== _lastRenderSnapshot.count) return false;
+
+  const c = document.getElementById('chat-messages');
+  if (!c) return false;
+  // 마지막 assistant DOM 찾기 (아래에서 위로)
+  const nodes = c.querySelectorAll('.chat-msg.assistant');
+  if (!nodes.length) return false;
+  const target = nodes[nodes.length - 1];
+  const mc = target.querySelector('.msg-content');
+  if (!mc) return false;
+
+  // thinking 인디케이터 → 실제 content 로 전환하거나, 누적 업데이트
+  if (!last.content) return false; // content 없으면 full 렌더로 thinking 유지
+  const isError = last.content.includes('[오류:') || last.content.includes('[합의 오류:');
+  if (isError) return false; // 에러 분기는 full 렌더
+
+  const elapsedHtml = last._elapsed ? `<div style="font-size:10px;color:var(--color-text-muted);margin-top:4px;text-align:right">${fmtElapsed(last._elapsed)}</div>` : '';
+  const newHtml = `${fmtMd(last.content)}${elapsedHtml}`;
+  // 동일하면 skip
+  if (mc.getAttribute('data-content-len') === String(last.content.length) && !last._elapsed) {
+    // 길이 변화 없음 → 작업 불필요
+  } else {
+    mc.innerHTML = newHtml;
+    mc.setAttribute('data-content-len', String(last.content.length));
+    // 액션 바 (복사/실행)가 사라졌을 수 있으므로 재부착
+    // 단, 스트리밍 중엔 생략하고 완료 시 renderMessages()가 다시 붙인다.
+  }
+  // 스크롤은 사용자 개입이 없는 한 바닥 고정
+  const nearBottom = c.scrollHeight - c.scrollTop - c.clientHeight < 120;
+  if (nearBottom) c.scrollTop = c.scrollHeight;
+  return true;
+}
+
+function renderMessagesSmart() {
+  // 스트리밍 중에만 in-place 시도, 성공하면 전체 렌더 skip
+  if (state.isStreaming && tryInPlaceStreamUpdate()) return;
+  renderMessages();
+}

@@ -57,8 +57,6 @@ const state = {
   terminals:[], activeTerminalIdx:0,
   usageData:{inputTokens:0,outputTokens:0,cost:0,history:[]},
   settings:null, authenticated:false, attachedFiles:[],
-  // 합의 모델 잠금: 합의 도출 후 사용자가 '이 모델로 계속 대화' 선택 시 단일 모드로 전환되며 기억되는 모델
-  lastConsensusModel:null,
 };
 
 
@@ -1354,57 +1352,6 @@ function pickConsensusModel() {
 // 합의 이력 저장
 let _consensusHistory = [];
 
-// ===== [합의 모델 이어가기] 액션 핸들러 =====
-// 사용자가 합의 카드의 "🔗 이 모델로 계속 대화" 클릭 시 호출
-function continueWithConsensusModel(modelId, modelName) {
-  const model = ALL_MODELS.find(m => m.id === modelId);
-  if (!model) {
-    state.messages.push({ role:'system', content:`⚠️ 모델을 찾을 수 없음: ${modelName}` });
-    renderMessages();
-    return;
-  }
-  // 1) 모드를 단일로 전환
-  state.mode = 'single';
-  state.selectedModel = model;
-  state.lastConsensusModel = { id: modelId, name: modelName };
-
-  // 2) UI 동기화 — 모드 토글 버튼 active 변경
-  document.querySelectorAll('.mode-toggle-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === 'single'));
-  const sBar = document.getElementById('single-model-bar');
-  const pBar = document.getElementById('parallel-model-bar');
-  const pList = document.getElementById('parallel-selected-list');
-  if (sBar) sBar.style.display = 'block';
-  if (pBar) pBar.style.display = 'none';
-  if (pList) pList.style.display = 'none';
-  try { hideParallelResults(); } catch(_) {}
-
-  // 3) 단일 모델 드롭다운 버튼 텍스트 갱신
-  const mBtn = document.getElementById('model-dropdown-btn');
-  if (mBtn) mBtn.textContent = (model.name || modelName) + ' ▾';
-
-  // 4) 시스템 메시지로 전환 사실 알림
-  state.messages.push({
-    role:'system',
-    content:`🔗 합의 모델로 전환: ${modelName} — 다음 메시지부터 이 모델만 호출됩니다 (모드 전환 버튼으로 병렬로 되돌릴 수 있음)`
-  });
-  renderMessages();
-  saveConversation();
-}
-
-// 사용자가 "🔀 병렬 모드 유지" 클릭 시 호출 (명시적 확인 용도)
-function keepParallelMode() {
-  // 이미 병렬 모드이므로 상태는 그대로, 간단한 안내 메시지만 추가
-  state.messages.push({
-    role:'system',
-    content:'🔀 병렬 모드 유지 — 다음 메시지는 선택된 모델들에 병렬로 호출됩니다'
-  });
-  renderMessages();
-}
-
-// window에 노출 (HTML onclick에서도 호출 가능하게)
-window.continueWithConsensusModel = continueWithConsensusModel;
-window.keepParallelMode = keepParallelMode;
-
 async function runConsensus() {
   const dr = [...state.parallelResults.entries()]
     .filter(([_, r]) => r.status === 'done')
@@ -1450,8 +1397,7 @@ ${dr.map((r, i) => `### 모델 ${i + 1}: ${r.model}\n${r.content.substring(0, 30
 
   state.isStreaming = true;
   state._streamStartTime = Date.now();
-  // [합의 모델 이어가기] 메시지에 모델 정보 포함 → 합의 카드 하단에 버튼 렌더 시 사용
-  const msg = { role:'assistant', content:'', isConsensus: true, consensusModelId, consensusModelName };
+  const msg = { role:'assistant', content:'', isConsensus: true };
   state.messages.push(msg);
 
   try {
@@ -1809,26 +1755,6 @@ function renderMessages(){
             });
           });
           bar.appendChild(copyBtn); mc.appendChild(bar);
-          // [합의 모델 이어가기] 액션 버튼 2개 — 합의 완료 후(스트리밍 아님)에만 노출
-          if (!state.isStreaming && msg.consensusModelId) {
-            const actions = document.createElement('div');
-            actions.style.cssText = 'display:flex;gap:8px;margin-top:12px;padding-top:10px;border-top:1px dashed var(--color-border);flex-wrap:wrap';
-            const lockBtn = document.createElement('button');
-            lockBtn.className = 'sm-btn';
-            lockBtn.style.cssText = 'background:var(--color-success);color:#fff;border:none;padding:6px 12px;border-radius:6px;font-size:12px;cursor:pointer';
-            lockBtn.textContent = '🔗 이 모델로 계속 대화';
-            lockBtn.title = `${msg.consensusModelName} 단일 모드로 전환하여 이 모델로만 대화를 이어갑니다`;
-            lockBtn.addEventListener('click', () => continueWithConsensusModel(msg.consensusModelId, msg.consensusModelName));
-            const parallelBtn = document.createElement('button');
-            parallelBtn.className = 'sm-btn';
-            parallelBtn.style.cssText = 'background:transparent;color:var(--color-text-secondary);border:1px solid var(--color-border);padding:6px 12px;border-radius:6px;font-size:12px;cursor:pointer';
-            parallelBtn.textContent = '🔀 병렬 모드 유지';
-            parallelBtn.title = '다음 메시지도 병렬로 여러 모델에 호출합니다 (기본 동작)';
-            parallelBtn.addEventListener('click', () => keepParallelMode());
-            actions.appendChild(lockBtn);
-            actions.appendChild(parallelBtn);
-            mc.appendChild(actions);
-          }
         } else if (state.isStreaming) {
           d.innerHTML=`<div class="msg-content thinking-indicator" style="border-left:3px solid var(--color-success);background:var(--color-success-subtle)">
             <span class="thinking-dots"><span></span><span></span><span></span></span> 합의 도출 중</div>`;
