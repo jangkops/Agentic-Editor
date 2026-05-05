@@ -1087,6 +1087,16 @@ async function runAgentWorkflow(prompt) {
   state._abortController = new AbortController();
   const timeoutId = setTimeout(() => { if (state._abortController) state._abortController.abort(); }, 300000);
   addLiveLog('request', `에이전트: ${state.selectedModel.name}`, prompt.substring(0, 100));
+
+  // ===== Checkpoint: 에이전트 작업 전 자동 스냅샷 =====
+  let _checkpointCreated = false;
+  if (state.folderPath && window.electronAPI?.gitStashPush) {
+    try {
+      const r = await window.electronAPI.gitStashPush(state.folderPath, `agent-checkpoint-${Date.now()}`);
+      if (r.ok && !r.skipped) { _checkpointCreated = true; }
+    } catch (_) {}
+  }
+
   const wfId = 'wf-' + Date.now();
   const _wfNow = Date.now();
   const wf = { id:wfId, steps:[
@@ -1094,7 +1104,7 @@ async function runAgentWorkflow(prompt) {
     { name:'작업 실행', status:'pending', detail:'', startedAt:null, endedAt:null },
     { name:'완료', status:'pending', detail:'', startedAt:null, endedAt:null },
   ]};
-  const msg = { role:'assistant', content:'', workflow:wf, toolUses:[] };
+  const msg = { role:'assistant', content:'', workflow:wf, toolUses:[], _checkpointCreated };
   state.messages.push(msg);
   renderMessages();
   try {
@@ -2015,6 +2025,33 @@ function renderMessages(){
             d.innerHTML=`<div class="msg-content">${fmtMd(msg.content)}${elapsedHtml}</div>`;
           }
           addCopySupport(d, msg.content);
+          // Checkpoint restore 버튼 — 에이전트 작업 완료 후, 스트리밍 아닐 때만
+          if (msg._checkpointCreated && !state.isStreaming && msg.workflow) {
+            const allDone = msg.workflow.steps.every(s => s.status === 'done' || s.status === 'failed');
+            if (allDone) {
+              const restoreBar = document.createElement('div');
+              restoreBar.style.cssText = 'margin-top:8px;padding-top:8px;border-top:1px solid var(--color-border);display:flex;gap:8px;align-items:center';
+              restoreBar.innerHTML = `<button class="msg-action-btn" style="width:auto;padding:4px 10px;font-size:11px;gap:4px;display:inline-flex;align-items:center" data-restore-checkpoint title="에이전트 작업 전 상태로 되돌리기">⟲ 되돌리기</button><span style="font-size:10px;color:var(--color-text-muted)">에이전트 작업 전 체크포인트</span>`;
+              restoreBar.querySelector('[data-restore-checkpoint]').addEventListener('click', async () => {
+                if (!confirm('에이전트가 수정한 파일을 작업 전 상태로 되돌립니다. 계속하시겠습니까?')) return;
+                const btn = restoreBar.querySelector('[data-restore-checkpoint]');
+                btn.textContent = '복원 중...'; btn.disabled = true;
+                try {
+                  const r = await window.electronAPI.gitStashPop(state.folderPath);
+                  if (r.ok) {
+                    state.messages.push({ role:'system', content:'✅ 체크포인트 복원 완료 — 에이전트 작업 전 상태로 되돌렸습니다.' });
+                    msg._checkpointCreated = false;
+                  } else {
+                    state.messages.push({ role:'system', content:`⚠️ 복원 실패: ${r.error}` });
+                  }
+                } catch (e) {
+                  state.messages.push({ role:'system', content:`⚠️ 복원 오류: ${e.message}` });
+                }
+                renderMessages();
+              });
+              d.querySelector('.msg-content')?.appendChild(restoreBar);
+            }
+          }
           c.appendChild(d);
         } else if(!msg.workflow && state.isStreaming) {
           const d=document.createElement('div');d.className=`chat-msg assistant ${FI}`;

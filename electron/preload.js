@@ -55,6 +55,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   gitBranches: (dirPath) => ipcRenderer.invoke('git:branches', dirPath),
   gitCheckout: (dirPath, branch, opts) => ipcRenderer.invoke('git:checkout', dirPath, branch, opts),
   gitStatus: (dirPath) => ipcRenderer.invoke('git:status', dirPath),
+  gitStashPush: (dirPath, message) => ipcRenderer.invoke('git:stash-push', dirPath, message),
+  gitStashPop: (dirPath) => ipcRenderer.invoke('git:stash-pop', dirPath),
+  gitStashList: (dirPath) => ipcRenderer.invoke('git:stash-list', dirPath),
+  gitDiscardAll: (dirPath) => ipcRenderer.invoke('git:discard-all', dirPath),
 
   // Search
   projectSearch: (dirPath, query, options) => ipcRenderer.invoke('git:search', dirPath, query, options),

@@ -300,6 +300,72 @@ function registerGitHandlers() {
       return { ok: false, error: msg };
     }
   });
+
+  // ===== Checkpoint/Restore (Git Stash 기반) =====
+
+  ipcMain.handle('git:stash-push', async (_, dirPath, message) => {
+    try {
+      if (!dirPath) return { ok: false, error: 'dirPath required' };
+      const msg = message || `checkpoint-${Date.now()}`;
+      // 변경사항이 없으면 stash 불필요
+      const status = execSync('git status --porcelain', { cwd: dirPath, encoding: 'utf-8' }).trim();
+      if (!status) return { ok: true, skipped: true, message: 'nothing to stash' };
+      const output = execSync(`git stash push -m "${msg}" --include-untracked 2>&1`, {
+        cwd: dirPath, encoding: 'utf-8', timeout: 10000,
+      }).trim();
+      return { ok: true, output, message: msg };
+    } catch (error) {
+      const msg = String(error.stdout || error.stderr || error.message || error);
+      console.error('[git:stash-push] Error:', msg);
+      return { ok: false, error: msg };
+    }
+  });
+
+  ipcMain.handle('git:stash-pop', async (_, dirPath) => {
+    try {
+      if (!dirPath) return { ok: false, error: 'dirPath required' };
+      // stash가 비어있는지 확인
+      const list = execSync('git stash list', { cwd: dirPath, encoding: 'utf-8' }).trim();
+      if (!list) return { ok: false, error: 'stash가 비어있습니다' };
+      const output = execSync('git stash pop 2>&1', {
+        cwd: dirPath, encoding: 'utf-8', timeout: 10000,
+      }).trim();
+      return { ok: true, output };
+    } catch (error) {
+      const msg = String(error.stdout || error.stderr || error.message || error);
+      console.error('[git:stash-pop] Error:', msg);
+      return { ok: false, error: msg };
+    }
+  });
+
+  ipcMain.handle('git:stash-list', async (_, dirPath) => {
+    try {
+      if (!dirPath) return { ok: true, stashes: [] };
+      const output = execSync('git stash list --format="%gd|%s|%ci"', {
+        cwd: dirPath, encoding: 'utf-8', timeout: 5000,
+      }).trim();
+      if (!output) return { ok: true, stashes: [] };
+      const stashes = output.split('\n').map(line => {
+        const [ref, message, date] = line.split('|');
+        return { ref: ref.trim(), message: message.trim(), date: date.trim() };
+      });
+      return { ok: true, stashes };
+    } catch (error) {
+      return { ok: true, stashes: [] };
+    }
+  });
+
+  ipcMain.handle('git:discard-all', async (_, dirPath) => {
+    try {
+      if (!dirPath) return { ok: false, error: 'dirPath required' };
+      execSync('git checkout -- . 2>&1', { cwd: dirPath, encoding: 'utf-8', timeout: 10000 });
+      execSync('git clean -fd 2>&1', { cwd: dirPath, encoding: 'utf-8', timeout: 10000 });
+      return { ok: true };
+    } catch (error) {
+      const msg = String(error.stdout || error.stderr || error.message || error);
+      return { ok: false, error: msg };
+    }
+  });
 }
 
 module.exports = { registerGitHandlers };
