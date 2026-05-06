@@ -32,7 +32,7 @@ class WindowManager {
     });
 
     // HTML 로드
-    const htmlPath = path.join(__dirname, 'index.html');
+    const htmlPath = path.join(__dirname, '..', '..', 'src', 'index.html');
     this.mainWindow.loadFile(htmlPath);
 
     // 개발 모드: DevTools 열기 (선택사항)
