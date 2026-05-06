@@ -1214,9 +1214,7 @@ async function runParallel(prompt) {
   state.isStreaming = true;
   state._streamStartTime = Date.now();
   state._abortController = new AbortController();
-  // 타임아웃: 호출 수에 비례 (기본 5분 + 슬롯당 30초, 최대 30분)
-  const _parallelTimeoutMs = Math.min(30 * 60 * 1000, 300000 + _expandedSlots.length * 30000);
-  const timeoutId = setTimeout(() => { if (state._abortController) state._abortController.abort(); }, _parallelTimeoutMs);
+  // 병렬 호출은 타임아웃 없음 (서버 heartbeat로 연결 유지, 사용자가 수동 취소 가능)
   addLiveLog('request', `병렬 호출: ${_expandedSlots.length}개 모델`);
 
   // 스케일 반영: 각 슬롯의 scale만큼 복제하여 실제 호출 목록 생성
@@ -1282,6 +1280,8 @@ async function runParallel(prompt) {
         if (d === '[DONE]') continue;
         try {
           const ev = JSON.parse(d);
+          // heartbeat 이벤트는 무시 (연결 유지 목적)
+          if (ev.heartbeat) continue;
           if (ev.slotId) {
             const slot = state.parallelSlots.find(s => s.slotId === ev.slotId);
             const modelName = slot?.model?.name || ev.modelId || '';
@@ -1295,8 +1295,8 @@ async function runParallel(prompt) {
       }
     }
   } catch (e) {
-    clearTimeout(timeoutId);
-    const errMsg = e.name === 'AbortError' ? '요청 시간 초과 또는 취소됨' : e.message;
+    // (타임아웃 없음 — 사용자 수동 취소만)
+    const errMsg = e.name === 'AbortError' ? '사용자가 요청을 취소했습니다.' : e.message;
     // [Fix #3] 모든 running 슬롯을 error로 변경하되, 이미 부분 수신한 content는 보존
     for (const [sid, r] of state.parallelResults) {
       if (r.status === 'running' || r.status === 'pending') {

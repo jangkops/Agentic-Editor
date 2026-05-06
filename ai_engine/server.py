@@ -805,7 +805,7 @@ async def run_agent_parallel(request: Request):
                     return {"slotId": slot_id, "modelId": model_id, "status": "error", "content": str(e)}
             return {"slotId": slot_id, "modelId": model_id, "status": "error", "content": "재시도 3회 실패"}
 
-        # 배치 실행: 10개씩 동시 호출 (rate limit 방지)
+        # 배치 실행: 10개씩 동시 호출 (rate limit 방지) + 배치 간 heartbeat
         batch_size = 10
         for i in range(0, len(models), batch_size):
             batch = models[i:i+batch_size]
@@ -813,6 +813,9 @@ async def run_agent_parallel(request: Request):
             for coro in asyncio.as_completed(tasks):
                 result = await coro
                 yield f"data: {json.dumps(result, ensure_ascii=False)}\n\n"
+            # 배치 간 heartbeat — 클라이언트 idle timeout 방지
+            if i + batch_size < len(models):
+                yield f"data: {json.dumps({'heartbeat': True, 'progress': min(i+batch_size, len(models)), 'total': len(models)})}\n\n"
 
         yield "data: [DONE]\n\n"
 
