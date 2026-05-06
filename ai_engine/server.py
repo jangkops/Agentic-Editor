@@ -755,43 +755,64 @@ async def run_agent_parallel(request: Request):
             # RAG 컨텍스트를 시스템 프롬프트에 추가
             if rag_context:
                 sp = (sp + "\n\n" + rag_context) if sp else rag_context
-            try:
-                # converse-stream 우선 시도, 실패 시 기존 /converse fallback
-                result = await asyncio.wait_for(
-                    gw.converse_stream_live(model_id=sid, messages=messages, system_prompt=sp),
-                    timeout=300
-                )
-                if result.get("decision") == "ERROR":
-                    result = await asyncio.wait_for(
-                        gw.converse(model_id=sid, messages=messages, system_prompt=sp),
-                        timeout=300
-                    )
-                decision = result.get("decision", "")
-                if decision == "ALLOW":
-                    output = result.get("output", {}).get("message", {}).get("content", [])
-                    text = "\n".join(c.get("text", "") for c in output if "text" in c)
-                    return {"slotId": slot_id, "modelId": model_id, "status": "done", "content": text}
-                elif decision == "ACCEPTED":
-                    job_id = result.get("job_id", "")
-                    if job_id:
-                        text = await gw._poll_job_result(job_id, max_wait=300)
-                        if text:
-                            return {"slotId": slot_id, "modelId": model_id, "status": "done", "content": text}
-                    return {"slotId": slot_id, "modelId": model_id, "status": "error", "content": "ACCEPTED — 결과 대기 시간 초과"}
-                elif decision == "DENY":
-                    return {"slotId": slot_id, "modelId": model_id, "status": "error", "content": result.get("denial_reason", "DENIED")}
-                else:
-                    return {"slotId": slot_id, "modelId": model_id, "status": "error", "content": result.get("error", f"Unknown: {decision}")}
-            except asyncio.TimeoutError:
-                return {"slotId": slot_id, "modelId": model_id, "status": "error", "content": "300초 타임아웃"}
-            except Exception as e:
-                return {"slotId": slot_id, "modelId": model_id, "status": "error", "content": str(e)}
 
-        # 동시 실행
-        tasks = [call_model(slot) for slot in models]
-        for coro in asyncio.as_completed(tasks):
-            result = await coro
-            yield f"data: {json.dumps(result, ensure_ascii=False)}\n\n"
+            # 자동 재시도 (최대 3회, 지수 백오프)
+            for attempt in range(3):
+                try:
+                    result = await asyncio.wait_for(
+                        gw.converse_stream_live(model_id=sid, messages=messages, system_prompt=sp),
+                        timeout=600
+                    )
+                    if result.get("decision") == "ERROR":
+                        err = result.get("error", "")
+                        # throttling/rate limit → 재시도
+                        if attempt < 2 and ("throttl" in err.lower() or "rate" in err.lower() or "timed out" in err.lower()):
+                            await asyncio.sleep(2 ** attempt * 2)
+                            continue
+                        result = await asyncio.wait_for(
+                            gw.converse(model_id=sid, messages=messages, system_prompt=sp),
+                            timeout=600
+                        )
+                    decision = result.get("decision", "")
+                    if decision == "ALLOW":
+                        output = result.get("output", {}).get("message", {}).get("content", [])
+                        text = "\n".join(c.get("text", "") for c in output if "text" in c)
+                        return {"slotId": slot_id, "modelId": model_id, "status": "done", "content": text}
+                    elif decision == "ACCEPTED":
+                        job_id = result.get("job_id", "")
+                        if job_id:
+                            text = await gw._poll_job_result(job_id, max_wait=600)
+                            if text:
+                                return {"slotId": slot_id, "modelId": model_id, "status": "done", "content": text}
+                        return {"slotId": slot_id, "modelId": model_id, "status": "error", "content": "ACCEPTED — 결과 대기 시간 초과"}
+                    elif decision == "DENY":
+                        return {"slotId": slot_id, "modelId": model_id, "status": "error", "content": result.get("denial_reason", "DENIED")}
+                    else:
+                        err_msg = result.get("error", f"Unknown: {decision}")
+                        if attempt < 2 and ("throttl" in err_msg.lower() or "timed out" in err_msg.lower()):
+                            await asyncio.sleep(2 ** attempt * 2)
+                            continue
+                        return {"slotId": slot_id, "modelId": model_id, "status": "error", "content": err_msg}
+                except asyncio.TimeoutError:
+                    if attempt < 2:
+                        await asyncio.sleep(2 ** attempt * 2)
+                        continue
+                    return {"slotId": slot_id, "modelId": model_id, "status": "error", "content": "600초 타임아웃"}
+                except Exception as e:
+                    if attempt < 2:
+                        await asyncio.sleep(2 ** attempt)
+                        continue
+                    return {"slotId": slot_id, "modelId": model_id, "status": "error", "content": str(e)}
+            return {"slotId": slot_id, "modelId": model_id, "status": "error", "content": "재시도 3회 실패"}
+
+        # 배치 실행: 10개씩 동시 호출 (rate limit 방지)
+        batch_size = 10
+        for i in range(0, len(models), batch_size):
+            batch = models[i:i+batch_size]
+            tasks = [call_model(slot) for slot in batch]
+            for coro in asyncio.as_completed(tasks):
+                result = await coro
+                yield f"data: {json.dumps(result, ensure_ascii=False)}\n\n"
 
         yield "data: [DONE]\n\n"
 

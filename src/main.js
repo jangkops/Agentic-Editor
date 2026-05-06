@@ -1214,9 +1214,10 @@ async function runParallel(prompt) {
   state.isStreaming = true;
   state._streamStartTime = Date.now();
   state._abortController = new AbortController();
-  // 300초 타임아웃 (5분)
-  const timeoutId = setTimeout(() => { if (state._abortController) state._abortController.abort(); }, 300000);
-  addLiveLog('request', `병렬 호출: ${state.parallelSlots.length}개 모델`);
+  // 타임아웃: 호출 수에 비례 (기본 5분 + 슬롯당 30초, 최대 30분)
+  const _parallelTimeoutMs = Math.min(30 * 60 * 1000, 300000 + _expandedSlots.length * 30000);
+  const timeoutId = setTimeout(() => { if (state._abortController) state._abortController.abort(); }, _parallelTimeoutMs);
+  addLiveLog('request', `병렬 호출: ${_expandedSlots.length}개 모델`);
 
   // 스케일 반영: 각 슬롯의 scale만큼 복제하여 실제 호출 목록 생성
   const _expandedSlots = [];
@@ -1954,7 +1955,7 @@ function renderMessages(){
         const retryBtn = document.createElement('button');
         retryBtn.className = 'sm-btn';
         retryBtn.style.cssText = 'background:var(--color-accent);color:#fff;border:none;padding:5px 12px;border-radius:5px;font-size:11px;cursor:pointer';
-        retryBtn.textContent = '🔄 재시도';
+        retryBtn.textContent = '재시도';
         retryBtn.addEventListener('click', () => {
           if (msg._retryType === 'parallel' && msg._retryPrompt) {
             runParallel(msg._retryPrompt);
@@ -2029,7 +2030,7 @@ function renderMessages(){
               const retryBtn = document.createElement('button');
               retryBtn.className = 'sm-btn';
               retryBtn.style.cssText = 'background:var(--color-warning,#f59e0b);color:#fff;border:none;padding:6px 12px;border-radius:6px;font-size:12px;cursor:pointer';
-              retryBtn.textContent = '🔄 합의 재시도';
+              retryBtn.textContent = '합의 재시도';
               retryBtn.title = msg._retryError ? `이전 오류: ${msg._retryError}` : '합의를 다시 생성합니다';
               retryBtn.addEventListener('click', () => {
                 // 기존 불완전 메시지 제거 후 재실행
