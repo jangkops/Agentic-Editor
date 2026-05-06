@@ -2053,6 +2053,8 @@ function renderMessages(){
                     } else {
                       state.messages.splice(msgIdx, 1); // assistant만 삭제
                     }
+                    // 되돌리기 완료 메시지
+                    state.messages.push({ role:'system', content:'되돌리기 완료 — 코드와 채팅이 이전 상태로 복원되었습니다.' });
                     // 입력창에 이전 질문 복원 → 사용자가 바로 재전송 가능
                     const input = document.getElementById('chat-input');
                     if (input && userPrompt) {
