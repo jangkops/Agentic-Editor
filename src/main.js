@@ -2038,14 +2038,29 @@ function renderMessages(){
               restoreBar.style.cssText = 'margin-top:8px;padding-top:8px;border-top:1px solid var(--color-border);display:flex;gap:8px;align-items:center';
               restoreBar.innerHTML = `<button class="msg-action-btn" style="width:auto;padding:4px 10px;font-size:11px;gap:4px;display:inline-flex;align-items:center" data-restore-checkpoint title="에이전트 작업 전 상태로 되돌리기">⟲ 되돌리기</button><span style="font-size:10px;color:var(--color-text-muted)">에이전트 작업 전 체크포인트</span>`;
               restoreBar.querySelector('[data-restore-checkpoint]').addEventListener('click', async () => {
-                if (!confirm('에이전트가 수정한 파일을 작업 전 상태로 되돌립니다. 계속하시겠습니까?')) return;
+                if (!confirm('이 질문/답변을 되돌리고 파일을 작업 전 상태로 복원합니다. 계속하시겠습니까?')) return;
                 const btn = restoreBar.querySelector('[data-restore-checkpoint]');
                 btn.textContent = '복원 중...'; btn.disabled = true;
                 try {
                   const r = await window.electronAPI.gitStashPop(state.folderPath);
                   if (r.ok) {
-                    state.messages.push({ role:'system', content:'✅ 체크포인트 복원 완료 — 에이전트 작업 전 상태로 되돌렸습니다.' });
-                    msg._checkpointCreated = false;
+                    // 이 assistant 메시지의 인덱스를 찾아서, 바로 위 user 메시지와 함께 삭제
+                    const msgIdx = state.messages.indexOf(msg);
+                    let userPrompt = '';
+                    if (msgIdx > 0 && state.messages[msgIdx - 1]?.role === 'user') {
+                      userPrompt = state.messages[msgIdx - 1].content || '';
+                      state.messages.splice(msgIdx - 1, 2); // user + assistant 삭제
+                    } else {
+                      state.messages.splice(msgIdx, 1); // assistant만 삭제
+                    }
+                    // 입력창에 이전 질문 복원 → 사용자가 바로 재전송 가능
+                    const input = document.getElementById('chat-input');
+                    if (input && userPrompt) {
+                      input.value = userPrompt;
+                      input.style.height = 'auto';
+                      input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+                      input.focus();
+                    }
                   } else {
                     state.messages.push({ role:'system', content:`⚠️ 복원 실패: ${r.error}` });
                   }
