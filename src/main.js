@@ -666,31 +666,51 @@ function initModeToggle() {
 
 function addParallelSlot(modelId) {
   const model = ALL_MODELS.find(m => m.id === modelId); if (!model) return;
-  state.parallelSlots.push({ slotId:'slot-'+(++_slotCounter), modelId, skillId:'', customRole:'', model });
-  document.getElementById('parallel-dropdown-btn').textContent = `${state.parallelSlots.length}개 모델 선택 ▾`;
+  state.parallelSlots.push({ slotId:'slot-'+(++_slotCounter), modelId, skillId:'', customRole:'', model, scale: 1 });
+  document.getElementById('parallel-dropdown-btn').textContent = `${_totalParallelCount()}개 호출 ▾`;
   renderParallelSlotList(); renderParallelConfigGrid();
 }
 function removeParallelSlot(slotId) {
   state.parallelSlots = state.parallelSlots.filter(s => s.slotId !== slotId);
-  document.getElementById('parallel-dropdown-btn').textContent = `${state.parallelSlots.length}개 모델 선택 ▾`;
+  document.getElementById('parallel-dropdown-btn').textContent = `${_totalParallelCount()}개 호출 ▾`;
   renderParallelSlotList(); renderParallelConfigGrid();
+}
+function _totalParallelCount() {
+  return state.parallelSlots.reduce((sum, s) => sum + (s.scale || 1), 0);
 }
 function renderParallelConfigGrid() {
   const grid = document.getElementById('parallel-grid'), countEl = document.getElementById('parallel-count');
   if (!grid || state.isStreaming) return;
-  countEl.textContent = state.parallelSlots.length ? `${state.parallelSlots.length}개 모델 설정` : '병렬 모델을 선택하세요';
+  const total = _totalParallelCount();
+  countEl.textContent = state.parallelSlots.length ? `${state.parallelSlots.length}개 모델 · ${total}개 호출` : '병렬 모델을 선택하세요';
   if (!state.parallelSlots.length) { grid.innerHTML = '<div style="padding:40px;text-align:center;color:var(--color-text-muted);font-size:13px">우측에서 모델을 검색하여 추가하세요<br><span style="font-size:11px">같은 모델을 여러 번 추가 가능</span></div>'; return; }
   grid.innerHTML = '';
   state.parallelSlots.forEach(slot => {
     const card = document.createElement('div'); card.className = 'model-card fade-in';
     card.innerHTML = `<div class="model-card-header"><span class="model-name">● ${slot.model.name}</span><span style="font-size:10px;color:var(--color-text-muted)">${slot.model.provider}</span><span class="sk-action sk-action-del sk-action-icon" data-rm="${slot.slotId}" title="제거"><svg class="sk-icon" width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2 2L8 8M8 2L2 8"/></svg></span></div>
-      <div style="padding:10px 14px;display:flex;flex-direction:column;gap:6px"><label style="font-size:10px;color:var(--color-text-muted);font-weight:600">스킬</label>
+      <div style="padding:10px 14px;display:flex;flex-direction:column;gap:6px">
+        <div style="display:flex;align-items:center;gap:8px">
+          <label style="font-size:10px;color:var(--color-text-muted);font-weight:600;min-width:40px">스케일</label>
+          <input type="range" class="scale-slider" min="1" max="10" value="${slot.scale||1}" style="flex:1;height:4px;accent-color:var(--color-accent);cursor:pointer">
+          <span class="scale-value" style="font-size:12px;font-weight:700;color:var(--color-accent);min-width:24px;text-align:center">${slot.scale||1}</span>
+        </div>
+        <label style="font-size:10px;color:var(--color-text-muted);font-weight:600">스킬</label>
         <select class="ss" style="width:100%;background:var(--color-bg-input);border:1px solid var(--color-border);border-radius:var(--radius-sm);color:var(--color-text-secondary);font-size:11px;padding:5px 8px;outline:none"><option value="">스킬 없음</option>${allSkills.map(s=>`<option value="${s.id}" ${slot.skillId===s.id?'selected':''}>${s.name}</option>`).join('')}</select>
         <label style="font-size:10px;color:var(--color-text-muted);font-weight:600">커스텀 Role</label>
-        <textarea class="cr" placeholder="텍스트 또는 JSON" style="width:100%;min-height:40px;max-height:100px;background:var(--color-bg-input);border:1px solid var(--color-border);border-radius:var(--radius-sm);color:var(--color-text-secondary);font-size:11px;padding:6px 8px;outline:none;resize:vertical;font-family:var(--font-mono)">${slot.customRole||''}</textarea></div>`;
+        <textarea class="cr" placeholder="텍스트 또는 JSON" style="width:100%;min-height:40px;max-height:100px;background:var(--color-bg-input);border:1px solid var(--color-border);border-radius:var(--radius-sm);color:var(--color-text-secondary);font-size:11px;padding:6px 8px;outline:none;resize:vertical;font-family:var(--font-mono)">${slot.customRole||''}</textarea>
+      </div>`;
     card.querySelector('[data-rm]').onclick = () => removeParallelSlot(slot.slotId);
     card.querySelector('.ss').onchange = e => { slot.skillId = e.target.value; };
     card.querySelector('.cr').oninput = e => { slot.customRole = e.target.value; };
+    // 스케일 슬라이더 이벤트
+    const slider = card.querySelector('.scale-slider');
+    const valueEl = card.querySelector('.scale-value');
+    slider.oninput = () => {
+      slot.scale = parseInt(slider.value);
+      valueEl.textContent = slot.scale;
+      document.getElementById('parallel-dropdown-btn').textContent = `${_totalParallelCount()}개 호출 ▾`;
+      countEl.textContent = `${state.parallelSlots.length}개 모델 · ${_totalParallelCount()}개 호출`;
+    };
     grid.appendChild(card);
   });
 }
@@ -1196,19 +1216,34 @@ async function runParallel(prompt) {
   const timeoutId = setTimeout(() => { if (state._abortController) state._abortController.abort(); }, 300000);
   addLiveLog('request', `병렬 호출: ${state.parallelSlots.length}개 모델`);
 
+  // 스케일 반영: 각 슬롯의 scale만큼 복제하여 실제 호출 목록 생성
+  const _expandedSlots = [];
+  state.parallelSlots.forEach(slot => {
+    const scale = slot.scale || 1;
+    for (let i = 0; i < scale; i++) {
+      _expandedSlots.push({
+        ...slot,
+        slotId: scale > 1 ? `${slot.slotId}-${i}` : slot.slotId,
+        _originalSlotId: slot.slotId,
+        _scaleIdx: i,
+      });
+    }
+  });
+
   state.parallelResults.clear();
-  state.parallelSlots.forEach(slot => state.parallelResults.set(slot.slotId, { status:'pending', content:'', modelName:slot.model.name }));
+  _expandedSlots.forEach(slot => state.parallelResults.set(slot.slotId, { status:'pending', content:'', modelName: slot.model.name + (slot._scaleIdx > 0 ? ` #${slot._scaleIdx+1}` : '') }));
 
   showParallelResults();
   const grid = document.getElementById('parallel-grid');
   if (grid) grid.innerHTML = '';
   renderParallelResultGrid();
   renderParallelSlotList();
-  state.messages.push({ role:'system', content:`${state.parallelSlots.length}개 모델 병렬 실행 시작...` });
+  const totalCalls = _expandedSlots.length;
+  state.messages.push({ role:'system', content:`${totalCalls}개 병렬 실행 시작...` });
   renderMessages();
 
   // 서버 측 병렬 호출 — 단일 SSE 연결로 모든 모델 결과 수신
-  const models = state.parallelSlots.map(slot => {
+  const models = _expandedSlots.map(slot => {
     let sp = '';
     if (slot.customRole) sp = slot.customRole;
     else if (slot.skillId) { const s = allSkills.find(x => x.id === slot.skillId); if (s) sp = s.role; }
@@ -1217,8 +1252,8 @@ async function runParallel(prompt) {
 
   // 모든 슬롯을 running으로 + 시작 시간 기록
   const _slotStartTimes = {};
-  state.parallelSlots.forEach(slot => {
-    state.parallelResults.set(slot.slotId, { status:'running', content:'', modelName:slot.model.name });
+  _expandedSlots.forEach(slot => {
+    state.parallelResults.set(slot.slotId, { status:'running', content:'', modelName: slot.model.name + (slot._scaleIdx > 0 ? ` #${slot._scaleIdx+1}` : '') });
     _slotStartTimes[slot.slotId] = Date.now();
   });
   renderParallelResultGrid(); renderParallelSlotList();
