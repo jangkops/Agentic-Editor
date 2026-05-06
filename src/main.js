@@ -33,9 +33,24 @@ function applyTheme(theme) {
 
 const MODEL_CATALOG = {};
 const ALL_MODELS = [];
+const _deniedModels = new Set(); // 403 model_denied된 모델 ID 캐시
 function rebuildModelList() {
   ALL_MODELS.length = 0;
   for (const [p, ms] of Object.entries(MODEL_CATALOG)) ms.forEach(m => ALL_MODELS.push({ ...m, provider: p }));
+}
+// 403 model_denied 시 호출 — 해당 모델을 목록에서 영구 제거 (세션 동안)
+function _removeModelFromCatalog(modelId) {
+  const cleanId = modelId.replace(/^us\.|^eu\./, '');
+  if (_deniedModels.has(cleanId)) return; // 이미 제거됨
+  _deniedModels.add(cleanId);
+  for (const [provider, models] of Object.entries(MODEL_CATALOG)) {
+    MODEL_CATALOG[provider] = models.filter(m => m.id !== cleanId);
+    if (!MODEL_CATALOG[provider].length) delete MODEL_CATALOG[provider];
+  }
+  rebuildModelList();
+  renderModelList('');
+  document.getElementById('topbar-model-count').textContent = `${ALL_MODELS.length}개 모델`;
+  console.log(`[Model] ${cleanId} 제거됨 (Gateway 미허용)`);
 }
 rebuildModelList();
 
@@ -1064,6 +1079,12 @@ async function runSimpleChat(prompt) {
             continue;
           }
           if (p.error) {
+            // model_denied → 해당 모델을 목록에서 제거
+            if (p.error.includes('not in allowed list') || p.error.includes('model_denied')) {
+              const deniedMatch = p.error.match(/model\s+([\w.\-]+)\s+not in allowed/);
+              if (deniedMatch) _removeModelFromCatalog(deniedMatch[1]);
+              else _removeModelFromCatalog(state.selectedModel?.id || '');
+            }
             // 토큰 만료 → 자동 재로그인 시도
             if (p.error.includes('expired') || p.error.includes('security token')) {
               addLiveLog('system', '토큰 만료 감지 — 자격증명 갱신 중...');
