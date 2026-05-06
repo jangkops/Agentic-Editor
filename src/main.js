@@ -927,7 +927,7 @@ function _apiBody(extra) {
 
 // [Fix #2] SSE idle timeout 헬퍼 — 서버가 응답 중 끊겨도 60초 내 감지
 //   reader.read()를 60초 내에 해결 못 하면 강제로 에러 발생 → catch에서 UI 알림
-async function _readWithIdleTimeout(reader, idleMs = 60000) {
+async function _readWithIdleTimeout(reader, idleMs = 180000) {
   let timer;
   const timeoutP = new Promise((_, reject) => {
     timer = setTimeout(() => reject(new Error(`스트림 ${Math.floor(idleMs/1000)}초 무응답 — 끊김 감지`)), idleMs);
@@ -1147,7 +1147,12 @@ async function runAgentWorkflow(prompt) {
             for (let _i = msg.toolUses.length - 1; _i >= 0; _i--) {
               if (msg.toolUses[_i].status === 'running') {
                 msg.toolUses[_i].status = 'done';
-                msg.toolUses[_i].endedAt = Date.now();
+                // 서버에서 durationMs가 오면 정확한 시간 사용, 아니면 클라이언트 측정
+                if (p.durationMs && msg.toolUses[_i].startedAt) {
+                  msg.toolUses[_i].endedAt = msg.toolUses[_i].startedAt + p.durationMs;
+                } else {
+                  msg.toolUses[_i].endedAt = Date.now();
+                }
                 if (p.output != null) msg.toolUses[_i].output = typeof p.output === 'string' ? p.output : JSON.stringify(p.output, null, 2);
                 break;
               }
@@ -2025,9 +2030,9 @@ function renderMessages(){
             d.innerHTML=`<div class="msg-content">${fmtMd(msg.content)}${elapsedHtml}</div>`;
           }
           addCopySupport(d, msg.content);
-          // Checkpoint restore 버튼 — 에이전트 작업 완료 후, 스트리밍 아닐 때만
-          if (msg._checkpointCreated && !state.isStreaming && msg.workflow) {
-            const allDone = msg.workflow.steps.every(s => s.status === 'done' || s.status === 'failed');
+          // Checkpoint restore 버튼 — 스트리밍 아닐 때, 체크포인트가 있으면 표시
+          if (msg._checkpointCreated && !state.isStreaming) {
+            const allDone = !msg.workflow || msg.workflow.steps.every(s => s.status === 'done' || s.status === 'failed');
             if (allDone) {
               const restoreBar = document.createElement('div');
               restoreBar.style.cssText = 'margin-top:8px;padding-top:8px;border-top:1px solid var(--color-border);display:flex;gap:8px;align-items:center';

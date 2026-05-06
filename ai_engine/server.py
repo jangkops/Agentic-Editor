@@ -666,12 +666,15 @@ async def run_agent_with_tools(request: Request):
                     tool_id = tu.get("toolUseId", "")
                     tool_input = tu.get("input", {})
                     yield f"data: {json.dumps({'tool': tool_name, 'input': tool_input, 'status': 'running'}, ensure_ascii=False)}\n\n"
+                    import time as _time
+                    _tool_start = _time.time()
                     try:
                         tool_output = await asyncio.to_thread(_execute_tool, tool_name, tool_input, project_path)
                     except Exception as e:
                         tool_output = f"도구 실행 예외: {e}"
-                    print(f"[Agent] 도구 실행: {tool_name} → {len(tool_output)}자")
-                    yield f"data: {json.dumps({'tool': tool_name, 'output': tool_output[:500], 'status': 'done'}, ensure_ascii=False)}\n\n"
+                    _tool_duration_ms = int((_time.time() - _tool_start) * 1000)
+                    print(f"[Agent] 도구 실행: {tool_name} → {len(tool_output)}자 ({_tool_duration_ms}ms)")
+                    yield f"data: {json.dumps({'tool': tool_name, 'output': tool_output[:500], 'status': 'done', 'durationMs': _tool_duration_ms}, ensure_ascii=False)}\n\n"
                     _tr_max = int(os.environ.get("AE_TOOL_RESULT_MAX", "80000"))
                     tool_results.append({"toolResult": {"toolUseId": tool_id, "content": [{"text": tool_output[:_tr_max]}]}})
 
