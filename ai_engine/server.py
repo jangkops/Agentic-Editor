@@ -418,12 +418,23 @@ async def list_models(request: Request):
         
         resp = client.list_foundation_models()
         catalog = {}
-        skip = ["IMAGE", "VIDEO", "EMBEDDING"]
+        skip_output = ["IMAGE", "VIDEO", "EMBEDDING"]
         for m in resp.get("modelSummaries", []):
             modes = m.get("outputModalities", [])
-            if any(s in str(modes) for s in skip):
+            if any(s in str(modes) for s in skip_output):
                 continue
             if m.get("modelLifecycle", {}).get("status") in ["LEGACY", "EOL"]:
+                continue
+            # TEXT 입력을 지원하는 모델만 (converse API 호환)
+            input_modes = m.get("inputModalities", [])
+            if "TEXT" not in input_modes:
+                continue
+            # ON_DEMAND 추론을 지원하는 모델만 (프로비저닝 전용 제외)
+            inference_types = m.get("inferenceTypesSupported", [])
+            if inference_types and "ON_DEMAND" not in inference_types:
+                continue
+            # 스트리밍 지원 확인 (responseStreamingSupported)
+            if m.get("responseStreamingSupported") is False:
                 continue
             provider = m.get("providerName", "Unknown")
             if provider not in catalog:
