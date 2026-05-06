@@ -458,6 +458,7 @@ function renderSkillsList() {
         allSkills = allSkills.filter(x => x.id !== id);
         window.electronAPI?.deleteSkill?.(id);
         renderSkillsList();
+        renderParallelConfigGrid();
       }
     });
   });
@@ -488,7 +489,7 @@ function showSkillEditor(ex) {
       allSkills.push(newSkill);
       window.electronAPI?.saveSkill?.(newSkill);
     }
-    o.style.display = 'none'; renderSkillsList();
+    o.style.display = 'none'; renderSkillsList(); renderParallelConfigGrid();
   };
 }
 
@@ -524,6 +525,7 @@ function showGithubMdImport() {
       allSkills.push(ghSkill);
       window.electronAPI?.saveSkill?.(ghSkill);
       renderSkillsList();
+      renderParallelConfigGrid();
       st.className='status-text success'; st.textContent='✓ 가져오기 완료';
       setTimeout(() => { o.style.display='none'; }, 800);
     } catch(e) {
