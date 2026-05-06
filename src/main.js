@@ -1209,6 +1209,86 @@ async function runAgentWorkflow(prompt) {
 }
 
 // ===== Parallel Mode — 실시간 연동: 가운데 패널 + 우측 모델 리스트 + 채팅 =====
+
+// 실패한 슬롯만 재실행 — 성공한 결과는 보존
+async function retryFailedParallel(prompt) {
+  const failedSlotIds = [];
+  for (const [sid, r] of state.parallelResults) {
+    if (r.status === 'error' || r.status === 'pending') failedSlotIds.push(sid);
+  }
+  if (!failedSlotIds.length) {
+    state.messages.push({ role:'system', content:'재시도할 실패 항목이 없습니다.' });
+    renderMessages();
+    return;
+  }
+  // 실패한 슬롯만 pending으로 리셋
+  for (const sid of failedSlotIds) {
+    const existing = state.parallelResults.get(sid);
+    state.parallelResults.set(sid, { ...existing, status:'running', content:'' });
+  }
+  state.isStreaming = true;
+  state._abortController = new AbortController();
+  state.messages.push({ role:'system', content:`실패한 ${failedSlotIds.length}개만 재시도 중...` });
+  renderMessages();
+  renderParallelResultGrid(); renderParallelSlotList();
+
+  // 실패한 슬롯에 해당하는 모델 정보 추출
+  const failedModels = [];
+  for (const slot of (state._lastExpandedSlots || state.parallelSlots)) {
+    if (failedSlotIds.includes(slot.slotId)) {
+      let sp = '';
+      if (slot.customRole) sp = slot.customRole;
+      else if (slot.skillId) { const s = allSkills.find(x => x.id === slot.skillId); if (s) sp = s.role; }
+      failedModels.push({ modelId: slot.modelId, slotId: slot.slotId, systemPrompt: sp });
+    }
+  }
+
+  try {
+    const resp = await fetch('http://localhost:8765/api/agents/run-parallel', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(_apiBody({ prompt, models: failedModels })),
+      signal: state._abortController.signal
+    });
+    if (!resp.ok) throw new Error(`서버 응답 오류: ${resp.status}`);
+    const reader = resp.body.getReader(), dec = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await _readWithIdleTimeout(reader);
+      if (done) break;
+      buf += dec.decode(value, { stream:true });
+      const lines = buf.split('\n'); buf = lines.pop() || '';
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith('data: ')) continue;
+        const d = trimmed.slice(6);
+        if (d === '[DONE]') continue;
+        try {
+          const ev = JSON.parse(d);
+          if (ev.heartbeat) continue;
+          if (ev.slotId) {
+            state.parallelResults.set(ev.slotId, { status: ev.status, content: ev.content, modelName: ev.modelId || '' });
+            renderParallelResultGrid(); renderParallelSlotList();
+          }
+        } catch {}
+      }
+    }
+  } catch (e) {
+    const errMsg = e.name === 'AbortError' ? '사용자가 요청을 취소했습니다.' : e.message;
+    state.messages.push({ role:'system', content:`재시도 오류: ${errMsg}`, _retryable: true, _retryType: 'parallel', _retryPrompt: prompt });
+  }
+  state.isStreaming = false;
+  _releaseUserPin();
+  renderParallelResultGrid(); renderParallelSlotList(); updateConsensus();
+  const done = [...state.parallelResults.values()].filter(r => r.status === 'done').length;
+  const err = [...state.parallelResults.values()].filter(r => r.status === 'error').length;
+  if (err > 0) {
+    state.messages.push({ role:'system', content:`재시도 완료: ${done}개 성공, ${err}개 여전히 실패`, _retryable: true, _retryType: 'parallel', _retryPrompt: prompt });
+  } else {
+    state.messages.push({ role:'system', content:`재시도 완료: 전체 ${done}개 성공` });
+  }
+  renderMessages();
+}
+
 async function runParallel(prompt) {
   if (!state.parallelSlots.length) return;
   state.isStreaming = true;
@@ -1233,6 +1313,8 @@ async function runParallel(prompt) {
 
   state.parallelResults.clear();
   _expandedSlots.forEach(slot => state.parallelResults.set(slot.slotId, { status:'pending', content:'', modelName: slot.model.name + (slot._scaleIdx > 0 ? ` #${slot._scaleIdx+1}` : '') }));
+  // 재시도 시 참조할 수 있도록 저장
+  state._lastExpandedSlots = _expandedSlots;
 
   showParallelResults();
   const grid = document.getElementById('parallel-grid');
