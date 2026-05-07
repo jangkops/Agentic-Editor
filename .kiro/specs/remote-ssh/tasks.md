@@ -125,8 +125,8 @@
 
 ### Phase 2 — 원격 연결 (ssh2 래퍼 · 상태 머신 · 정책)
 
-- [ ] 8. ssh2 Client connect config builder (ProxyJump 체인 포함)
-  - [ ] 8.1 HostEntry → ssh2 Client config 변환
+- [x] 8. ssh2 Client connect config builder (ProxyJump 체인 포함)
+  - [x] 8.1 HostEntry → ssh2 Client config 변환
     - 파일: `electron/src/remote/ssh-client-builder.js`
     - `buildConnectConfig(target, hops, credentialCache, hostKeyStore)` 반환
     - publickey / keyboard-interactive / password 시도 순서 구성 (`PreferredAuthentications` override)
@@ -141,14 +141,14 @@
     - **Property 5: ProxyJump 체인 config builder**
     - **Validates: Requirements 3.5**
 
-- [ ] 9. Authentication failure window detector (StopPolicy)
-  - [ ] 9.1 shouldStop() 정책 구현
+- [x] 9. Authentication failure window detector (StopPolicy)
+  - [x] 9.1 shouldStop() 정책 구현
     - 파일: `electron/src/remote/auth-policy.js`
     - 최근 60초 내 실패 ≥3 시 true
     - 타임스탬프 시퀀스 관리 (중복·비정렬 허용)
     - _Requirements: 3.8_
 
-  - [ ] 9.2 effectiveStrictHostKeyChecking() 정책 구현
+  - [x] 9.2 effectiveStrictHostKeyChecking() 정책 구현
     - 파일: `electron/src/remote/auth-policy.js`
     - HostEntry 명시 값 우선, 미지정 시 `alias ∈ KeyStore ? 'yes' : 'ask'`
     - _Requirements: 13.1_
@@ -158,15 +158,15 @@
     - **Property 6: Authentication failure window detector** — _Validates: Requirements 3.8_
     - **Property 23: StrictHostKeyChecking default policy** — _Validates: Requirements 13.1_
 
-- [ ] 10. RemoteSession 클래스와 상태 머신
-  - [ ] 10.1 RemoteSession 스켈레톤 + 전이 테이블
+- [x] 10. RemoteSession 클래스와 상태 머신
+  - [x] 10.1 RemoteSession 스켈레톤 + 전이 테이블
     - 파일: `electron/src/remote/remote-session.js`
     - state: `disconnected|connecting|authenticating|provisioning|forwarding|connected|reconnecting|failed`
     - 허용 전이 집합을 상수로 정의 (design.md 의 state machine 다이어그램 그대로)
     - 모든 전이 시 `state` 이벤트 발행 (`{from, to, reason}`)
     - _Requirements: 3.1–3.10, 12.2_
 
-  - [ ] 10.2 connect() 흐름 wiring (banner → auth → host key → provision hook)
+  - [x] 10.2 connect() 흐름 wiring (banner → auth → host key → provision hook)
     - 파일: `electron/src/remote/remote-session.js`
     - ssh2 Client 인스턴스화, `buildConnectConfig` 적용
     - host key 검증: mismatch 시 abort + security-event 로그
@@ -184,14 +184,14 @@
     - **Property 21: State transition logging parity**
     - **Validates: Requirements 12.2**
 
-- [ ] 11. Keepalive 정책과 백오프
-  - [ ] 11.1 Keepalive 전송 타이머 및 shouldReconnect()
+- [x] 11. Keepalive 정책과 백오프
+  - [x] 11.1 Keepalive 전송 타이머 및 shouldReconnect()
     - 파일: `electron/src/remote/keepalive-policy.js`
     - ssh2 keepalive ≤30s 간격, 연속 3회 실패 시 reconnect 트리거
     - 결과 시퀀스 카운터는 ok 수신 시 리셋
     - _Requirements: 8.1, 8.2_
 
-  - [ ] 11.2 backoffMs(n) 지수 백오프 with cap
+  - [x] 11.2 backoffMs(n) 지수 백오프 with cap
     - 파일: `electron/src/remote/backoff.js`
     - `min(2000 * 2^n, 30000)`
     - _Requirements: 8.3, 8.6_
@@ -206,8 +206,8 @@
     - **Property 14: Exponential backoff with cap**
     - **Validates: Requirements 8.3, 8.6**
 
-- [ ] 12. RemoteSessionManager (다중 세션 + 활성 전환)
-  - [ ] 12.1 Manager 구현 — 최대 4 세션, 활성 1
+- [x] 12. RemoteSessionManager (다중 세션 + 활성 전환)
+  - [x] 12.1 Manager 구현 — 최대 4 세션, 활성 1
     - 파일: `electron/src/remote/remote-session-manager.js`
     - `connect(alias)`, `disconnect(alias)` (→ `credentialCache.clear(alias)`), `switchActive(alias)`, `getActive()`, `all()`
     - 비활성 세션의 file watcher 일시정지 훅
@@ -223,7 +223,7 @@
     - 케이스: disconnect 시 credential clear, 5번째 connect 거부, local 라우팅 복원
     - _Requirements: 5.4, 5.5, 9.5_
 
-- [ ] 13. Checkpoint — Phase 2 완료 확인
+- [x] 13. Checkpoint — Phase 2 완료 확인
   - Ensure all tests pass, ask the user if questions arise.
 
 ---
