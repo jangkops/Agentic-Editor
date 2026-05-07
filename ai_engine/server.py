@@ -238,6 +238,74 @@ def _get_gw(aws_profile, bedrock_user):
     return gw
 
 
+# ─── Callable Model ID Resolution ──────────────────────────────────────
+# Bedrock 모델 ID는 3가지 형태가 있음:
+#  1) ON_DEMAND: 'nvidia.nemotron-nano-12b-v2' (prefix 없이 직접 호출)
+#  2) INFERENCE_PROFILE (CRIS): 'us.anthropic.claude-opus-4-7' (us./eu./global. prefix 필수)
+#  3) 둘 다 지원: 이 경우 CRIS 우선 (성능·리전 분산)
+#
+# foundation model 목록의 inferenceTypesSupported를 보고 올바른 형태를 선택한다.
+# 캐시는 profile 부팅 후 list_foundation_models로 한 번만 조회 (프로세스 생애).
+
+_model_inference_type_cache = {}  # key: "{profile}:{user}", val: {modelId: [types]}
+
+
+def _load_inference_types(aws_profile, bedrock_user):
+    key = f"{aws_profile}:{bedrock_user}"
+    if key in _model_inference_type_cache:
+        return _model_inference_type_cache[key]
+    try:
+        import boto3
+        session = boto3.Session(profile_name=aws_profile, region_name=os.environ.get("AWS_REGION", "us-west-2"))
+        client = session.client("bedrock")
+        resp = client.list_foundation_models()
+        cache = {}
+        for m in resp.get("modelSummaries", []):
+            mid = m.get("modelId", "")
+            cache[mid] = m.get("inferenceTypesSupported", []) or []
+        _model_inference_type_cache[key] = cache
+        return cache
+    except Exception as e:
+        print(f"[ModelResolver] list_foundation_models 실패: {e}")
+        _model_inference_type_cache[key] = {}
+        return {}
+
+
+def _resolve_callable_model_id(model_id, aws_profile, bedrock_user):
+    """모델 ID를 실제 Bedrock 호출 가능한 형태로 변환.
+    - ON_DEMAND only → prefix 제거 (prefix가 붙어있으면 떼어냄)
+    - INFERENCE_PROFILE only → us. prefix 강제 (없으면 붙임)
+    - 둘 다 / 알 수 없음 → prefix 있으면 유지, 없으면 us. 붙임 (기본값, 대부분 CRIS 커버)
+    """
+    if not model_id:
+        return model_id
+    # 이미 prefix 붙어있으면 원본 ID 추출
+    raw_id = model_id
+    for prefix in ("us.", "eu.", "global."):
+        if model_id.startswith(prefix):
+            raw_id = model_id[len(prefix):]
+            break
+
+    cache = _load_inference_types(aws_profile, bedrock_user)
+    types = cache.get(raw_id, [])
+
+    has_on_demand = "ON_DEMAND" in types
+    has_inference_profile = "INFERENCE_PROFILE" in types
+
+    if has_on_demand and not has_inference_profile:
+        # ON_DEMAND 전용 — prefix 제거
+        return raw_id
+    if has_inference_profile and not has_on_demand:
+        # INFERENCE_PROFILE 전용 — us. prefix 강제
+        if not any(model_id.startswith(p) for p in ("us.", "eu.", "global.")):
+            return f"us.{raw_id}"
+        return model_id
+    # 둘 다 또는 알 수 없음 → 기본 CRIS (기존 동작 유지)
+    if not any(model_id.startswith(p) for p in ("us.", "eu.", "global.")):
+        return f"us.{raw_id}"
+    return model_id
+
+
 def _is_expired_error(result):
     """응답이 토큰 만료 에러인지 판단."""
     err = ""
@@ -519,7 +587,7 @@ async def run_agent_stream(request: Request):
             print(f"[RAG] 컨텍스트 빌드 실패 (무시): {e}")
 
     messages = _build_messages(body.get("chatHistory", []), prompt, body.get("sessionId", "default"))
-    stream_model = model if model.startswith("us.") or model.startswith("eu.") else f"us.{model}"
+    stream_model = _resolve_callable_model_id(model, aws_profile, bedrock_user)
 
     async def realtime_stream():
         """Lambda SSE를 실시간으로 프론트엔드에 중계 — ChatGPT처럼 글자가 써지는 효과.
@@ -582,7 +650,7 @@ async def run_agent_with_tools(request: Request):
     open_file_content = body.get("openFileContent", "")
 
     gw = _get_gw(aws_profile, bedrock_user)
-    stream_model = model if model.startswith("us.") or model.startswith("eu.") else f"us.{model}"
+    stream_model = _resolve_callable_model_id(model, aws_profile, bedrock_user)
 
     # 시스템 프롬프트 구성
     if project_path and not system_prompt:
@@ -797,8 +865,8 @@ async def run_agent_parallel(request: Request):
             model_id = slot.get("modelId", "")
             slot_id = slot.get("slotId", "")
             sp = slot.get("systemPrompt", "")
-            # us. prefix 적용
-            sid = model_id if model_id.startswith("us.") or model_id.startswith("eu.") else f"us.{model_id}"
+            # CRIS profile 존재 여부에 따라 us. prefix 적용 (ON_DEMAND 모델은 prefix 없이)
+            sid = _resolve_callable_model_id(model_id, aws_profile, bedrock_user)
             # RAG 컨텍스트를 시스템 프롬프트에 추가
             if rag_context:
                 sp = (sp + "\n\n" + rag_context) if sp else rag_context

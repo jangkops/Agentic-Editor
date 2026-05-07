@@ -1188,7 +1188,41 @@ async function runAgentWorkflow(prompt) {
         if (d === '[DONE]') continue;
         try {
           const p = JSON.parse(d);
-          if (p.error) { msg.content += `\n[오류: ${p.error}]`; }
+          if (p.error) {
+            // 모델 관련 에러 → 조용히 제거 + 친화적 메시지
+            const isModelError = p.error.includes('not in allowed list') || p.error.includes('model_denied')
+                || p.error.includes('model identifier is invalid') || p.error.includes('ValidationException')
+                || p.error.includes('model_access_denied') || p.error.includes('AccessDeniedException');
+            if (isModelError) {
+              const deniedMatch = p.error.match(/model\s+([\w.\-:]+)\s+not in allowed/);
+              const failedModelId = deniedMatch ? deniedMatch[1] : (state.selectedModel?.id || '');
+              const failedModelName = state.selectedModel?.name || failedModelId;
+              _removeModelFromCatalog(failedModelId);
+              msg.content = `⚠️ 이 모델(${failedModelName})은 현재 호출할 수 없습니다. 목록에서 제거되었으니 다른 모델을 선택해 주세요.`;
+              msg._modelRemoved = true;
+              addLiveLog('error', `모델 호출 실패: ${failedModelName}`, p.error);
+              continue;
+            }
+            // 토큰 만료
+            if (p.error.includes('expired') || p.error.includes('security token')) {
+              try {
+                const creds = await window.electronAPI?.getCredentials(state.settings?.awsProfile || '');
+                if (creds) {
+                  await fetch('http://localhost:8765/api/reset-cache', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ profile: state.settings?.awsProfile, bedrockUser: state.settings?.bedrockUser, credentials: creds }),
+                  });
+                  addLiveLog('system', '자격증명 갱신 완료');
+                  msg.content = '자격증명이 갱신되었습니다. 다시 질문해 주세요.';
+                  continue;
+                }
+              } catch {}
+            }
+            // 기타 에러는 로그에만, UI는 친화적 안내
+            addLiveLog('error', `내부 오류: ${p.error}`);
+            msg.content = '일시적인 오류가 발생했습니다. 다시 시도해 주세요.';
+            continue;
+          }
           else if (p.tool && p.status === 'running') {
             // 도구 실행 시작 — 채팅에 표시하지 않음
             toolCount++;
