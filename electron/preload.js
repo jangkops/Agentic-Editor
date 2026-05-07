@@ -31,6 +31,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveSkill: (skill) => ipcRenderer.invoke('store:save-skill', skill),
   deleteSkill: (id) => ipcRenderer.invoke('store:delete-skill', id),
 
+  // Denied models (Gateway 호출 실패 학습)
+  loadDeniedModels: () => ipcRenderer.invoke('store:load-denied-models'),
+  addDeniedModel: (modelId) => ipcRenderer.invoke('store:add-denied-model', modelId),
+  clearDeniedModels: () => ipcRenderer.invoke('store:clear-denied-models'),
+
   // SSO
   listProfiles: () => ipcRenderer.invoke('sso:list-profiles'),
   ssoLogin: (profile) => ipcRenderer.invoke('sso:login', profile),

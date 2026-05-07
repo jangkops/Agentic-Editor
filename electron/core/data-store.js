@@ -93,6 +93,32 @@ class DataStore {
     const p = path.join(this.basePath, 'skills', 'github', `${id}.json`);
     if (fs.existsSync(p)) fs.unlinkSync(p);
   }
+
+  // Denied Models — 호출 시 ValidationException/model_denied 발생한 모델 영속 저장
+  // 다음 기동 시 자동으로 모델 목록에서 제외 (앱 재시작 후에도 학습 결과 유지)
+  loadDeniedModels() {
+    const p = path.join(this.basePath, 'settings', 'denied-models.json');
+    if (!fs.existsSync(p)) return [];
+    try {
+      const data = JSON.parse(fs.readFileSync(p, 'utf-8'));
+      return Array.isArray(data) ? data : (data.models || []);
+    } catch { return []; }
+  }
+
+  addDeniedModel(modelId) {
+    if (!modelId) return;
+    const p = path.join(this.basePath, 'settings', 'denied-models.json');
+    const list = this.loadDeniedModels();
+    const clean = String(modelId).replace(/^us\.|^eu\.|^global\./, '');
+    if (list.includes(clean)) return;
+    list.push(clean);
+    fs.writeFileSync(p, JSON.stringify(list, null, 2), 'utf-8');
+  }
+
+  clearDeniedModels() {
+    const p = path.join(this.basePath, 'settings', 'denied-models.json');
+    if (fs.existsSync(p)) fs.unlinkSync(p);
+  }
 }
 
 module.exports = { DataStore };

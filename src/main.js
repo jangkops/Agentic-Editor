@@ -38,9 +38,9 @@ function rebuildModelList() {
   ALL_MODELS.length = 0;
   for (const [p, ms] of Object.entries(MODEL_CATALOG)) ms.forEach(m => ALL_MODELS.push({ ...m, provider: p }));
 }
-// 403 model_denied 시 호출 — 해당 모델을 목록에서 영구 제거 (세션 동안)
+// 403 model_denied 시 호출 — 해당 모델을 목록에서 영구 제거 (디스크 영속)
 function _removeModelFromCatalog(modelId) {
-  const cleanId = modelId.replace(/^us\.|^eu\./, '');
+  const cleanId = modelId.replace(/^us\.|^eu\.|^global\./, '');
   if (_deniedModels.has(cleanId)) return; // 이미 제거됨
   _deniedModels.add(cleanId);
   for (const [provider, models] of Object.entries(MODEL_CATALOG)) {
@@ -49,8 +49,28 @@ function _removeModelFromCatalog(modelId) {
   }
   rebuildModelList();
   renderModelList('');
-  document.getElementById('topbar-model-count').textContent = `${ALL_MODELS.length}개 모델`;
-  console.log(`[Model] ${cleanId} 제거됨 (Gateway 미허용)`);
+  const countEl = document.getElementById('topbar-model-count');
+  if (countEl) countEl.textContent = `${ALL_MODELS.length}개 모델`;
+  // 디스크에 영구 저장 — 재시작 후에도 해당 모델은 목록에 등장하지 않음
+  try {
+    window.electronAPI?.addDeniedModel?.(cleanId);
+  } catch (err) {
+    console.warn('[Model] denylist 영속화 실패:', err?.message || err);
+  }
+  console.log(`[Model] ${cleanId} 제거됨 (호출 불가 — denylist 영구 등록)`);
+}
+
+// 앱 시작 시 디스크에서 denylist 로드 → 메모리 Set 초기화
+async function _loadDeniedModelsFromDisk() {
+  try {
+    const list = await window.electronAPI?.loadDeniedModels?.();
+    if (Array.isArray(list)) {
+      list.forEach(id => _deniedModels.add(id));
+      console.log(`[Model] denylist 로드: ${list.length}개`);
+    }
+  } catch (err) {
+    console.warn('[Model] denylist 로드 실패:', err?.message || err);
+  }
 }
 rebuildModelList();
 
@@ -149,6 +169,8 @@ async function initApp() {
   initModelDropdown(); initModeToggle(); initChat(); initFileExplorer();
   initGithubImport(); initSkills(); initTerminal(); initMonaco(); initTopbar();
   initChatTabs(); checkBackend();
+  // 디스크 denylist를 먼저 로드 → 이후 모델 로드 시 필터 적용
+  await _loadDeniedModelsFromDisk();
   // 자격증명을 백엔드에 주입 (quota 조회 등에서 사용)
   try {
     if (window.electronAPI?.getCredentials && state.settings?.awsProfile) {
@@ -637,13 +659,25 @@ async function loadModelsFromServer(retryCount) {
       return;
     }
     if (d.models && Object.keys(d.models).length > 0) {
+      // 디스크 denylist 적용 — 호출 실패 이력이 있는 모델은 목록에 포함하지 않음
+      const filtered = {};
+      let droppedCount = 0;
+      for (const [provider, models] of Object.entries(d.models)) {
+        const kept = models.filter(m => {
+          const clean = String(m.id || '').replace(/^us\.|^eu\.|^global\./, '');
+          if (_deniedModels.has(clean)) { droppedCount++; return false; }
+          return true;
+        });
+        if (kept.length) filtered[provider] = kept;
+      }
       Object.keys(MODEL_CATALOG).forEach(k => delete MODEL_CATALOG[k]);
-      Object.assign(MODEL_CATALOG, d.models);
+      Object.assign(MODEL_CATALOG, filtered);
       rebuildModelList();
       if (ALL_MODELS.length > 0) state.selectedModel = ALL_MODELS[0];
       renderModelList('');
       document.getElementById('model-dropdown-btn').textContent = (state.selectedModel?.name || '모델 선택') + ' ▾';
-      document.getElementById('topbar-model-count').textContent = `${ALL_MODELS.length}개 모델`;
+      const suffix = droppedCount > 0 ? ` (denylist ${droppedCount}개 제외)` : '';
+      document.getElementById('topbar-model-count').textContent = `${ALL_MODELS.length}개 모델${suffix}`;
       state.authenticated = true;
     }
   } catch (e) {

@@ -149,6 +149,38 @@ function registerStoreHandlers(dataStore) {
       return false;
     }
   });
+
+  /**
+   * Denied models — Gateway 호출 실패 학습 결과 영속 저장
+   */
+  ipcMain.handle('store:load-denied-models', () => {
+    try {
+      return dataStore.loadDeniedModels();
+    } catch (error) {
+      console.error('[store:load-denied-models] Error:', error.message);
+      return [];
+    }
+  });
+
+  ipcMain.handle('store:add-denied-model', (_, modelId) => {
+    try {
+      dataStore.addDeniedModel(modelId);
+      return true;
+    } catch (error) {
+      console.error('[store:add-denied-model] Error:', error.message);
+      return false;
+    }
+  });
+
+  ipcMain.handle('store:clear-denied-models', () => {
+    try {
+      dataStore.clearDeniedModels();
+      return true;
+    } catch (error) {
+      console.error('[store:clear-denied-models] Error:', error.message);
+      return false;
+    }
+  });
 }
 
 module.exports = { registerStoreHandlers };
