@@ -416,6 +416,29 @@ async def list_models(request: Request):
             )
             client = session.client("bedrock")
         
+        # list_foundation_models는 등록된 전체 카탈로그를 반환하지만 모든 모델이
+        # converse API로 호출 가능한 건 아님. 실제 호출 가능한 모델만 걸러내려면
+        # list_inference_profiles (CRIS) 결과와 교차 검증 필요.
+        # - Cross-region Inference Profile이 있는 모델만 converse 호출 가능
+        # - 없는 모델은 ValidationException 발생
+        try:
+            profiles_resp = client.list_inference_profiles()
+            callable_profile_ids = set()
+            profile_id_to_name = {}
+            for p in profiles_resp.get("inferenceProfileSummaries", []):
+                if p.get("status", "").upper() != "ACTIVE":
+                    continue
+                pid = p.get("inferenceProfileId", "")
+                pname = p.get("inferenceProfileName", pid)
+                if pid:
+                    callable_profile_ids.add(pid)
+                    profile_id_to_name[pid] = pname
+        except Exception as _e:
+            # 프로파일 조회 실패 → 폴백으로 foundation model 전체 사용 (기존 동작)
+            print(f"[Models] list_inference_profiles 실패, 폴백: {_e}")
+            callable_profile_ids = None
+            profile_id_to_name = {}
+
         resp = client.list_foundation_models()
         catalog = {}
         skip_output = ["IMAGE", "VIDEO", "EMBEDDING"]
@@ -429,19 +452,32 @@ async def list_models(request: Request):
             input_modes = m.get("inputModalities", [])
             if "TEXT" not in input_modes:
                 continue
-            # ON_DEMAND 또는 INFERENCE_PROFILE 추론을 지원하는 모델만 (프로비저닝 전용 제외)
+            # ON_DEMAND 또는 INFERENCE_PROFILE 추론을 지원하는 모델만
             inference_types = m.get("inferenceTypesSupported", [])
             if inference_types and "ON_DEMAND" not in inference_types and "INFERENCE_PROFILE" not in inference_types:
                 continue
-            # 스트리밍 지원 확인 (responseStreamingSupported)
+            # 스트리밍 지원 확인
             if m.get("responseStreamingSupported") is False:
                 continue
+
+            # 실제 호출 가능 여부: CRIS profile 존재 여부로 판단
+            # INFERENCE_PROFILE 타입 모델은 us./eu./global. prefix 붙은 profile이 있어야 호출 가능
+            model_id = m["modelId"]
+            if callable_profile_ids is not None and "INFERENCE_PROFILE" in inference_types and "ON_DEMAND" not in inference_types:
+                # 이 모델은 CRIS profile 필수 — profile 존재 여부 확인
+                has_profile = any(
+                    pid.endswith(model_id) or pid.endswith(f"{model_id}:0") or model_id in pid
+                    for pid in callable_profile_ids
+                )
+                if not has_profile:
+                    continue  # CRIS profile 없으면 호출 불가 → 스킵
+
             provider = m.get("providerName", "Unknown")
             if provider not in catalog:
                 catalog[provider] = []
             catalog[provider].append({
-                "id": m["modelId"],
-                "name": m.get("modelName", m["modelId"]),
+                "id": model_id,
+                "name": m.get("modelName", model_id),
             })
         return JSONResponse(content={
             "models": catalog,

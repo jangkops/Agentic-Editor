@@ -1079,12 +1079,20 @@ async function runSimpleChat(prompt) {
             continue;
           }
           if (p.error) {
-            // model_denied 또는 invalid model → 해당 모델을 목록에서 제거
-            if (p.error.includes('not in allowed list') || p.error.includes('model_denied')
-                || p.error.includes('model identifier is invalid') || p.error.includes('ValidationException')) {
+            // 모델 관련 에러 (Gateway 허용 안 됨, Bedrock validation 실패 등)
+            // → 해당 모델을 목록에서 조용히 제거 + 사용자에게는 간단한 안내만
+            const isModelError = p.error.includes('not in allowed list') || p.error.includes('model_denied')
+                || p.error.includes('model identifier is invalid') || p.error.includes('ValidationException')
+                || p.error.includes('model_access_denied') || p.error.includes('AccessDeniedException');
+            if (isModelError) {
               const deniedMatch = p.error.match(/model\s+([\w.\-:]+)\s+not in allowed/);
-              if (deniedMatch) _removeModelFromCatalog(deniedMatch[1]);
-              else _removeModelFromCatalog(state.selectedModel?.id || '');
+              const failedModelId = deniedMatch ? deniedMatch[1] : (state.selectedModel?.id || '');
+              const failedModelName = state.selectedModel?.name || failedModelId;
+              _removeModelFromCatalog(failedModelId);
+              // 사용자 UI에 raw 에러 숨김 → 친화적 안내만 표시
+              msg.content = `⚠️ 이 모델(${failedModelName})은 현재 호출할 수 없습니다. 목록에서 제거되었으니 다른 모델을 선택해 주세요.`;
+              msg._modelRemoved = true;
+              continue;
             }
             // 토큰 만료 → 자동 재로그인 시도
             if (p.error.includes('expired') || p.error.includes('security token')) {
@@ -1097,10 +1105,15 @@ async function runSimpleChat(prompt) {
                     body: JSON.stringify({ profile: state.settings?.awsProfile, bedrockUser: state.settings?.bedrockUser, credentials: creds }),
                   });
                   addLiveLog('system', '자격증명 갱신 완료 — 다시 질문해주세요');
+                  msg.content = '자격증명이 갱신되었습니다. 다시 질문해 주세요.';
+                  continue;
                 }
               } catch {}
             }
-            msg.content += `\n[오류: ${p.error}]`; continue;
+            // 기타 일반 에러 — 로그에만 기록, UI는 간단한 안내
+            addLiveLog('error', `내부 오류: ${p.error}`);
+            msg.content = '일시적인 오류가 발생했습니다. 다시 시도해 주세요.';
+            continue;
           }
           if (p.text) { msg.content += p.text; continue; }
         } catch {}
