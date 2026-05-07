@@ -1079,9 +1079,10 @@ async function runSimpleChat(prompt) {
             continue;
           }
           if (p.error) {
-            // model_denied → 해당 모델을 목록에서 제거
-            if (p.error.includes('not in allowed list') || p.error.includes('model_denied')) {
-              const deniedMatch = p.error.match(/model\s+([\w.\-]+)\s+not in allowed/);
+            // model_denied 또는 invalid model → 해당 모델을 목록에서 제거
+            if (p.error.includes('not in allowed list') || p.error.includes('model_denied')
+                || p.error.includes('model identifier is invalid') || p.error.includes('ValidationException')) {
+              const deniedMatch = p.error.match(/model\s+([\w.\-:]+)\s+not in allowed/);
               if (deniedMatch) _removeModelFromCatalog(deniedMatch[1]);
               else _removeModelFromCatalog(state.selectedModel?.id || '');
             }
