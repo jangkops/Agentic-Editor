@@ -117,7 +117,15 @@ function startBridgeServer(opts) {
  */
 async function handleRequest(url, payload, sessionRouter) {
   const active = sessionRouter.getActive();
-  const isRemote = !!(active && active.state === 'connected');
+  // Treat the session as remote-usable as soon as the SSH channel is
+  // live, not only after `connected`. Provisioning runs in the
+  // background after auth completes (see ipc-remote-handlers), so
+  // gating on `state === 'connected'` would lock out file/exec ops
+  // for the first few seconds of every session. SessionRouter already
+  // implements this policy; reuse it as the single source of truth.
+  const isRemote = typeof sessionRouter.isRemoteActive === 'function'
+    ? !!sessionRouter.isRemoteActive()
+    : !!(active && active.state === 'connected');
 
   if (url === '/bridge/status') {
     return {

@@ -229,7 +229,19 @@ function registerRemoteHandlers(deps) {
       try { session.markForwarded(); } catch {}
 
       // Mount file + terminal bridges FIRST so they're available immediately.
+      // RemoteFileBridge MUST be initialised before any list/read/stat call
+      // because the SFTP channel is opened lazily by init() — without this
+      // the very first file-explorer click throws `sftp-not-initialized`.
       const fileBridge = deps.RemoteFileBridge ? new deps.RemoteFileBridge(session) : null;
+      if (fileBridge) {
+        try {
+          await fileBridge.init();
+        } catch (initErr) {
+          try { logger.warn('remote-file-bridge-init-failed', { alias, message: initErr && initErr.message }); } catch {}
+          // Non-fatal — terminal still works; the next list() will surface
+          // a clearer error to the renderer than a silent no-op would.
+        }
+      }
       const termBridge = deps.RemoteTerminalBridge ? new deps.RemoteTerminalBridge(session) : null;
       // NOTE: Do NOT wire termBridge data/exit events here — ipc-terminal-handlers.js
       // handles forwarding via _wireBridgeEvents() when a terminal is created.
