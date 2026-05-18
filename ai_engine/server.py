@@ -882,8 +882,15 @@ async def run_agent_with_tools(request: Request):
                 print(f"[Agent] turn={turn}, stopReason={stop_reason}, text={len(text_parts)}parts, tools={len(tool_use_blocks)}")
 
                 if not content_blocks:
+                    # Surface error or warn about empty response instead of silent break
+                    if turn_error:
+                        error_msg = f"모델 응답 오류: {str(turn_error)[:300]}"
+                        print(f"[Agent] turn_error surfaced: {turn_error}")
+                        yield f"data: " + json.dumps({"text": error_msg}, ensure_ascii=False) + "\n\n"
+                    else:
+                        print(f"[Agent] WARNING: empty response from model={stream_model}, sys_prompt_len={len(system_prompt)}")
+                        yield f"data: " + json.dumps({"text": "⚠️ 모델이 빈 응답을 반환했습니다. 다시 시도해 주세요."}, ensure_ascii=False) + "\n\n"
                     break
-
                 messages.append({"role": "assistant", "content": content_blocks})
 
                 if not tool_use_blocks:
