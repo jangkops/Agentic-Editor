@@ -266,6 +266,14 @@ document.addEventListener('DOMContentLoaded', async () => {
 async function initApp() {
   state.authenticated = true;
   state._appInitialized = true;
+  // Fetch Python server cwd so file-preview-panel knows where .generated/ lives
+  try {
+    const r = await fetch(`${apiBase()}/api/debug/cwd`);
+    if (r.ok) {
+      const j = await r.json();
+      if (j && j.cwd) window.__workstationCwd = j.cwd;
+    }
+  } catch {}
   // bedrockUser 자동 감지 (설정에 없으면)
   if (!state.settings.bedrockUser && window.electronAPI?.getBedrockUsername) {
     try {
@@ -2797,6 +2805,93 @@ function renderToolSummary(c, toolUses) {
       });
     }
 
+    // === Media generation result: inline preview + download ===
+    // If the tool output is JSON with a .generated/... path, show a card.
+    if (t.name && /^(generate_image|generate_pdf|generate_pptx|edit_image)$/.test(t.name) && outputTxt) {
+      try {
+        const parsed = JSON.parse(outputTxt);
+        if (parsed && parsed.path && typeof parsed.path === 'string' && parsed.path.startsWith('.generated/')) {
+          const card = document.createElement('div');
+          card.className = 'tool-media-card';
+          card.style.cssText = 'margin:6px 0 10px 24px;padding:10px;background:var(--color-bg-tertiary,#2d2d30);border:1px solid var(--color-border,#3c3c3c);border-radius:6px;display:flex;gap:12px;align-items:flex-start;';
+          const ext = (parsed.path.split('.').pop() || '').toLowerCase();
+          const isImage = ['png','jpg','jpeg','webp','gif'].includes(ext);
+          const fileName = parsed.path.split('/').pop();
+          const sizeKb = parsed.sizeBytes ? `${(parsed.sizeBytes/1024).toFixed(1)} KB` : '';
+          const dims = (parsed.width && parsed.height) ? ` · ${parsed.width}×${parsed.height}` : '';
+          const pages = parsed.pageCount ? ` · ${parsed.pageCount}페이지` : (parsed.slideCount ? ` · ${parsed.slideCount}슬라이드` : '');
+
+          card.innerHTML = `
+            <div class="tmc-thumb" style="flex-shrink:0;width:96px;height:96px;background:#1e1e1e;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:36px;overflow:hidden;cursor:pointer;">
+              ${isImage ? '<span class="tmc-img-placeholder">🖼</span>' : (ext==='pdf'?'📄':ext==='pptx'?'📊':'📎')}
+            </div>
+            <div style="flex:1;min-width:0;">
+              <div style="font-weight:600;font-size:13px;margin-bottom:4px;color:var(--color-text-primary,#ccc);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(fileName)}">${esc(fileName)}</div>
+              <div style="font-size:11px;color:var(--color-text-secondary,#9d9d9d);margin-bottom:8px;">${parsed.model ? esc(parsed.model) + ' · ' : ''}${sizeKb}${dims}${pages}</div>
+              <div style="display:flex;gap:6px;">
+                <button class="tmc-preview" type="button" style="background:var(--color-accent,#007acc);color:#fff;border:none;padding:5px 12px;border-radius:3px;font-size:11px;cursor:pointer;">미리보기</button>
+                <button class="tmc-download" type="button" style="background:transparent;color:var(--color-text-secondary,#9d9d9d);border:1px solid var(--color-border,#3c3c3c);padding:5px 12px;border-radius:3px;font-size:11px;cursor:pointer;">다운로드</button>
+              </div>
+            </div>
+          `;
+
+          // Resolve full path: state.folderPath/.generated/... if exists,
+          // or fall back to cwd-side path (Python server stores to local cwd).
+          const resolveFullPath = async () => {
+            // Try project_path first
+            if (state.folderPath) {
+              const p1 = `${state.folderPath.replace(/\/$/, '')}/${parsed.path}`;
+              return p1;
+            }
+            return parsed.path;
+          };
+
+          // For image: load thumbnail asynchronously
+          if (isImage) {
+            (async () => {
+              const fp = await resolveFullPath();
+              try {
+                const b64 = await window.electronAPI.readFileBase64(fp);
+                if (b64) {
+                  const mime = ext === 'jpg' ? 'jpeg' : ext;
+                  const thumb = card.querySelector('.tmc-thumb');
+                  if (thumb) thumb.innerHTML = `<img src="data:image/${mime};base64,${b64}" style="width:100%;height:100%;object-fit:cover;" alt="${esc(fileName)}" />`;
+                }
+              } catch {}
+            })();
+          }
+
+          card.querySelector('.tmc-preview').addEventListener('click', async (ev) => {
+            ev.stopPropagation();
+            const fp = await resolveFullPath();
+            if (typeof openMediaPreview === 'function') openMediaPreview(fp, fileName);
+          });
+          card.querySelector('.tmc-thumb').addEventListener('click', async (ev) => {
+            ev.stopPropagation();
+            const fp = await resolveFullPath();
+            if (typeof openMediaPreview === 'function') openMediaPreview(fp, fileName);
+          });
+          card.querySelector('.tmc-download').addEventListener('click', async (ev) => {
+            ev.stopPropagation();
+            const fp = await resolveFullPath();
+            try {
+              const r = await window.electronAPI.showSaveDialog({
+                defaultPath: fileName,
+                sourcePath: fp,
+                filters: [{ name: ext.toUpperCase(), extensions: [ext] }],
+              });
+              if (r && r.ok) addLiveLog && addLiveLog('system', `다운로드 완료: ${r.path}`);
+            } catch (e) {
+              console.error('[tool-media-card] download failed', e);
+            }
+          });
+
+          // Insert after toolLine (sibling)
+          toolLine.appendChild(card);
+        }
+      } catch { /* not JSON, skip */ }
+    }
+
     body.appendChild(toolLine);
   });
 
@@ -3739,8 +3834,17 @@ function initTopbar() {
       gfp.style.display = 'flex';
       gfp.style.flexDirection = 'column';
       const panel = document.getElementById('file-preview-panel');
-      if (panel && state.folderPath) {
-        panel.setAttribute('project-path', state.folderPath);
+      if (panel) {
+        // Always set workstation cwd so remote-mode falls back to local
+        // .generated/ where the Python server actually saves files.
+        if (window.__workstationCwd && !panel._workstationCwd) {
+          panel._workstationCwd = window.__workstationCwd;
+        }
+        if (state.folderPath) {
+          panel.setAttribute('project-path', state.folderPath);
+        } else if (window.__workstationCwd) {
+          panel.setAttribute('project-path', window.__workstationCwd);
+        }
       }
     }
     document.querySelector('.skills-section').style.display = 'none';

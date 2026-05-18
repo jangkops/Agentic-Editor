@@ -344,7 +344,10 @@ async def _tool_generate_image(tool_input: dict, project_path: str) -> str:
         w, h = 1024, 1024
 
     # Output path
-    gen_dir = os.path.join(project_path, ".generated") if project_path else os.path.join(os.getcwd(), ".generated")
+    # Always use a locally-existing directory for generated media.
+    # Remote project_path may not exist locally; fall back to cwd.
+    _local_root = project_path if (project_path and os.path.isdir(project_path)) else os.getcwd()
+    gen_dir = os.path.join(_local_root, ".generated")
     os.makedirs(gen_dir, exist_ok=True)
     ts = str(int(_t.time() * 1000))
     short_hash = hashlib.md5(prompt.encode()).hexdigest()[:4]
@@ -452,7 +455,10 @@ async def _tool_generate_pdf(tool_input: dict, project_path: str) -> str:
         return json.dumps({"error": "missing-dep", "lib": "reportlab", "hint": "pip install reportlab"})
 
     import time as _t, re as _re
-    gen_dir = os.path.join(project_path, ".generated") if project_path else os.path.join(os.getcwd(), ".generated")
+    # Always use a locally-existing directory for generated media.
+    # Remote project_path may not exist locally; fall back to cwd.
+    _local_root = project_path if (project_path and os.path.isdir(project_path)) else os.getcwd()
+    gen_dir = os.path.join(_local_root, ".generated")
     os.makedirs(gen_dir, exist_ok=True)
     slug = _re.sub(r"[^a-z0-9]+", "-", title.lower())[:30].strip("-") or "doc"
     ts = str(int(_t.time() * 1000))
@@ -505,7 +511,10 @@ async def _tool_generate_pptx(tool_input: dict, project_path: str) -> str:
         return json.dumps({"error": "missing-dep", "lib": "python-pptx", "hint": "pip install python-pptx"})
 
     import time as _t, re as _re
-    gen_dir = os.path.join(project_path, ".generated") if project_path else os.path.join(os.getcwd(), ".generated")
+    # Always use a locally-existing directory for generated media.
+    # Remote project_path may not exist locally; fall back to cwd.
+    _local_root = project_path if (project_path and os.path.isdir(project_path)) else os.getcwd()
+    gen_dir = os.path.join(_local_root, ".generated")
     os.makedirs(gen_dir, exist_ok=True)
     slug = _re.sub(r"[^a-z0-9]+", "-", title.lower())[:30].strip("-") or "deck"
     ts = str(int(_t.time() * 1000))
@@ -682,7 +691,10 @@ async def _tool_edit_image(tool_input: dict, project_path: str) -> str:
                     last_error = f"{model_id}: empty image data"
                     continue
                 # Save
-                gen_dir = os.path.join(project_path, ".generated") if project_path else os.path.join(os.getcwd(), ".generated")
+                # Always use a locally-existing directory for generated media.
+                # Remote project_path may not exist locally; fall back to cwd.
+                _local_root = project_path if (project_path and os.path.isdir(project_path)) else os.getcwd()
+                gen_dir = os.path.join(_local_root, ".generated")
                 os.makedirs(gen_dir, exist_ok=True)
                 ts = str(int(_t.time() * 1000))
                 filename = f"inpaint-{ts}.png"
@@ -752,7 +764,10 @@ async def _tool_edit_image(tool_input: dict, project_path: str) -> str:
             img_out = images[0] if isinstance(images[0], str) else (images[0].get("base64", "") if isinstance(images[0], dict) else "")
             if not img_out:
                 continue
-            gen_dir = os.path.join(project_path, ".generated") if project_path else os.path.join(os.getcwd(), ".generated")
+            # Always use a locally-existing directory for generated media.
+            # Remote project_path may not exist locally; fall back to cwd.
+            _local_root = project_path if (project_path and os.path.isdir(project_path)) else os.getcwd()
+            gen_dir = os.path.join(_local_root, ".generated")
             os.makedirs(gen_dir, exist_ok=True)
             ts = str(int(_t.time() * 1000))
             filename = f"outpaint-{ts}.png"
@@ -1063,6 +1078,12 @@ async def health():
         "version": __version__,
     }
 
+
+
+@app.get("/api/debug/cwd")
+async def debug_cwd():
+    """Return server cwd so renderer knows where .generated/ files land."""
+    return {"cwd": os.getcwd()}
 
 @app.get("/api/debug/bridge")
 async def debug_bridge():

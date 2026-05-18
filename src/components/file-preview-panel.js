@@ -60,8 +60,20 @@ class FilePreviewPanel extends HTMLElement {
 
   _generatedDir() {
     if (!this._projectPath) return '';
-    const sep = this._projectPath.includes('\\') && !this._projectPath.includes('/') ? '\\' : '/';
-    const base = this._projectPath.replace(/[\\/]+$/, '');
+    // If project path looks like a remote path (FSx, /home/, etc.), the
+    // Python server stores files in its own cwd. Detect by checking if
+    // the project path is "remote-style" (starts with /fsx, /home, /opt,
+    // or contains an SSH alias prefix). For remote paths, fall back to
+    // the workstation cwd that Electron is running from.
+    const p = this._projectPath;
+    const isRemoteLike = /^\/fsx\/|^\/home\/|^\/opt\//.test(p) || p.includes('[SSH:');
+    if (isRemoteLike && this._workstationCwd) {
+      const sep = this._workstationCwd.includes('\\') && !this._workstationCwd.includes('/') ? '\\' : '/';
+      const base = this._workstationCwd.replace(/[\\/]+$/, '');
+      return `${base}${sep}.generated`;
+    }
+    const sep = p.includes('\\') && !p.includes('/') ? '\\' : '/';
+    const base = p.replace(/[\\/]+$/, '');
     return `${base}${sep}.generated`;
   }
 
