@@ -15,7 +15,7 @@ function _getRouter() {
 function _remoteBridge() {
   const router = _getRouter();
   if (!router) { console.error('[_remoteBridge] router not loaded'); return null; }
-  if (!router.isRemote) { return null; }
+  if (!router.isRemote) { console.log('[_remoteBridge] isRemote=false, active=', router.getActive && router.getActive()); return null; }
   const bridge = router.getFileBridge();
   if (!bridge) { console.error('[_remoteBridge] isRemote=true but getFileBridge()=null'); }
   return bridge;
@@ -55,7 +55,10 @@ function registerFsHandlers(mainWindow) {
   ipcMain.handle('fs:read-file', async (_, filePath) => {
     try {
       const bridge = _remoteBridge();
-      if (bridge) return await bridge.read(filePath, { encoding: 'utf8' });
+      if (bridge) {
+        console.log('[fs:read-file] using remote bridge for:', filePath);
+        return await bridge.read(filePath, 'utf8');
+      }
       return fs.readFileSync(filePath, 'utf-8');
     } catch (error) {
       console.error(`[fs:read-file] Failed to read ${filePath}:`, error.message);
