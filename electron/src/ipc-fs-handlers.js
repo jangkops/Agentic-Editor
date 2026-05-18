@@ -157,6 +157,137 @@ function registerFsHandlers(mainWindow) {
     const { app } = require('electron');
     return app.getPath('userData');
   });
+
+  // === Media file preview support (watch + save dialog + read binary) ===
+  const _watchers = new Map();
+
+  /**
+   * Watch a directory and notify renderer of changes.
+   * Used by file-preview-panel to auto-refresh .generated/ list.
+   */
+  ipcMain.handle('fs:watch-directory', async (_, dirPath) => {
+    try {
+      if (_watchers.has(dirPath)) return { ok: true, alreadyWatching: true };
+      if (!fs.existsSync(dirPath)) {
+        try { fs.mkdirSync(dirPath, { recursive: true }); } catch {}
+      }
+      let timer = null;
+      const watcher = fs.watch(dirPath, { persistent: false }, (event, filename) => {
+        // Debounce 300ms — multiple writes for one save
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => {
+          try {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('fs:directory-changed', { dirPath, event, filename });
+            }
+          } catch {}
+        }, 300);
+      });
+      _watchers.set(dirPath, watcher);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err && err.message };
+    }
+  });
+
+  ipcMain.handle('fs:unwatch-directory', async (_, dirPath) => {
+    try {
+      const w = _watchers.get(dirPath);
+      if (w) { try { w.close(); } catch {} _watchers.delete(dirPath); }
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err && err.message };
+    }
+  });
+
+  /**
+   * Show save dialog and copy file to chosen location.
+   * Used by file-preview-panel download button.
+   */
+  ipcMain.handle('fs:show-save-dialog', async (_, opts) => {
+    try {
+      const options = opts || {};
+      const result = await dialog.showSaveDialog(mainWindow, {
+        defaultPath: options.defaultPath || '',
+        filters: options.filters || [],
+      });
+      if (result.canceled || !result.filePath) return { ok: false, canceled: true };
+      if (options.sourcePath) {
+        // Copy from source to chosen path
+        if (options.remote) {
+          const bridge = _remoteBridge();
+          if (!bridge) return { ok: false, error: 'remote bridge not available' };
+          // Read remote -> write local
+          const buf = await bridge.read(options.sourcePath, 'binary');
+          if (Buffer.isBuffer(buf)) fs.writeFileSync(result.filePath, buf);
+          else fs.writeFileSync(result.filePath, buf);
+        } else {
+          fs.copyFileSync(options.sourcePath, result.filePath);
+        }
+      } else if (options.content !== undefined) {
+        fs.writeFileSync(result.filePath, options.content);
+      }
+      return { ok: true, path: result.filePath };
+    } catch (err) {
+      return { ok: false, error: err && err.message };
+    }
+  });
+
+  /**
+   * Read file as base64 (for image/binary preview in renderer).
+   */
+  ipcMain.handle('fs:read-file-base64', async (_, filePath) => {
+    try {
+      const bridge = _remoteBridge();
+      if (bridge) {
+        const buf = await bridge.read(filePath, 'binary');
+        return Buffer.isBuffer(buf) ? buf.toString('base64') : Buffer.from(buf).toString('base64');
+      }
+      return fs.readFileSync(filePath).toString('base64');
+    } catch (err) {
+      console.error(`[fs:read-file-base64] failed:`, err.message);
+      return null;
+    }
+  });
+
+  /**
+   * List files with stats (size, mtime) — for file-preview-panel.
+   */
+  ipcMain.handle('fs:list-files-with-stats', async (_, dirPath) => {
+    try {
+      const bridge = _remoteBridge();
+      if (bridge) {
+        const entries = await bridge.list(dirPath);
+        return entries.map(e => ({
+          name: e.name,
+          path: e.path,
+          isDirectory: e.isDirectory,
+          size: e.size || 0,
+          mtime: e.mtime ? new Date(e.mtime * 1000).toISOString() : null,
+        }));
+      }
+      if (!fs.existsSync(dirPath)) return [];
+      const names = fs.readdirSync(dirPath);
+      return names.map(n => {
+        const full = require('path').join(dirPath, n);
+        try {
+          const st = fs.statSync(full);
+          return {
+            name: n,
+            path: full,
+            isDirectory: st.isDirectory(),
+            size: st.size,
+            mtime: st.mtime.toISOString(),
+          };
+        } catch {
+          return { name: n, path: full, isDirectory: false, size: 0, mtime: null };
+        }
+      });
+    } catch (err) {
+      console.error(`[fs:list-files-with-stats] failed:`, err.message);
+      return [];
+    }
+  });
 }
 
 module.exports = { registerFsHandlers };

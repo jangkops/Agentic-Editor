@@ -38,6 +38,7 @@
       <button class="lp-btn" id="btn-source-control">소스 제어</button>
       <button class="lp-btn" id="btn-github-import">GitHub</button>
       <button class="lp-btn" id="btn-remote-explorer">Remote <span id="remote-indicator" style="display:none;margin-left:4px;">●</span></button>
+      <button class="lp-btn" id="btn-generated-files" title="생성된 미디어 파일">생성</button>
     </div>
     <div class="file-tree-path" id="file-tree-path" style="display:flex;align-items:center">
       <button class="ft-action-btn" id="btn-open-folder" title="프로젝트 열기" style="flex-shrink:0;margin-right:4px;font-size:11px;padding:2px 6px">+</button>
@@ -56,6 +57,11 @@
     <div class="file-tree" id="source-control-panel" style="display:none"></div>
     <!-- Remote Explorer 패널 (VS Code 스타일) -->
     <div class="file-tree" id="remote-explorer-panel" style="display:none"></div>
+
+    <!-- Generated Files 패널 (이미지/PDF/PPTX 미리보기) -->
+    <div id="generated-files-panel" style="display:none;flex:1;overflow:hidden">
+      <file-preview-panel id="file-preview-panel"></file-preview-panel>
+    </div>
     <!-- 우클릭 컨텍스트 메뉴 -->
     <div id="file-context-menu" class="context-menu" style="display:none"></div>
     <div class="skills-section"></div>
@@ -253,6 +259,7 @@
 <script src="components/pptx-viewer.js"></script>
 <script src="components/docx-viewer.js"></script>
 <script src="components/xlsx-viewer.js"></script>
+<script src="components/file-preview-panel.js"></script>
 <script src="components/denylist-manager.js"></script>
 <script src="components/remote-host-picker.js"></script>
 <script src="components/remote-ad-hoc-dialog.js"></script>

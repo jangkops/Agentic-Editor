@@ -3710,6 +3710,7 @@ function initTopbar() {
     document.getElementById('file-tree').style.display = '';
     document.getElementById('source-control-panel').style.display = 'none';
     const rep = document.getElementById('remote-explorer-panel'); if (rep) rep.style.display = 'none';
+    const gfp = document.getElementById('generated-files-panel'); if (gfp) gfp.style.display = 'none';
     document.querySelector('.skills-section').style.display = '';
     document.getElementById('file-tree-path').style.display = 'flex';
   });
@@ -3720,9 +3721,30 @@ function initTopbar() {
     document.getElementById('file-tree').style.display = 'none';
     document.getElementById('source-control-panel').style.display = 'none';
     document.getElementById('remote-explorer-panel').style.display = '';
+    const gfp = document.getElementById('generated-files-panel');
+    if (gfp) gfp.style.display = 'none';
     document.querySelector('.skills-section').style.display = 'none';
     document.getElementById('file-tree-path').style.display = 'none';
     renderRemoteExplorer();
+  });
+  // Generated Files 탭 전환
+  document.getElementById('btn-generated-files')?.addEventListener('click', () => {
+    document.querySelectorAll('.lp-btn').forEach(b => b.classList.remove('active'));
+    document.getElementById('btn-generated-files').classList.add('active');
+    document.getElementById('file-tree').style.display = 'none';
+    document.getElementById('source-control-panel').style.display = 'none';
+    document.getElementById('remote-explorer-panel').style.display = 'none';
+    const gfp = document.getElementById('generated-files-panel');
+    if (gfp) {
+      gfp.style.display = 'flex';
+      gfp.style.flexDirection = 'column';
+      const panel = document.getElementById('file-preview-panel');
+      if (panel && state.folderPath) {
+        panel.setAttribute('project-path', state.folderPath);
+      }
+    }
+    document.querySelector('.skills-section').style.display = 'none';
+    document.getElementById('file-tree-path').style.display = 'none';
   });
 }
 
@@ -4739,4 +4761,105 @@ async function indexProjectForRAG(projectPath) {
   } catch (e) {
     addLiveLog('error', `RAG 인덱싱 실패: ${e.message}`);
   }
+}
+
+
+// ===== Generated File Preview =====
+// Open generated images/PDF/PPTX in the editor area using viewer Web Components.
+async function openMediaPreview(filePath, fileName) {
+  if (!filePath || !window.electronAPI) return;
+  const ext = (fileName || filePath.split('/').pop() || '').split('.').pop().toLowerCase();
+  const editorArea = document.getElementById('editor-area');
+  const editorContent = document.getElementById('editor-content');
+  if (!editorArea || !editorContent) return;
+
+  // Hide other views, show editor area
+  ['structure', 'dependencies', 'stats', 'search', 'git', 'review', 'consensus'].forEach(v => {
+    const el = document.getElementById('view-' + v);
+    if (el) el.style.display = 'none';
+  });
+  editorArea.style.display = 'flex';
+  document.getElementById('parallel-results')?.classList.remove('visible');
+  document.querySelectorAll('.cv-tab').forEach(t => t.classList.toggle('active', t.dataset.view === 'editor'));
+
+  // Read file as base64
+  const b64 = await window.electronAPI.readFileBase64(filePath).catch(() => null);
+  if (!b64) {
+    editorContent.innerHTML = `<div style="padding:30px;color:var(--color-error);">파일 읽기 실패: ${fileName || filePath}</div>`;
+    return;
+  }
+
+  // Hide monaco editor temporarily
+  if (monacoEditor) {
+    try { monacoEditor.getDomNode().style.display = 'none'; } catch {}
+  }
+
+  // Remove previous preview wrapper if any
+  let wrapper = document.getElementById('media-preview-wrapper');
+  if (wrapper) wrapper.remove();
+  wrapper = document.createElement('div');
+  wrapper.id = 'media-preview-wrapper';
+  wrapper.style.cssText = 'position:absolute;inset:0;overflow:auto;background:var(--color-bg-primary);';
+  editorContent.appendChild(wrapper);
+
+  if (['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(ext)) {
+    const mime = ext === 'jpg' ? 'jpeg' : ext;
+    wrapper.innerHTML = `
+      <div style="padding:20px;display:flex;justify-content:center;align-items:flex-start;min-height:100%;">
+        <img src="data:image/${mime};base64,${b64}" style="max-width:100%;max-height:90vh;object-fit:contain;border:1px solid var(--color-border);background:#fff;" alt="${fileName}" />
+      </div>
+    `;
+  } else if (ext === 'pdf') {
+    wrapper.innerHTML = `
+      <iframe src="data:application/pdf;base64,${b64}" style="width:100%;height:100%;border:none;" title="${fileName}"></iframe>
+    `;
+  } else if (ext === 'pptx' || ext === 'docx' || ext === 'xlsx') {
+    // Use the dedicated viewer Web Components if available
+    const tagName = ext === 'pptx' ? 'pptx-viewer' : ext === 'docx' ? 'docx-viewer' : 'xlsx-viewer';
+    const v = document.createElement(tagName);
+    v.style.cssText = 'display:block;width:100%;height:100%;';
+    v.setAttribute('file-path', filePath);
+    v.setAttribute('base64', b64);
+    wrapper.appendChild(v);
+  } else {
+    wrapper.innerHTML = `<div style="padding:30px;color:var(--color-text-secondary);">미리보기를 지원하지 않는 형식: ${ext}</div>`;
+  }
+
+  // Update tab UI
+  state.activeTab = filePath;
+  if (!state.openTabs.find(t => t.path === filePath)) {
+    state.openTabs.push({ path: filePath, name: fileName || filePath.split('/').pop(), preview: true });
+  }
+  if (typeof renderEditorTabs === 'function') renderEditorTabs();
+  const fi = document.getElementById('status-file-info');
+  if (fi) fi.textContent = fileName || filePath.split('/').pop();
+}
+
+// Restore monaco when switching back to a text tab
+function _hideMediaPreview() {
+  const wrapper = document.getElementById('media-preview-wrapper');
+  if (wrapper) wrapper.remove();
+  if (monacoEditor) {
+    try { monacoEditor.getDomNode().style.display = ''; } catch {}
+  }
+}
+
+// Listen for preview-file events from <file-preview-panel>
+document.addEventListener('preview-file', (e) => {
+  const { path, name } = e.detail || {};
+  if (!path) return;
+  openMediaPreview(path, name);
+});
+
+// Auto-restore monaco when user clicks a text-file tab (handled by renderEditorTabs hook)
+// Hook into existing tab switching by patching openFileInEditor to clear media wrapper
+if (typeof openFileInEditor === 'function') {
+  const _origOpen = openFileInEditor;
+  // Cannot reassign const; instead, listen for tab clicks generally
+  document.addEventListener('click', (e) => {
+    const tab = e.target.closest('.editor-tab');
+    if (tab && !tab.classList.contains('preview')) {
+      _hideMediaPreview();
+    }
+  });
 }

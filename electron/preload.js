@@ -9,6 +9,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
   rename: (oldP, newP) => ipcRenderer.invoke('fs:rename', oldP, newP),
   mkdir: (p) => ipcRenderer.invoke('fs:mkdir', p),
   readDir: (p) => ipcRenderer.invoke('fs:list-files', p),
+  // Media file preview support
+  readFileBase64: (p) => ipcRenderer.invoke('fs:read-file-base64', p),
+  listFilesWithStats: (p) => ipcRenderer.invoke('fs:list-files-with-stats', p),
+  watchDirectory: (p) => ipcRenderer.invoke('fs:watch-directory', p),
+  unwatchDirectory: (p) => ipcRenderer.invoke('fs:unwatch-directory', p),
+  showSaveDialog: (opts) => ipcRenderer.invoke('fs:show-save-dialog', opts),
+  onDirectoryChanged: (cb) => {
+    const wrapped = (_evt, data) => cb(data);
+    ipcRenderer.on('fs:directory-changed', wrapped);
+    return () => ipcRenderer.removeListener('fs:directory-changed', wrapped);
+  },
   getUserDataPath: () => ipcRenderer.invoke('fs:get-user-data-path'),
 
   // Settings
