@@ -123,8 +123,34 @@ if not _BRIDGE_URL:
         pass
 _BRIDGE_TOOLS = {"read_file", "write_file", "list_directory", "search_files", "run_command"}
 
+def _refresh_bridge_discovery():
+    """Re-read bridge URL/token from env or discovery file (lazy)."""
+    global _BRIDGE_URL, _BRIDGE_TOKEN
+    # Priority 1: env vars (set by Electron ProcessManager)
+    url = os.environ.get("AE_BRIDGE_URL", "").strip()
+    token = os.environ.get("AE_BRIDGE_TOKEN", "").strip()
+    if url and token:
+        _BRIDGE_URL, _BRIDGE_TOKEN = url, token
+        return
+    # Priority 2: discovery file (written by bridge-server.js)
+    import tempfile as _tf
+    try:
+        with open(os.path.join(_tf.gettempdir(), "ae-bridge.json"), "r") as f:
+            d = json.load(f)
+        url = (d.get("url") or "").strip()
+        token = (d.get("token") or "").strip()
+        if url and token:
+            _BRIDGE_URL, _BRIDGE_TOKEN = url, token
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+
+
 def _call_bridge(endpoint: str, payload: dict):
     """Call the Electron bridge server. Returns dict or None on failure."""
+    global _BRIDGE_URL, _BRIDGE_TOKEN
+    # Lazy discovery: if URL not set, try to find it now
+    if not _BRIDGE_URL or not _BRIDGE_TOKEN:
+        _refresh_bridge_discovery()
     if not _BRIDGE_URL or not _BRIDGE_TOKEN:
         return None
     try:
@@ -136,8 +162,12 @@ def _call_bridge(endpoint: str, payload: dict):
         )
         if r.status_code == 200:
             return r.json()
+        # Bridge server died or restarted — clear cached URL so next call retries
+        if r.status_code in (401, 404, 502, 503):
+            _BRIDGE_URL, _BRIDGE_TOKEN = "", ""
     except Exception:
-        pass
+        # Connection refused = bridge not running, clear for retry
+        _BRIDGE_URL, _BRIDGE_TOKEN = "", ""
     return None
 
 def _bridge_is_remote() -> bool:
