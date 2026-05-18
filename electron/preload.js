@@ -44,7 +44,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getSSOExpiry: (profile) => ipcRenderer.invoke('sso:get-expiry', profile),
 
   // Terminal
-  terminalCreate: (id) => ipcRenderer.invoke('terminal:create', id),
+  terminalCreate: (id, opts) => ipcRenderer.invoke('terminal:create', id, opts),
   terminalWrite: (id, data) => ipcRenderer.invoke('terminal:write', id, data),
   terminalKill: (id) => ipcRenderer.invoke('terminal:kill', id),
   onTerminalData: (cb) => ipcRenderer.on('terminal:data', (_, data) => cb(data)),
@@ -67,4 +67,51 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Search
   projectSearch: (dirPath, query, options) => ipcRenderer.invoke('git:search', dirPath, query, options),
+
+  // Capability denylist (multimedia spec Task 9.3)
+  loadCapabilityDenylist: () => ipcRenderer.invoke('store:load-capability-denylist'),
+  addCapabilityDenylistEntry: (entry) => ipcRenderer.invoke('store:add-capability-denylist-entry', entry),
+  removeCapabilityDenylistEntry: (modelId, capability) => ipcRenderer.invoke('store:remove-capability-denylist-entry', modelId, capability),
+  clearCapabilityDenylist: () => ipcRenderer.invoke('store:clear-capability-denylist'),
+
+  // Remote SSH
+  remoteListHosts: () => ipcRenderer.invoke('remote:list-hosts'),
+  remoteAddAdHocHost: (h) => ipcRenderer.invoke('remote:add-ad-hoc-host', h),
+  remoteSetFavorite: (p) => ipcRenderer.invoke('remote:set-favorite', p),
+  remoteConnect: (p) => ipcRenderer.invoke('remote:connect', p),
+  remoteDisconnect: (p) => ipcRenderer.invoke('remote:disconnect', p),
+  remoteSwitchActive: (p) => ipcRenderer.invoke('remote:switch-active', p),
+  remoteStatus: (p) => ipcRenderer.invoke('remote:status', p || {}),
+  remoteRespondAuth: (p) => ipcRenderer.invoke('remote:respond-auth', p),
+  remoteSetWorkspace: (p) => ipcRenderer.invoke('remote:set-workspace', p),
+  remoteClearCredentials: () => ipcRenderer.invoke('remote:clear-credentials'),
+  remoteShowLog: () => ipcRenderer.invoke('remote:show-log'),
+  // Event subscriptions — each returns a cleanup function that removes the
+  // listener (Req 10.4 cleanup契約). Callers should invoke the returned
+  // function on unmount/teardown to avoid leaked handlers.
+  onRemoteState: (cb) => {
+    const h = (_, d) => cb(d);
+    ipcRenderer.on('remote:event:state', h);
+    return () => ipcRenderer.removeListener('remote:event:state', h);
+  },
+  onRemoteAuthRequest: (cb) => {
+    const h = (_, d) => cb(d);
+    ipcRenderer.on('remote:event:auth-request', h);
+    return () => ipcRenderer.removeListener('remote:event:auth-request', h);
+  },
+  onRemoteHostKeyPrompt: (cb) => {
+    const h = (_, d) => cb(d);
+    ipcRenderer.on('remote:event:host-key-prompt', h);
+    return () => ipcRenderer.removeListener('remote:event:host-key-prompt', h);
+  },
+  onRemoteFsChange: (cb) => {
+    const h = (_, d) => cb(d);
+    ipcRenderer.on('remote:event:fs-change', h);
+    return () => ipcRenderer.removeListener('remote:event:fs-change', h);
+  },
+  onRemoteConnected: (cb) => {
+    const h = (_, d) => cb(d);
+    ipcRenderer.on('remote:event:connected', h);
+    return () => ipcRenderer.removeListener('remote:event:connected', h);
+  },
 });

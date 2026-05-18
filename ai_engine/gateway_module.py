@@ -96,6 +96,68 @@ class GatewayClient:
         low = err_str.lower()
         return "expired" in low or "security token" in low or "not authorized" in low
 
+    async def invoke_model(self, model_id: str, body: dict, timeout: int = 30) -> dict:
+        """Bedrock InvokeModel API 호출 (이미지 모델용).
+
+        Args:
+            model_id: Bedrock 모델 ID (e.g. amazon.titan-image-generator-v2:0)
+            body: 모델별 요청 본문
+            timeout: 요청 타임아웃 (초), 기본 30초
+
+        Returns:
+            dict: {"images": [...]} 성공 시, {"error": "..."} 실패 시
+        """
+        url = f"{self.gateway_url}/invoke-model"
+        payload = {"modelId": model_id, "body": body}
+        body_bytes = json.dumps(payload).encode()
+
+        for attempt in range(3):
+            headers = self._sign("POST", url, body_bytes)
+
+            try:
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(float(timeout), connect=10.0)
+                ) as client:
+                    resp = await client.post(url, content=body_bytes, headers=headers)
+
+                if resp.status_code == 200:
+                    data = resp.json()
+                    # Gateway 응답에서 이미지 데이터 추출
+                    if "images" in data:
+                        return {"images": data["images"]}
+                    # 모델 응답이 body 안에 래핑된 경우
+                    resp_body = data.get("body", data)
+                    if isinstance(resp_body, str):
+                        resp_body = json.loads(resp_body)
+                    if "images" in resp_body:
+                        return {"images": resp_body["images"]}
+                    # 기타 성공 응답 — 그대로 반환
+                    return resp_body
+
+                # HTTP 에러 처리
+                err_text = resp.text[:200]
+                if self._is_expired_error(err_text):
+                    if attempt < 2:
+                        print(f"[GW invoke_model] 토큰 만료 감지 (시도 {attempt+1}/3) — 자격증명 갱신 후 재시도")
+                        self.force_refresh_creds()
+                        headers = self._sign("POST", url, body_bytes)
+                        await asyncio.sleep(0.5)
+                        continue
+                return {"error": f"HTTP {resp.status_code}: {err_text}"}
+
+            except httpx.TimeoutException:
+                return {"error": f"타임아웃 ({timeout}초 초과)"}
+            except Exception as e:
+                err_str = str(e)
+                if self._is_expired_error(err_str) and attempt < 2:
+                    print(f"[GW invoke_model] 토큰 만료 감지 (시도 {attempt+1}/3) — 자격증명 갱신 후 재시도")
+                    self.force_refresh_creds()
+                    await asyncio.sleep(0.5)
+                    continue
+                return {"error": str(e)}
+
+        return {"error": "최대 재시도 횟수 초과"}
+
     async def converse_quota_only(self, model_id, messages, system_prompt=""):
         """Quota 조회 전용 — maxTokens:1로 최소 비용, ACCEPTED 시 폴링 없이 quota만 반환."""
         url = f"{self.gateway_url}/converse"

@@ -239,13 +239,37 @@ function buildAuthHandler(order, ctx) {
 function buildHostVerifier(opts) {
   return function hostVerifier(key, done) {
     const verdict = hostKeyStore.verify(opts.host, opts.port, key);
+
     if (typeof done === 'function') {
-      // async signature
-      opts.onVerdict(verdict);
-      done(verdict.status === 'ok');
+      // Async signature (ssh2 >= 1.x). We can hold the callback.
+      if (verdict.status === 'ok') {
+        opts.onVerdict(verdict);
+        done(true);
+        return undefined;
+      }
+      if (verdict.status === 'mismatch') {
+        opts.onVerdict(verdict);
+        done(false);
+        return undefined;
+      }
+      // 'unknown' — TOFU case. Hold the `done` callback so the user
+      // can accept/reject via the host-key-prompt dialog. The session's
+      // `_handleHostKeyVerdict` will emit the prompt; when the user
+      // responds via `respondAuth('host-key', {accept})`, the session
+      // resolves `_pendingHostKey` which we wire here.
+      if (opts.onTofuWait && typeof opts.onTofuWait === 'function') {
+        // Let the session know we're holding the callback so it can
+        // wire the user's response to `done`.
+        opts.onTofuWait(verdict, done);
+      } else {
+        // Fallback: no TOFU handler wired — reject (legacy behavior).
+        opts.onVerdict(verdict);
+        done(false);
+      }
       return undefined;
     }
-    // sync signature
+
+    // Sync signature (older ssh2). Cannot wait for user input.
     opts.onVerdict(verdict);
     return verdict.status === 'ok';
   };
@@ -341,9 +365,13 @@ function buildLeafConfig(entry, opts) {
       twoFactorResponder: options.onAuthPrompt,
     }),
     hostVerifier: buildHostVerifier({
-      host,
-      port,
+      // Use original host/port for host-key verification when connecting
+      // through a binary tunnel (the tunnel endpoint is 127.0.0.1:<random>
+      // which changes every time — not suitable for known_hosts lookup).
+      host: entry._originalHost || host,
+      port: entry._originalPort || port,
       onVerdict: options.onHostKeyVerdict || (() => {}),
+      onTofuWait: options.onTofuWait || null,
     }),
   };
 
@@ -400,6 +428,7 @@ function buildConnectConfig(params) {
     const leaf = buildLeafConfig(hop, {
       onHostKeyVerdict: params.onHostKeyVerdict,
       onAuthPrompt: params.onAuthPrompt,
+      onTofuWait: params.onTofuWait,
     });
     for (const d of leaf.diagnostics) {
       diagnostics.push({ ...d, hop: hop.alias });
@@ -412,6 +441,7 @@ function buildConnectConfig(params) {
   const leaf = buildLeafConfig(target, {
     onHostKeyVerdict: params.onHostKeyVerdict,
     onAuthPrompt: params.onAuthPrompt,
+    onTofuWait: params.onTofuWait,
   });
   for (const d of leaf.diagnostics) diagnostics.push({ ...d, hop: target.alias });
   needsPrompt = needsPrompt || leaf.needsPrompt;

@@ -1,10 +1,40 @@
 /**
  * Git IPC Handlers
  * 책임: Git 로그, 커밋, 브랜치, 상태, 검색 등
+ *
+ * Remote-SSH 통합 (Task 22.3):
+ *   모든 `execSync(cmd, {cwd})` 호출을 `sessionRouter.exec(cmd, {cwd})` 로
+ *   교체했다. Router 는 활성 RemoteSession 이 있을 때 SSH 를 통해 원격 호스트
+ *   에서 명령을 실행하고, 없을 때는 로컬 `child_process.execSync` 로 위임한다.
+ *   두 경로 모두 `{stdout, stderr, code}` 형태로 반환한다. 기존 코드는
+ *   `execSync` 가 비-영 종료 시 throw 하는 패턴에 의존했으므로, 동일한 흐름을
+ *   유지하기 위해 `run()` 헬퍼가 `code !== 0` 일 때 `Error` 를 던진다
+ *   (기존 catch 블록이 그대로 동작하도록).
  */
 
 const { ipcMain } = require('electron');
-const { execSync } = require('child_process');
+const sessionRouter = require('./remote/session-router');
+
+/**
+ * sessionRouter.exec 래퍼: 비-영 종료 시 기존 execSync 처럼 throw 하여
+ * 핸들러의 try/catch 흐름을 보존한다.
+ *
+ * @param {string} cmd
+ * @param {{cwd?:string, timeout?:number}} [opts]
+ * @returns {Promise<string>} stdout (utf-8)
+ */
+async function run(cmd, opts) {
+  const result = await sessionRouter.exec(cmd, opts || {});
+  if (result.code !== 0) {
+    const err = new Error(result.stderr || result.stdout || `exit ${result.code}`);
+    err.code = result.code;
+    err.status = result.code;
+    err.stdout = result.stdout;
+    err.stderr = result.stderr;
+    throw err;
+  }
+  return result.stdout;
+}
 
 /**
  * Git IPC 핸들러 등록
@@ -20,9 +50,8 @@ function registerGitHandlers() {
   ipcMain.handle('git:log', async (_, dirPath, limit = 50) => {
     try {
       const cmd = `git log --oneline --decorate --all -n ${limit}`;
-      const output = execSync(cmd, {
+      const output = await run(cmd, {
         cwd: dirPath,
-        encoding: 'utf-8',
         timeout: 10000,
       });
 
@@ -52,9 +81,8 @@ function registerGitHandlers() {
   ipcMain.handle('git:show', async (_, dirPath, hash) => {
     try {
       const showCmd = `git show --stat --format="%H%n%an%n%ae%n%ai%n%s%n%b%n---STAT---" ${hash}`;
-      const info = execSync(showCmd, {
+      const info = await run(showCmd, {
         cwd: dirPath,
-        encoding: 'utf-8',
         timeout: 10000,
       });
 
@@ -64,9 +92,8 @@ function registerGitHandlers() {
       // diff 조회
       let diff = '';
       try {
-        diff = execSync(`git diff ${hash}~1 ${hash} 2>/dev/null || git show ${hash} --format=""`, {
+        diff = await run(`git diff ${hash}~1 ${hash} 2>/dev/null || git show ${hash} --format=""`, {
           cwd: dirPath,
-          encoding: 'utf-8',
           timeout: 10000,
         });
       } catch {
@@ -103,9 +130,8 @@ function registerGitHandlers() {
       const flags = `${caseSensitiveFlag} -n --include="*"`;
       const cmd = `grep -r ${flags} --color=never -l "${query.replace(/"/g, '\\"')}" . 2>/dev/null | head -50`;
 
-      const result = execSync(cmd, {
+      const result = await run(cmd, {
         cwd: dirPath,
-        encoding: 'utf-8',
         timeout: 15000,
       });
 
@@ -117,9 +143,8 @@ function registerGitHandlers() {
           const grepCmd = `grep -n ${
             options?.caseSensitive ? '' : '-i'
           } --color=never "${query.replace(/"/g, '\\"')}" "${file}" 2>/dev/null | head -10`;
-          const grepLines = execSync(grepCmd, {
+          const grepLines = await run(grepCmd, {
             cwd: dirPath,
-            encoding: 'utf-8',
             timeout: 5000,
           });
 
@@ -164,27 +189,24 @@ function registerGitHandlers() {
 
       let current = null;
       try {
-        current = execSync('git rev-parse --abbrev-ref HEAD', {
+        current = (await run('git rev-parse --abbrev-ref HEAD', {
           cwd: dirPath,
-          encoding: 'utf-8',
           timeout: 5000,
-        }).trim();
+        })).trim();
       } catch {
         // 브랜치가 없을 수 있음 (detached HEAD)
       }
 
-      const localRaw = execSync('git branch --format="%(refname:short)"', {
+      const localRaw = await run('git branch --format="%(refname:short)"', {
         cwd: dirPath,
-        encoding: 'utf-8',
         timeout: 5000,
       });
       const local = localRaw.split('\n').map((s) => s.trim()).filter(Boolean);
 
       let remote = [];
       try {
-        const remoteRaw = execSync('git branch -r --format="%(refname:short)"', {
+        const remoteRaw = await run('git branch -r --format="%(refname:short)"', {
           cwd: dirPath,
-          encoding: 'utf-8',
           timeout: 5000,
         });
         remote = remoteRaw
@@ -214,9 +236,8 @@ function registerGitHandlers() {
         return { clean: false, error: 'no_dir' };
       }
 
-      const output = execSync('git status --porcelain', {
+      const output = await run('git status --porcelain', {
         cwd: dirPath,
-        encoding: 'utf-8',
         timeout: 5000,
       });
 
@@ -256,9 +277,8 @@ function registerGitHandlers() {
         // 로컬에 이미 같은 이름의 브랜치가 있는지 확인
         let hasLocal = false;
         try {
-          execSync(`git rev-parse --verify --quiet "refs/heads/${localName}"`, {
+          await run(`git rev-parse --verify --quiet "refs/heads/${localName}"`, {
             cwd: dirPath,
-            encoding: 'utf-8',
             timeout: 3000,
           });
           hasLocal = true;
@@ -275,20 +295,18 @@ function registerGitHandlers() {
         checkoutCmd = `git checkout ${branch}`;
       }
 
-      const output = execSync(`${checkoutCmd} 2>&1`, {
+      const output = await run(`${checkoutCmd} 2>&1`, {
         cwd: dirPath,
-        encoding: 'utf-8',
         timeout: 15000,
       });
 
       // 체크아웃 후 현재 브랜치 재조회
       let current = null;
       try {
-        current = execSync('git rev-parse --abbrev-ref HEAD', {
+        current = (await run('git rev-parse --abbrev-ref HEAD', {
           cwd: dirPath,
-          encoding: 'utf-8',
           timeout: 5000,
-        }).trim();
+        })).trim();
       } catch {
         // 현재 브랜치 조회 실패
       }
@@ -308,11 +326,11 @@ function registerGitHandlers() {
       if (!dirPath) return { ok: false, error: 'dirPath required' };
       const msg = message || `checkpoint-${Date.now()}`;
       // 변경사항이 없으면 stash 불필요
-      const status = execSync('git status --porcelain', { cwd: dirPath, encoding: 'utf-8' }).trim();
+      const status = (await run('git status --porcelain', { cwd: dirPath })).trim();
       if (!status) return { ok: true, skipped: true, message: 'nothing to stash' };
-      const output = execSync(`git stash push -m "${msg}" --include-untracked 2>&1`, {
-        cwd: dirPath, encoding: 'utf-8', timeout: 10000,
-      }).trim();
+      const output = (await run(`git stash push -m "${msg}" --include-untracked 2>&1`, {
+        cwd: dirPath, timeout: 10000,
+      })).trim();
       return { ok: true, output, message: msg };
     } catch (error) {
       const msg = String(error.stdout || error.stderr || error.message || error);
@@ -325,11 +343,11 @@ function registerGitHandlers() {
     try {
       if (!dirPath) return { ok: false, error: 'dirPath required' };
       // stash가 비어있는지 확인
-      const list = execSync('git stash list', { cwd: dirPath, encoding: 'utf-8' }).trim();
+      const list = (await run('git stash list', { cwd: dirPath })).trim();
       if (!list) return { ok: false, error: 'stash가 비어있습니다' };
-      const output = execSync('git stash pop 2>&1', {
-        cwd: dirPath, encoding: 'utf-8', timeout: 10000,
-      }).trim();
+      const output = (await run('git stash pop 2>&1', {
+        cwd: dirPath, timeout: 10000,
+      })).trim();
       return { ok: true, output };
     } catch (error) {
       const msg = String(error.stdout || error.stderr || error.message || error);
@@ -341,9 +359,9 @@ function registerGitHandlers() {
   ipcMain.handle('git:stash-list', async (_, dirPath) => {
     try {
       if (!dirPath) return { ok: true, stashes: [] };
-      const output = execSync('git stash list --format="%gd|%s|%ci"', {
-        cwd: dirPath, encoding: 'utf-8', timeout: 5000,
-      }).trim();
+      const output = (await run('git stash list --format="%gd|%s|%ci"', {
+        cwd: dirPath, timeout: 5000,
+      })).trim();
       if (!output) return { ok: true, stashes: [] };
       const stashes = output.split('\n').map(line => {
         const [ref, message, date] = line.split('|');
@@ -358,8 +376,8 @@ function registerGitHandlers() {
   ipcMain.handle('git:discard-all', async (_, dirPath) => {
     try {
       if (!dirPath) return { ok: false, error: 'dirPath required' };
-      execSync('git checkout -- . 2>&1', { cwd: dirPath, encoding: 'utf-8', timeout: 10000 });
-      execSync('git clean -fd 2>&1', { cwd: dirPath, encoding: 'utf-8', timeout: 10000 });
+      await run('git checkout -- . 2>&1', { cwd: dirPath, timeout: 10000 });
+      await run('git clean -fd 2>&1', { cwd: dirPath, timeout: 10000 });
       return { ok: true };
     } catch (error) {
       const msg = String(error.stdout || error.stderr || error.message || error);

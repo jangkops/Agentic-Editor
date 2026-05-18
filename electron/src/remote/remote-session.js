@@ -160,7 +160,7 @@ const ERR = Object.freeze({
  * @property {Object} target               Resolved HostEntry (from ssh-config-parser).
  * @property {Object[]=} hops              Resolved HostEntries for ProxyJump hops.
  * @property {Function=} clientFactory     Test hook: returns an object matching ssh2.Client.
- * @property {number=}  handshakeTimeoutMs (default 10000)
+ * @property {number=}  handshakeTimeoutMs (default 60000 — covers TOFU prompt + 2FA round-trips)
  * @property {number=}  promptTimeoutMs    (default 120000)
  * @property {(alias:string) => boolean=} isKnownAlias
  *    Optional lookup used when StrictHostKeyChecking is not explicit.
@@ -182,7 +182,11 @@ class RemoteSession extends EventEmitter {
       : null;
     /** @private */ this._handshakeTimeoutMs = Number(opts.handshakeTimeoutMs) > 0
       ? Number(opts.handshakeTimeoutMs)
-      : 10000;
+      : 60000;
+    // Handshake budget includes user-interactive steps: TOFU host-key
+    // prompts, key passphrase entry, and 2FA challenges. 60s leaves
+    // comfortable headroom for the renderer dialog to round-trip even
+    // on a slow desktop, while still bounding zombie connections.
     /** @private */ this._promptTimeoutMs = Number(opts.promptTimeoutMs) > 0
       ? Number(opts.promptTimeoutMs)
       : 120000;
@@ -409,6 +413,7 @@ class RemoteSession extends EventEmitter {
         hops: this._hops,
         onHostKeyVerdict: (verdict) => this._handleHostKeyVerdict(verdict),
         onAuthPrompt: (prompt) => this._promptAuth('2fa', prompt),
+        onTofuWait: (verdict, done) => this._handleTofuWait(verdict, done),
       });
     } catch (err) {
       this._fail(ERR.HANDSHAKE_ERROR, err && err.message ? err.message : 'config build failed', err);
@@ -429,6 +434,7 @@ class RemoteSession extends EventEmitter {
           hops: this._hops,
           onHostKeyVerdict: (verdict) => this._handleHostKeyVerdict(verdict),
           onAuthPrompt: (prompt) => this._promptAuth('2fa', prompt),
+          onTofuWait: (verdict, done) => this._handleTofuWait(verdict, done),
         });
       } catch (err) {
         this._fail(ERR.PROMPT_TIMEOUT, 'passphrase prompt cancelled or timed out', err);
@@ -594,14 +600,74 @@ class RemoteSession extends EventEmitter {
       setImmediate(() => this._fail(ERR.HOST_KEY_MISMATCH, 'Host key changed — refusing connection.'));
       return;
     }
-    // 'unknown' — TOFU. We don't have a synchronous way to wait here
-    // because the verifier callback has already returned false; the
-    // session caller must retry after `host-key-prompt` resolves.
+    // 'unknown' — handled by _handleTofuWait now (async hold). Do not
+    // emit another prompt here (would duplicate dialogs).
+  }
+
+  /**
+   * TOFU wait handler — called by buildHostVerifier when the host key
+   * is unknown. Holds the ssh2 `done` callback and wires it to the
+   * `_pendingHostKey` resolver so the user's Accept/Reject response
+   * (via `respondAuth('host-key', {accept})`) completes the handshake.
+   *
+   * @private
+   * @param {{status:string, fingerprint:string|null}} verdict
+   * @param {Function} done  ssh2 hostVerifier async callback
+   */
+  _handleTofuWait(verdict, done) {
+    try {
+      logger.info('remote-session-tofu-wait', {
+        alias: this._target.alias,
+        host: this._target.hostName || this._target.alias,
+        port: Number(this._target.port) || 22,
+        fingerprint: verdict.fingerprint,
+        keyType: verdict.keyType || null,
+      });
+    } catch (_e) { /* ignore */ }
+
+    // Store the done callback so respondAuth('host-key') can resolve it.
+    this._pendingHostKey = {
+      fingerprint: verdict.fingerprint,
+      resolve: (accepted) => {
+        try {
+          logger.info('remote-session-tofu-resolve', {
+            alias: this._target.alias,
+            accepted: Boolean(accepted),
+          });
+        } catch (_e) { /* ignore */ }
+        if (accepted && verdict.keyType && verdict.keyBase64) {
+          // Add to known hosts store so future connections pass immediately.
+          // Use _originalHost/_originalPort when connecting through a tunnel
+          // so the known_hosts entry is stable across port changes.
+          const storeHost = this._target._originalHost || this._target.hostName || this._target.alias;
+          const storePort = this._target._originalPort || Number(this._target.port) || 22;
+          try {
+            hostKeyStore.add(storeHost, storePort, verdict.keyType, verdict.keyBase64);
+          } catch (e) {
+            try { logger.warn('remote-session-host-key-persist-failed', { message: e && e.message }); } catch (_e) {}
+          }
+        }
+        try {
+          done(Boolean(accepted));
+        } catch (e) {
+          try { logger.warn('remote-session-tofu-done-failed', { message: e && e.message }); } catch (_e) {}
+        }
+      },
+    };
+
+    // Emit the prompt so the renderer shows the TOFU dialog. Use the
+    // original host/port when the connection is going through a binary
+    // tunnel so the dialog displays the real target the user picked,
+    // not the loopback tunnel endpoint.
+    const promptHost = this._target._originalHost || this._target.hostName || this._target.alias;
+    const promptPort = this._target._originalPort || Number(this._target.port) || 22;
     this.emit('host-key-prompt', {
       alias: this._target.alias,
-      host: this._target.hostName || this._target.alias,
-      port: Number(this._target.port) || 22,
+      host: promptHost,
+      port: promptPort,
       fingerprint: verdict.fingerprint,
+      keyType: verdict.keyType || null,
+      status: 'unknown',
     });
   }
 

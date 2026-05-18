@@ -181,6 +181,24 @@ function registerStoreHandlers(dataStore) {
       return false;
     }
   });
+
+  // Capability denylist
+  ipcMain.handle('store:load-capability-denylist', () => {
+    try { return dataStore.loadCapabilityDenylist(); }
+    catch (e) { console.error('[store:load-capability-denylist]', e.message); return { version: 1, entries: [] }; }
+  });
+  ipcMain.handle('store:add-capability-denylist-entry', (_, entry) => {
+    try { return dataStore.addCapabilityDenylistEntry(entry); }
+    catch (e) { console.error('[store:add-capability-denylist-entry]', e.message); return false; }
+  });
+  ipcMain.handle('store:remove-capability-denylist-entry', (_, modelId, capability) => {
+    try { return dataStore.removeCapabilityDenylistEntry(modelId, capability); }
+    catch (e) { console.error('[store:remove-capability-denylist-entry]', e.message); return false; }
+  });
+  ipcMain.handle('store:clear-capability-denylist', () => {
+    try { return dataStore.clearCapabilityDenylist(); }
+    catch (e) { console.error('[store:clear-capability-denylist]', e.message); return false; }
+  });
 }
 
 module.exports = { registerStoreHandlers };

@@ -58,19 +58,41 @@ def get_searcher(
             cache_dir = os.path.join(project_path, ".rag_cache")
             store = VectorStore()
             cache_path = os.path.join(cache_dir, "vectors")
+
+            # 코퍼스 텍스트 (fit + 재인덱싱 모두 사용)
+            texts = [f"File: {c.file_path}\n{c.content}" for c in idx.chunks]
+
+            # 캐시 로드 → 청크 수 일치 → 코퍼스로 fit → 차원 검증
+            cache_valid = False
             if store.load(cache_path) and store.size == len(idx.chunks):
-                print(f"[RAG] 캐시된 벡터 로드: {store.size}개")
-            else:
-                # TF-IDF 배치 임베딩 — 전체 코퍼스를 한번에 처리
+                if embedder.fit_corpus(texts):
+                    # vocabulary 크기와 캐시된 벡터 차원이 일치해야 matmul 가능
+                    cached_dim = store.vectors.shape[1] if store.vectors is not None else 0
+                    vocab_dim = embedder.vocab_size
+                    if cached_dim == vocab_dim and cached_dim > 0:
+                        cache_valid = True
+                        print(f"[RAG] 캐시된 벡터 로드: {store.size}개 (dim={cached_dim})")
+                    else:
+                        print(f"[RAG] 캐시 차원 불일치 — 재인덱싱 (cached={cached_dim}, vocab={vocab_dim})")
+
+            if not cache_valid:
+                # 캐시 폐기 후 재인덱싱
+                try:
+                    if os.path.exists(cache_path + ".npy"):
+                        os.remove(cache_path + ".npy")
+                    if os.path.exists(cache_path + ".meta.json"):
+                        os.remove(cache_path + ".meta.json")
+                except Exception as _e:
+                    print(f"[RAG] 캐시 삭제 실패: {_e}")
+
                 print(f"[RAG] {len(idx.chunks)}개 청크 TF-IDF 임베딩...")
                 store = VectorStore()
-                texts = [f"File: {c.file_path}\n{c.content}" for c in idx.chunks]
                 vectors = embedder.embed_batch(texts)
                 for i, vec in enumerate(vectors):
                     if vec is not None:
                         store.add(vec, {"chunk_idx": i, "file": idx.chunks[i].file_path})
                 store.save(cache_path)
-                print(f"[RAG] 벡터 저장 완료: {store.size}개")
+                print(f"[RAG] 벡터 저장 완료: {store.size}개 (dim={embedder.vocab_size})")
             searcher.set_embedder(embedder)
             searcher.set_vector_store(store)
         except Exception as e:

@@ -8,15 +8,29 @@ class ProcessManager {
   constructor() {
     this._pythonProcess = null;
     this._terminals = new Map();
+    this._bridgeUrl = '';
+    this._bridgeToken = '';
+  }
+
+  /**
+   * Set bridge server env vars. Called once after bridge-server starts.
+   * Next startPython() will inject these into the Python process env.
+   */
+  setBridgeEnv(url, token) {
+    this._bridgeUrl = url || '';
+    this._bridgeToken = token || '';
   }
 
   startPython() {
     if (this._pythonProcess) return;
     const scriptPath = path.join(__dirname, '..', '..', 'scripts', 'start_server.py');
     console.log('[ProcessManager] Starting Python backend...');
+    const env = { ...process.env, PYTHONUNBUFFERED: '1' };
+    if (this._bridgeUrl) env.AE_BRIDGE_URL = this._bridgeUrl;
+    if (this._bridgeToken) env.AE_BRIDGE_TOKEN = this._bridgeToken;
     this._pythonProcess = spawn('python3', [scriptPath], {
       cwd: path.join(__dirname, '..', '..'),
-      env: { ...process.env, PYTHONUNBUFFERED: '1' },
+      env,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     this._pythonProcess.stdout.on('data', (d) => console.log(`[dev:python] ${d.toString().trim()}`));

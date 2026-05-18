@@ -104,11 +104,17 @@ class HybridSearcher:
         if self.vector_store and self._embedder and self.vector_store.size > 0:
             query_vec = self._embedder.embed(query)
             if query_vec is not None:
-                vec_results = self.vector_store.search(query_vec, top_k=top_k * 2)
-                for meta, s in vec_results:
-                    idx = meta.get("chunk_idx", -1)
-                    if 0 <= idx < len(self.chunks):
-                        scores[idx] = scores.get(idx, 0) + self.alpha * s
+                # 런타임 차원 가드 — 차원 불일치 시 벡터 검색 비활성화
+                cached_dim = self.vector_store.vectors.shape[1] if self.vector_store.vectors is not None else 0
+                if query_vec.shape[0] != cached_dim:
+                    # 차원 불일치 — 벡터 검색 스킵 (BM25만 사용)
+                    print(f"[Hybrid] 차원 불일치 감지 (query={query_vec.shape[0]}, cached={cached_dim}) — 벡터 검색 스킵")
+                else:
+                    vec_results = self.vector_store.search(query_vec, top_k=top_k * 2)
+                    for meta, s in vec_results:
+                        idx = meta.get("chunk_idx", -1)
+                        if 0 <= idx < len(self.chunks):
+                            scores[idx] = scores.get(idx, 0) + self.alpha * s
         elif not self.vector_store:
             # 벡터 없으면 BM25만 사용 (alpha 무시)
             scores = {}

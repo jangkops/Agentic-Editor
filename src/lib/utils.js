@@ -86,3 +86,38 @@ if (typeof window !== 'undefined') {
   window.fmtElapsedMs = fmtElapsedMs;
   window.fmtMd = fmtMd;
 }
+
+// ===========================================================================
+// apiBase() — renderer-side helper
+// ===========================================================================
+// Feature: remote-ssh · Task 21.2 · Requirements 5.3, 5.5
+//
+// Returns the base URL the renderer should use when calling ai_engine:
+//   - When a remote session is connected and has a live forwarded port,
+//     returns `http://127.0.0.1:<localPort>` (routes through the SSH tunnel).
+//   - Otherwise returns the local default `http://localhost:8765`.
+//
+// The remote state is published into the renderer by the Status_Bar wiring
+// (Task 23.1 / 23.3) as `window.__remoteStatus = {state, localPort, ...}`
+// whenever the main process sends a `remote:event:state` update. Until that
+// global is populated (no remote session active) apiBase() stays on the
+// local default — the exact contract Property 10 in design.md formalises.
+//
+// main.js will replace `fetch('http://localhost:8765/...')` with
+// `fetch(\`${apiBase()}/...\`)` in Task 23.1. This helper must therefore be
+// dependency-free, synchronous, and safe to call on every fetch.
+function apiBase() {
+  try {
+    const s = (typeof window !== 'undefined' && window.__remoteStatus) || null;
+    if (s && s.state === 'connected' && s.localPort) {
+      return `http://127.0.0.1:${s.localPort}`;
+    }
+  } catch (_e) { /* ignore — never let the helper crash a fetch */ }
+  return 'http://localhost:8765';
+}
+
+// Expose on window so main.js (loaded after lib/utils.js via <script> tag)
+// can call it as a plain global, matching the pattern used by esc/fmtNum/etc.
+if (typeof window !== 'undefined') {
+  window.apiBase = apiBase;
+}

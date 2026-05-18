@@ -111,6 +111,137 @@ function _releaseUserPin(){
   } catch(_) {}
 }
 
+// Remote indicator helper — updates sidebar "Remote ●" and status bar
+function _updateRemoteIndicator(state) {
+  const ind = document.getElementById('remote-indicator');
+  if (!ind) return;
+  const connecting = ['connecting', 'authenticating', 'provisioning', 'forwarding', 'reconnecting'].includes(state);
+  const connected = state === 'connected';
+  if (connecting) {
+    ind.style.display = 'inline';
+    ind.style.color = 'var(--color-warning)';
+    ind.style.animation = 'pulse 1s infinite';
+  } else if (connected) {
+    ind.style.display = 'inline';
+    ind.style.color = 'var(--color-success)';
+    ind.style.animation = 'none';
+  } else {
+    ind.style.display = 'none';
+    ind.style.animation = 'none';
+  }
+}
+
+// ===========================================================================
+// Remote SSH — renderer-side status cache (Task 23.1 · Req 5.3, 5.5)
+// ===========================================================================
+// `apiBase()` in src/lib/utils.js reads `window.__remoteStatus` to decide
+// whether fetch() should route through the local default (http://localhost:8765)
+// or the SSH-forwarded port of the active remote session. We keep that global
+// in sync by subscribing to the main-process state stream exposed via preload
+// (`electronAPI.onRemoteState`). The subscription is best-effort: if preload
+// hasn't wired the IPC yet (older builds, tests, local-only mode) we simply
+// fall back to the local default — no fetch path breaks.
+(function _wireRemoteStatusCache() {
+  try {
+    if (typeof window === 'undefined' || !window.electronAPI) return;
+    // Freshen the cache at boot in case a session is already connected when
+    // main.js starts (e.g. after a renderer reload while the main process
+    // kept the session). remoteStatus() is a cheap invoke — safe to await.
+    if (typeof window.electronAPI.remoteStatus === 'function') {
+      Promise.resolve(window.electronAPI.remoteStatus()).then((s) => {
+        if (s && typeof s === 'object') {
+          // `remoteStatus()` returns a flat map `{[alias]: {state, localPort}}`
+          // plus `_active`/`_apiBase`. Normalize to the event shape used by
+          // apiBase()/renderTerminalTabs(): `{alias, state, localPort}`.
+          const active = s._active;
+          if (active && s[active]) {
+            const a = s[active];
+            window.__remoteStatus = {
+              alias: active,
+              state: a.state,
+              localPort: a.localPort || null,
+            };
+            if (typeof renderTerminalTabs === 'function') renderTerminalTabs();
+          } else {
+            window.__remoteStatus = null;
+          }
+        }
+      }).catch(() => { /* ignore — stays on local default */ });
+    }
+    // Live updates: every state transition from the main-process session
+    // manager (disconnected / connecting / connected / reconnecting / failed)
+    // replaces the cache. Disconnect / failed explicitly clears it so that
+    // apiBase() reverts to localhost:8765 immediately.
+    if (typeof window.electronAPI.onRemoteState === 'function') {
+      window.electronAPI.onRemoteState((evt) => {
+        if (!evt || typeof evt !== 'object') {
+          window.__remoteStatus = null;
+          if (typeof renderTerminalTabs === 'function') renderTerminalTabs();
+          return;
+        }
+        const st = evt.state || evt.to;
+        if (st === 'disconnected' || st === 'failed') {
+          // Don't clear status if we're already connected and this is a transient event
+          // (e.g. background provisioning failure while session is still alive)
+          if (window.__remoteStatus && window.__remoteStatus.state === 'connected' && st === 'failed') {
+            // Suppress — session is still connected, this is a background error
+            return;
+          }
+          window.__remoteStatus = null;
+          _updateRemoteIndicator(st);
+          const pathBar = document.getElementById('remote-path-bar');
+          if (pathBar) pathBar.style.display = 'none';
+        } else {
+          // Merge with any existing enrichment (hostName/user) from
+          // onRemoteConnected so terminal labels keep the host info.
+          const prev = window.__remoteStatus && window.__remoteStatus.alias === evt.alias
+            ? window.__remoteStatus : {};
+          window.__remoteStatus = { ...prev, ...evt, state: st };
+        }
+        if (typeof renderTerminalTabs === 'function') renderTerminalTabs();
+        // Update sidebar Remote indicator
+        _updateRemoteIndicator(st);
+      });
+    }
+    // Enrich cache with hostName/user on connect so terminal tabs can show
+    // "user@host" per the VS Code Remote-SSH convention.
+    if (typeof window.electronAPI.onRemoteConnected === 'function') {
+      window.electronAPI.onRemoteConnected((ev) => {
+        if (!ev || !ev.alias) return;
+        window.__remoteStatus = {
+          alias: ev.alias,
+          state: 'connected',
+          localPort: ev.localPort || null,
+          hostName: ev.hostName || '',
+          user: ev.user || '',
+          remoteHome: ev.remoteHome || '',
+          workspace: ev.workspace || '',
+        };
+        if (typeof renderTerminalTabs === 'function') renderTerminalTabs();
+        // Show remote path bar for direct path navigation
+        const pathBar = document.getElementById('remote-path-bar');
+        if (pathBar) {
+          pathBar.style.display = 'block';
+          const pathInput = document.getElementById('remote-path-input');
+          if (pathInput) pathInput.value = ev.workspace || ev.remoteHome || '/';
+        }
+        _updateRemoteIndicator('connected');
+        // Kill existing local terminals and create a fresh remote terminal
+        if (typeof state !== 'undefined' && state.terminals && state.terminals.length > 0) {
+          for (const t of state.terminals) {
+            try { window.electronAPI?.terminalKill?.(t.id); } catch (_e) {}
+          }
+          state.terminals = [];
+          state.activeTerminalIdx = 0;
+          setTimeout(() => {
+            if (typeof addTerminal === 'function') addTerminal();
+          }, 300);
+        }
+      });
+    }
+  } catch (_e) { /* never let status wiring crash renderer init */ }
+})();
+
 // ===== Fix 1: SSO — select 드롭다운으로 프로파일 선택 =====
 document.addEventListener('DOMContentLoaded', async () => {
   if (window.electronAPI?.loadSettings) state.settings = await window.electronAPI.loadSettings();
@@ -176,7 +307,7 @@ async function initApp() {
     if (window.electronAPI?.getCredentials && state.settings?.awsProfile) {
       const creds = await window.electronAPI.getCredentials(state.settings.awsProfile);
       if (creds && creds.AWS_ACCESS_KEY_ID) {
-        await fetch('http://localhost:8765/api/reset-cache', {
+        await fetch(`${apiBase()}/api/reset-cache`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             profile: state.settings.awsProfile,
@@ -324,7 +455,7 @@ async function showSSODialog(isInitial) {
       // 백엔드 캐시 초기화 + 자격증명 주입
       try {
         const freshCreds = await window.electronAPI?.getCredentials(profile);
-        await fetch('http://localhost:8765/api/reset-cache', {
+        await fetch(`${apiBase()}/api/reset-cache`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ profile, bedrockUser: state.settings?.bedrockUser || '', credentials: freshCreds || null }),
         });
@@ -353,7 +484,7 @@ async function showSSODialog(isInitial) {
           let mr;
           if (freshCreds && freshCreds.AWS_ACCESS_KEY_ID) {
             // 자격증명을 POST body로 직접 전달 (boto3 캐시 우회)
-            mr = await fetch('http://localhost:8765/api/models', {
+            mr = await fetch(`${apiBase()}/api/models`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
@@ -365,7 +496,7 @@ async function showSSODialog(isInitial) {
               })
             });
           } else {
-            mr = await fetch(`http://localhost:8765/api/models?profile=${encodeURIComponent(profile)}`);
+            mr = await fetch(`${apiBase()}/api/models?profile=${encodeURIComponent(profile)}`);
           }
           const md = await mr.json();
           if (md.models && Object.keys(md.models).length > 0) {
@@ -596,10 +727,10 @@ function renderModelList(f) {
   for(const[p,ms]of Object.entries(MODEL_CATALOG)){
     const fl=ms.filter(m=>!q||m.name.toLowerCase().includes(q)||p.toLowerCase().includes(q));if(!fl.length)continue;
     const g=document.createElement('div');g.className='model-dropdown-group';
-    g.innerHTML=`<div class="model-dropdown-group-title"><span style="color:var(--color-accent);font-weight:700">${p}</span><span style="color:var(--color-text-muted);margin-left:6px;font-size:9px">${ms.length}개 모델</span></div>`;
+    const _pu = _providerUsage(p);
+    g.innerHTML=`<div class="model-dropdown-group-title"><span style="color:var(--color-accent);font-weight:700">${p}</span><span style="color:var(--color-text-muted);margin-left:6px;font-size:9px">${ms.length}개 모델</span>${_pu ? `<span style="color:var(--color-text-muted);margin-left:4px;font-size:9px">(${_pu})</span>` : ''}</div>`;
     fl.forEach(m=>{const i=document.createElement('div');i.className='model-dropdown-item'+(state.selectedModel && m.id===state.selectedModel.id?' selected':'');
-      const speed = _modelSpeed(m.id);
-      i.innerHTML=`<span style="flex:1">${m.name}</span><span style="font-size:9px;color:${speed.color};margin-left:8px">${speed.label}</span>`;
+      i.innerHTML=`<span style="flex:1">${m.name}</span>`;
       i.style.display='flex';i.style.alignItems='center';
       i.onclick=()=>{state.selectedModel={...m,provider:p};document.getElementById('model-dropdown-btn').textContent=m.name+' ▾';document.getElementById('model-dropdown-menu').style.display='none';document.getElementById('status-model').textContent=m.name;};
       g.appendChild(i);});list.appendChild(g);}
@@ -610,7 +741,8 @@ function renderParallelDropdownList(f) {
   for(const[p,ms]of Object.entries(MODEL_CATALOG)){
     const fl=ms.filter(m=>!q||m.name.toLowerCase().includes(q)||p.toLowerCase().includes(q));if(!fl.length)continue;
     const g=document.createElement('div');g.className='model-dropdown-group';
-    g.innerHTML=`<div class="model-dropdown-group-title"><span style="color:var(--color-accent);font-weight:700">${p}</span><span style="color:var(--color-text-muted);margin-left:6px;font-size:9px">${ms.length}개 모델</span></div>`;
+    const _pu2 = _providerUsage(p);
+    g.innerHTML=`<div class="model-dropdown-group-title"><span style="color:var(--color-accent);font-weight:700">${p}</span><span style="color:var(--color-text-muted);margin-left:6px;font-size:9px">${ms.length}개 모델</span>${_pu2 ? `<span style="color:var(--color-text-muted);margin-left:4px;font-size:9px">(${_pu2})</span>` : ''}</div>`;
     fl.forEach(m=>{
       const i=document.createElement('div');i.className='model-dropdown-item';
       i.innerHTML=`<span style="width:16px;display:inline-block;text-align:center;color:var(--color-success)">+</span> ${m.name}`;
@@ -632,7 +764,7 @@ async function loadModelsFromServer(retryCount) {
     if (window.electronAPI?.getCredentials) {
       const creds = await window.electronAPI.getCredentials(profile);
       if (creds && creds.AWS_ACCESS_KEY_ID) {
-        mr = await fetch('http://localhost:8765/api/models', {
+        mr = await fetch(`${apiBase()}/api/models`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -645,7 +777,7 @@ async function loadModelsFromServer(retryCount) {
       }
     }
     if (!mr) {
-      mr = await fetch(`http://localhost:8765/api/models?profile=${encodeURIComponent(profile)}`);
+      mr = await fetch(`${apiBase()}/api/models?profile=${encodeURIComponent(profile)}`);
     }
     if (!mr.ok) throw new Error(`HTTP ${mr.status}`);
     const d = await mr.json();
@@ -933,13 +1065,56 @@ async function sendMessage() {
   sendBtn.style.background = 'var(--color-error)';
 
   if(state.mode==='parallel') await runParallel(content);
-  else await runSingle(content);
+  else {
+    // 스마트 모델 추천: 메시지 분석 후 더 적합한 모델/모드 제안
+    if (typeof getModelRecommendation === 'function') {
+      const rec = getModelRecommendation(content, state.selectedModel?.id || '');
+      if (rec) {
+        const choice = await showRecommendationCard(rec);
+        if (choice === 'accept') {
+          applyRecommendation(rec);
+          if (rec.recommend === 'parallel') {
+            await runParallel(content);
+            sendBtn.textContent = '전송';
+            sendBtn.style.background = 'var(--color-accent)';
+            return;
+          }
+        }
+      }
+    }
+    await runSingle(content);
+  }
 
   sendBtn.textContent = '전송';
   sendBtn.style.background = 'var(--color-accent)';
 }
 
 // ===== Single Mode =====
+// 프로바이더별 주요 용도 설명 (모델 드롭다운 그룹 타이틀에 표시)
+function _providerUsage(provider) {
+  const p = (provider || '').toUpperCase();
+  const map = {
+    'ANTHROPIC': '코딩·추론·문서 생성',
+    'AMAZON': '범용·이미지·비디오 생성',
+    'META': '범용 대화·코딩',
+    'MISTRAL': '코딩·멀티모달·빠른 응답',
+    'STABILITY AI': '이미지 생성 전용',
+    'DEEPSEEK': '추론·수학·코딩',
+    'QWEN': '코딩·추론·대규모 분석',
+    'GOOGLE': '멀티모달·경량 추론',
+    'NVIDIA': '멀티모달·비전 분석',
+    'COHERE': '검색·요약·RAG',
+    'AI21 LABS': '텍스트 생성·요약',
+    'WRITER': '비즈니스 문서·요약',
+    'LUMA': '비디오 생성',
+    'MOONSHOT': '추론·긴 컨텍스트',
+    'MINIMAX': '대화·창작',
+    'TWELVE LABS': '비디오 이해·분석',
+    'Z.AI': '중국어·다국어 추론',
+  };
+  return map[p] || '';
+}
+
 // 모델별 예상 응답 속도
 function _modelSpeed(modelId) {
   const id = (modelId || '').toLowerCase();
@@ -958,6 +1133,36 @@ function _apiBody(extra) {
   // 프로젝트 컨텍스트
   if (state.folderPath) {
     body.projectPath = state.folderPath;
+  }
+  // 원격 모드 표시 — ai_engine이 로컬에서 실행 중일 때 원격 경로 접근 불가 알림
+  const remote = (typeof window !== 'undefined' && window.__remoteStatus) || null;
+  if (remote && remote.state === 'connected') {
+    body.isRemote = true;
+    body.remoteAlias = remote.alias || '';
+    // 프로젝트 파일 목록을 직접 포함 (ai_engine이 로컬이면 원격 경로 접근 불가)
+    // 1순위: _projectStats (통계 탭에서 캐시된 전체 파일 목록)
+    // 2순위: 사이드바 file-tree DOM 의 최상위 항목들 (즉시 사용 가능)
+    if (_projectStats && _projectStats.files && _projectStats.files.length > 0) {
+      body.projectFiles = _projectStats.files.map(f => f.path).slice(0, 100);
+    } else {
+      try {
+        const tree = document.getElementById('file-tree');
+        if (tree) {
+          const items = tree.querySelectorAll('.file-tree-item[data-entry-path]');
+          const names = [];
+          items.forEach(it => {
+            const p = it.dataset.entryPath || '';
+            if (p && state.folderPath && p.startsWith(state.folderPath)) {
+              const rel = p.slice(state.folderPath.length).replace(/^\//, '');
+              if (rel) names.push(rel);
+            }
+          });
+          if (names.length > 0) {
+            body.projectFiles = names.slice(0, 100);
+          }
+        }
+      } catch {}
+    }
   }
   // 현재 열린 파일
   if (state.activeTab && monacoEditor) {
@@ -1087,7 +1292,7 @@ async function runSimpleChat(prompt) {
     }
   }, 1000);
   try {
-    const resp = await fetch('http://localhost:8765/api/agents/run-stream', {
+    const resp = await fetch(`${apiBase()}/api/agents/run-stream`, {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(_apiBody({ prompt, model: state.selectedModel.id })),
       signal: state._abortController.signal
@@ -1134,7 +1339,7 @@ async function runSimpleChat(prompt) {
               try {
                 const creds = await window.electronAPI?.getCredentials(state.settings?.awsProfile || '');
                 if (creds) {
-                  await fetch('http://localhost:8765/api/reset-cache', {
+                  await fetch(`${apiBase()}/api/reset-cache`, {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ profile: state.settings?.awsProfile, bedrockUser: state.settings?.bedrockUser, credentials: creds }),
                   });
@@ -1199,7 +1404,7 @@ async function runAgentWorkflow(prompt) {
   state.messages.push(msg);
   renderMessages();
   try {
-    const resp = await fetch('http://localhost:8765/api/agents/run-agent', {
+    const resp = await fetch(`${apiBase()}/api/agents/run-agent`, {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(_apiBody({ prompt, model: state.selectedModel.id })),
       signal: state._abortController.signal
@@ -1242,7 +1447,7 @@ async function runAgentWorkflow(prompt) {
               try {
                 const creds = await window.electronAPI?.getCredentials(state.settings?.awsProfile || '');
                 if (creds) {
-                  await fetch('http://localhost:8765/api/reset-cache', {
+                  await fetch(`${apiBase()}/api/reset-cache`, {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ profile: state.settings?.awsProfile, bedrockUser: state.settings?.bedrockUser, credentials: creds }),
                   });
@@ -1347,7 +1552,7 @@ async function retryFailedParallel(prompt) {
   }
 
   try {
-    const resp = await fetch('http://localhost:8765/api/agents/run-parallel', {
+    const resp = await fetch(`${apiBase()}/api/agents/run-parallel`, {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(_apiBody({ prompt, models: failedModels })),
       signal: state._abortController.signal
@@ -1445,7 +1650,7 @@ async function runParallel(prompt) {
   renderParallelResultGrid(); renderParallelSlotList();
 
   try {
-    const resp = await fetch('http://localhost:8765/api/agents/run-parallel', {
+    const resp = await fetch(`${apiBase()}/api/agents/run-parallel`, {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(_apiBody({ prompt, models })),
       signal: state._abortController?.signal
@@ -1753,7 +1958,7 @@ ${dr.map((r, i) => `### 모델 ${i + 1}: ${r.model}\n${r.content.substring(0, 30
   state.messages.push(msg);
 
   try {
-    const resp = await fetch('http://localhost:8765/api/agents/run-stream', {
+    const resp = await fetch(`${apiBase()}/api/agents/run-stream`, {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(_apiBody({ prompt: sp, model: consensusModelId, systemPrompt: consensusSystemPrompt })),
     });
@@ -2720,16 +2925,45 @@ function _ensureStepTimer() {
 // ===== File Explorer — 인라인 생성/수정/삭제 =====
 function initFileExplorer() {
   document.getElementById('btn-open-folder').onclick = async () => {
+    // When remote is connected, show a simple path input dialog (like Kiro IDE)
+    const remote = (typeof window !== 'undefined' && window.__remoteStatus) || null;
+    console.log('[Open Folder] clicked, remote status:', remote && remote.state, remote && remote.alias);
+    if (remote && remote.state === 'connected' && remote.alias) {
+      const aliasLabel = remote.user ? `${remote.user}@${remote.alias}` : remote.alias;
+      const currentPath = state.folderPath || remote.remoteHome || '/';
+      
+      // Simple path input dialog — no complex picker, just type the path
+      const newPath = prompt(`[${aliasLabel}] 원격 폴더 경로를 입력하세요:`, currentPath);
+      if (!newPath || newPath === currentPath) return;
+      
+      state.folderPath = newPath;
+      const pathText = document.getElementById('file-tree-path-text');
+      if (pathText) {
+        pathText.textContent = `[SSH: ${aliasLabel}] ${newPath}`;
+        pathText.title = `Remote host: ${aliasLabel} — ${newPath}`;
+      }
+      document.getElementById('file-tree-actions').style.display = 'inline-flex';
+      _projectStats = null; _projectDeps = null; _gitLog = []; _reviewResults = null; _structureCurrentPath = null;
+      try { await loadFileTree(newPath); } catch (e) {
+        alert(`폴더 열기 실패: ${e.message || e}`);
+      }
+      // Save workspace preference
+      try {
+        if (window.electronAPI?.remoteSetWorkspace) {
+          window.electronAPI.remoteSetWorkspace({ alias: remote.alias, remotePath: newPath });
+        }
+      } catch {}
+      return;
+    }
     if (window.electronAPI?.openFolder) {
       const p = await window.electronAPI.openFolder();
       if (p) {
         state.folderPath = p;
         document.getElementById('file-tree-path-text').textContent = p;
         document.getElementById('file-tree-actions').style.display = 'inline-flex';
-        _projectStats = null; _projectDeps = null; _gitLog = []; _reviewResults = null;
+        _projectStats = null; _projectDeps = null; _gitLog = []; _reviewResults = null; _structureCurrentPath = null;
         loadFileTree(p);
         loadCommitLogMini(p);
-        // RAG 인덱싱 트리거
         indexProjectForRAG(p);
       }
     }
@@ -2740,6 +2974,32 @@ function initFileExplorer() {
   document.getElementById('file-tree-path-text')?.addEventListener('click', () => {
     document.getElementById('btn-open-folder')?.click();
   });
+  // Remote path bar: Enter로 임의 경로 이동 (VS Code Open Folder 대체)
+  const remotePathInput = document.getElementById('remote-path-input');
+  if (remotePathInput) {
+    remotePathInput.addEventListener('keydown', async (e) => {
+      if (e.key === 'Enter') {
+        const newPath = remotePathInput.value.trim();
+        if (!newPath) return;
+        const remote = (typeof window !== 'undefined' && window.__remoteStatus) || null;
+        state.folderPath = newPath;
+        _projectStats = null; _projectDeps = null; _reviewResults = null; _structureCurrentPath = null;
+        const pathText = document.getElementById('file-tree-path-text');
+        if (pathText) {
+          const aliasLabel = (remote && remote.user) ? `${remote.user}@${remote.alias}` : (remote && remote.alias || '');
+          pathText.textContent = remote ? `[SSH: ${aliasLabel}] ${newPath}` : newPath;
+        }
+        document.getElementById('file-tree-actions').style.display = 'inline-flex';
+        try { await loadFileTree(newPath); } catch (err) {
+          alert(`경로 열기 실패: ${err.message || err}`);
+        }
+        if (remote && remote.alias && window.electronAPI?.remoteSetWorkspace) {
+          window.electronAPI.remoteSetWorkspace({ alias: remote.alias, remotePath: newPath });
+        }
+        e.preventDefault();
+      }
+    });
+  }
   // 드롭 영역 클릭으로도 폴더 열기
   document.getElementById('file-tree-drop-area')?.addEventListener('click', () => {
     document.getElementById('btn-open-folder')?.click();
@@ -2985,6 +3245,7 @@ function showFileContextMenu(e, entry) {
   const parentDir = entry.isDirectory ? entry.path : entry.path.substring(0, entry.path.lastIndexOf('/'));
   menu.innerHTML = `
     ${!entry.isDirectory ? '<div class="context-menu-item" data-action="open">열기</div>' : ''}
+    ${entry.isDirectory ? '<div class="context-menu-item" data-action="open-as-root" style="font-weight:600">이 폴더를 프로젝트로 열기</div>' : ''}
     <div class="context-menu-item" data-action="rename">이름 변경</div>
     <div class="context-menu-item" data-action="delete" style="color:var(--color-error)">삭제</div>
     <div class="context-menu-sep"></div>
@@ -2997,6 +3258,28 @@ function showFileContextMenu(e, entry) {
       menu.style.display = 'none';
       const action = item.dataset.action;
       if (action === 'open') openFileInEditor(entry.path, entry.name);
+      else if (action === 'open-as-root') {
+        // Open this folder as the project root (like VS Code "Open Folder")
+        state.folderPath = entry.path;
+        _projectStats = null; _projectDeps = null; _reviewResults = null; _structureCurrentPath = null;
+        const remote = (typeof window !== 'undefined' && window.__remoteStatus) || null;
+        const pathText = document.getElementById('file-tree-path-text');
+        if (pathText) {
+          if (remote && remote.state === 'connected') {
+            const aliasLabel = remote.user ? `${remote.user}@${remote.alias}` : remote.alias;
+            pathText.textContent = `[SSH: ${aliasLabel}] ${entry.path}`;
+            pathText.title = `Remote host: ${aliasLabel} — ${entry.path}`;
+          } else {
+            pathText.textContent = entry.path;
+          }
+        }
+        document.getElementById('file-tree-actions').style.display = 'inline-flex';
+        loadFileTree(entry.path);
+        // Save workspace preference for remote
+        if (remote && remote.alias && window.electronAPI?.remoteSetWorkspace) {
+          window.electronAPI.remoteSetWorkspace({ alias: remote.alias, remotePath: entry.path });
+        }
+      }
       else if (action === 'rename') startInlineRename(entry);
       else if (action === 'delete') deleteEntry(entry);
       else if (action === 'new-file') startInlineCreate(parentDir, 'file', 0);
@@ -3068,6 +3351,12 @@ function initMonaco() {
   });
 }
 
+// Paths that should be opened in a read-only editor tab (e.g. "Show Remote Log").
+// Tracked separately from openTabs because Monaco's `readOnly` is an editor
+// option rather than a per-model flag — we reapply it whenever the active tab
+// switches (see openFileInEditor).
+const _readOnlyTabs = new Set();
+
 async function openFileInEditor(fp, fn) {
   console.log('[openFile] 호출됨:', fp, 'monacoEditor:', !!monacoEditor);
   if (!monacoEditor) {
@@ -3119,6 +3408,21 @@ async function openFileInEditor(fp, fn) {
       console.error('[openFile] setValue도 실패:', e2);
     }
   }
+  // 읽기 전용 탭이면 에디터 옵션을 readOnly 로 설정 (Req 12.3)
+  try { monacoEditor.updateOptions({ readOnly: _readOnlyTabs.has(fp) }); } catch {}
+}
+
+/**
+ * Open a file in a read-only editor tab. Used by the "Show Remote Log"
+ * command (Req 12.3) so the user cannot accidentally edit the log file.
+ *
+ * @param {string} fp absolute file path
+ * @param {string} [fn] display name
+ */
+async function openFileReadOnly(fp, fn) {
+  if (!fp) return;
+  _readOnlyTabs.add(fp);
+  await openFileInEditor(fp, fn);
 }
 
 function renderEditorTabs() {
@@ -3131,6 +3435,7 @@ function renderEditorTabs() {
       if (e.target.classList.contains('close')) {
         const p = e.target.dataset.close;
         state.openTabs = state.openTabs.filter(t => t.path !== p);
+        _readOnlyTabs.delete(p);
         if (state.activeTab === p) {
           state.activeTab = state.openTabs.length ? state.openTabs[state.openTabs.length - 1].path : null;
           if (state.activeTab) openFileInEditor(state.activeTab);
@@ -3176,14 +3481,21 @@ function addTerminal() {
   state.terminals.push({ id, output: '' });
   state.activeTerminalIdx = state.terminals.length - 1;
   if (window.electronAPI?.terminalCreate) {
-    window.electronAPI.terminalCreate(id).then((result) => {
-      if (result?.success) {
+    // Pass cwd when remote is active so the remote PTY opens in the workspace.
+    const remote = (typeof window !== 'undefined' && window.__remoteStatus) || null;
+    const isRemote = remote && remote.state === 'connected';
+    const opts = isRemote ? { cwd: state.folderPath || undefined } : undefined;
+    window.electronAPI.terminalCreate(id, opts).then((result) => {
+      if (result && (result.success || result.ok)) {
         // PTY 준비 후 초기 명령 전송 (2초 대기 — 셸 초기화 완료 후)
+        // Remote 세션일 경우 cwd는 이미 bridge가 설정했으므로 cd 생략
         setTimeout(() => {
           if (window.electronAPI?.terminalWrite) {
-            const profile = state.settings?.awsProfile || '';
-            if (profile) window.electronAPI.terminalWrite(id, `export AWS_PROFILE=${profile}\n`);
-            if (state.folderPath) window.electronAPI.terminalWrite(id, `cd "${state.folderPath}"\n`);
+            if (!isRemote) {
+              const profile = state.settings?.awsProfile || '';
+              if (profile) window.electronAPI.terminalWrite(id, `export AWS_PROFILE=${profile}\n`);
+              if (state.folderPath) window.electronAPI.terminalWrite(id, `cd "${state.folderPath}"\n`);
+            }
           }
         }, 2000);
       }
@@ -3196,16 +3508,23 @@ function renderTerminalTabs() {
   const bar = document.getElementById('terminal-tabs-bar'); if (!bar) return;
   const cwd = state.folderPath || '~';
   const profile = state.settings?.awsProfile || '';
-  // IP는 hostname에서 추출 시도
-  let hostInfo = '';
-  if (window.electronAPI?.terminalWrite) {
-    // 터미널 프롬프트에서 표시
-    hostInfo = profile ? `${profile}` : '';
-  }
-  bar.innerHTML = `<span style="font-size:11px;color:var(--color-text-muted);padding:0 8px;font-weight:600">터미널</span>` +
-    state.terminals.map((t, i) => `<button class="terminal-tab ${i === state.activeTerminalIdx ? 'active' : ''}" data-idx="${i}" title="${cwd}">
-      ${i+1}: ${cwd.split('/').pop() || '~'}${state.terminals.length > 1 ? `<span class="term-close" data-close="${i}" style="margin-left:6px;font-size:10px;opacity:0.4;cursor:pointer">✕</span>` : ''}
-    </button>`).join('') +
+  // Remote SSH: when a session is connected, show the alias/host in each tab
+  // so the terminal window clearly indicates the target (Req 7.1, 12.1).
+  const remote = (typeof window !== 'undefined' && window.__remoteStatus) || null;
+  const isRemote = remote && remote.state === 'connected' && remote.alias;
+  const remoteLabel = isRemote
+    ? `${remote.user ? remote.user + '@' : ''}${remote.hostName || remote.alias}`
+    : '';
+  const tabPrefix = isRemote ? `🌐 ${remote.alias}` : '';
+  bar.innerHTML = `<span style="font-size:11px;color:var(--color-text-muted);padding:0 8px;font-weight:600">${isRemote ? `터미널 · <span style="color:var(--color-success)">${esc(remoteLabel)}</span>` : '터미널'}</span>` +
+    state.terminals.map((t, i) => {
+      const tabLabel = isRemote
+        ? `${tabPrefix}:${cwd.split('/').pop() || '~'}`
+        : `${i+1}: ${cwd.split('/').pop() || '~'}`;
+      return `<button class="terminal-tab ${i === state.activeTerminalIdx ? 'active' : ''}" data-idx="${i}" title="${esc(isRemote ? remoteLabel + ':' + cwd : cwd)}">
+      ${tabLabel}${state.terminals.length > 1 ? `<span class="term-close" data-close="${i}" style="margin-left:6px;font-size:10px;opacity:0.4;cursor:pointer">✕</span>` : ''}
+    </button>`;
+    }).join('') +
     `<button class="terminal-tab" id="terminal-add-btn" title="새 터미널" style="color:var(--color-text-muted);font-size:14px">+</button>` +
     `<span style="flex:1"></span>` +
     `<span style="font-size:10px;color:var(--color-text-muted);padding:0 8px;font-family:var(--font-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:300px" title="${esc(cwd)}">${esc(cwd)}</span>`;
@@ -3390,8 +3709,234 @@ function initTopbar() {
     document.getElementById('btn-file-explorer').classList.add('active');
     document.getElementById('file-tree').style.display = '';
     document.getElementById('source-control-panel').style.display = 'none';
+    const rep = document.getElementById('remote-explorer-panel'); if (rep) rep.style.display = 'none';
     document.querySelector('.skills-section').style.display = '';
     document.getElementById('file-tree-path').style.display = 'flex';
+  });
+  // Remote Explorer 탭 전환 (VS Code Remote Explorer 스타일)
+  document.getElementById('btn-remote-explorer')?.addEventListener('click', () => {
+    document.querySelectorAll('.lp-btn').forEach(b => b.classList.remove('active'));
+    document.getElementById('btn-remote-explorer').classList.add('active');
+    document.getElementById('file-tree').style.display = 'none';
+    document.getElementById('source-control-panel').style.display = 'none';
+    document.getElementById('remote-explorer-panel').style.display = '';
+    document.querySelector('.skills-section').style.display = 'none';
+    document.getElementById('file-tree-path').style.display = 'none';
+    renderRemoteExplorer();
+  });
+}
+
+// ===== Remote Explorer (VS Code 스타일) =====
+// 로컬 ~/.ssh/config에서 호스트 목록을 읽어 사이드바 트리로 표시.
+// 호스트 항목: 클릭 시 연결 / 우클릭 시 컨텍스트 메뉴.
+// 연결된 호스트: 하위에 최근 워크스페이스 표시.
+async function renderRemoteExplorer() {
+  const panel = document.getElementById('remote-explorer-panel');
+  if (!panel) return;
+  panel.innerHTML = `
+    <div style="padding:10px 12px;font-size:10px;color:var(--color-text-muted);font-weight:600;text-transform:uppercase;letter-spacing:0.5px;display:flex;align-items:center;gap:6px;border-bottom:1px solid var(--color-border);">
+      <span style="flex:1">Remote Explorer</span>
+      <button class="ft-action-btn" id="re-refresh" title="새로고침" style="font-size:11px;padding:2px 6px;">↻</button>
+      <button class="ft-action-btn" id="re-add-host" title="Ad-hoc 호스트 추가" style="font-size:11px;padding:2px 6px;">+</button>
+    </div>
+    <div id="re-content" style="padding:4px 0;font-size:12px;"><div style="padding:12px;color:var(--color-text-muted);font-size:11px;">불러오는 중...</div></div>
+  `;
+  panel.querySelector('#re-refresh')?.addEventListener('click', renderRemoteExplorer);
+  panel.querySelector('#re-add-host')?.addEventListener('click', () => { if (window.RemoteAdHocDialog) window.RemoteAdHocDialog.show(); });
+
+  let hosts = [];
+  let statuses = {};
+  try {
+    const data = await window.electronAPI?.remoteListHosts?.();
+    hosts = (data && data.entries) || [];
+    const st = await window.electronAPI?.remoteStatus?.({});
+    statuses = st || {};
+    // Merge renderer-side status cache (more reliable — set by onRemoteState events)
+    const cached = (typeof window !== 'undefined' && window.__remoteStatus) || null;
+    if (cached && cached.alias && cached.state) {
+      statuses[cached.alias] = { state: cached.state, localPort: cached.localPort || null };
+    }
+  } catch (e) {
+    panel.querySelector('#re-content').innerHTML = `<div style="padding:12px;color:var(--color-error);font-size:11px;">로드 실패: ${e.message}</div>`;
+    return;
+  }
+
+  const content = panel.querySelector('#re-content');
+  if (!hosts.length) {
+    content.innerHTML = `
+      <div style="padding:20px 12px;text-align:center;color:var(--color-text-muted);font-size:11px;">
+        <div style="margin-bottom:8px;">~/.ssh/config에 호스트가 없습니다.</div>
+        <button class="ft-action-btn" id="re-add-empty" style="font-size:11px;padding:4px 10px;">+ Ad-hoc 호스트 추가</button>
+      </div>`;
+    content.querySelector('#re-add-empty')?.addEventListener('click', () => { if (window.RemoteAdHocDialog) window.RemoteAdHocDialog.show(); });
+    return;
+  }
+
+  // 그룹: 즐겨찾기 vs 전체 (알파벳 정렬)
+  const favorites = hosts.filter(h => h.favorite).sort((a, b) => a.alias.localeCompare(b.alias));
+  const regular = hosts.filter(h => !h.favorite).sort((a, b) => a.alias.localeCompare(b.alias));
+
+  const renderHost = (h) => {
+    const status = statuses[h.alias];
+    const state = status ? status.state : 'disconnected';
+    const isConnected = state === 'connected';
+    const isConnecting = ['connecting', 'authenticating', 'provisioning', 'forwarding', 'reconnecting'].includes(state);
+    const dotColor = isConnected ? 'var(--color-success)' : isConnecting ? 'var(--color-warning)' : 'var(--color-text-muted)';
+    const icon = isConnected ? '●' : isConnecting ? '●' : '○';
+    const pulseStyle = isConnecting ? 'animation:pulse 1s infinite;' : '';
+    return `
+      <div class="re-host-row" data-alias="${esc(h.alias)}" data-state="${state}" style="display:flex;align-items:center;gap:8px;padding:4px 12px 4px 20px;cursor:pointer;color:var(--color-text-primary);transition:background var(--transition);${isConnecting ? 'animation:pulse 1s infinite;' : ''}" onmouseover="this.style.background='var(--color-bg-hover)'" onmouseout="this.style.background='transparent'">
+        <span style="color:${dotColor};font-size:10px;width:10px;${pulseStyle}">${icon}</span>
+        <span style="font-size:12px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(h.alias)}</span>
+        ${h.user && h.hostName ? `<span style="font-size:10px;color:var(--color-text-muted);">${esc(h.user)}@${esc(h.hostName)}</span>` : ''}
+        ${isConnected ? '<span style="font-size:9px;color:var(--color-success);margin-left:4px;">연결됨</span>' : ''}
+        ${isConnecting ? '<span style="font-size:9px;color:var(--color-warning);margin-left:4px;">연결 중...</span>' : ''}
+      </div>
+    `;
+  };
+
+  const sectionHeader = (label) => `
+    <div style="padding:6px 12px 4px;font-size:10px;color:var(--color-text-muted);font-weight:600;text-transform:uppercase;letter-spacing:0.5px;">
+      ${label}
+    </div>
+  `;
+
+  let html = sectionHeader('SSH');
+  if (favorites.length) {
+    html += '<div style="padding-left:4px;">' + favorites.map(renderHost).join('') + '</div>';
+    if (regular.length) html += '<div style="border-top:1px solid var(--color-border);margin:4px 0;"></div>';
+  }
+  html += '<div>' + regular.map(renderHost).join('') + '</div>';
+
+  content.innerHTML = html;
+
+  // 클릭 핸들러: 연결
+  content.querySelectorAll('.re-host-row').forEach(row => {
+    row.addEventListener('click', async () => {
+      const alias = row.dataset.alias;
+      const state = row.dataset.state;
+      if (state === 'connected') {
+        // 이미 연결됨 — 활성 전환 또는 워크스페이스 열기
+        const ok = confirm(`${alias}에서 연결을 해제할까요?`);
+        if (ok) {
+          await window.electronAPI?.remoteDisconnect?.({ alias });
+          renderRemoteExplorer();
+        }
+        return;
+      }
+      if (state !== 'disconnected' && state !== 'failed') return; // 전환 중이면 무시
+      row.innerHTML = `<span style="color:var(--color-warning);font-size:10px;width:10px;">⊚</span><span style="font-size:12px;flex:1;">${esc(alias)} (연결 중...)</span>`;
+      try {
+        const res = await window.electronAPI?.remoteConnect?.({ alias });
+        if (res && !res.ok) alert(`연결 실패: ${res.error}`);
+      } catch (e) { alert(`연결 오류: ${e.message}`); }
+      renderRemoteExplorer();
+    });
+    // 우클릭: 컨텍스트 메뉴 (즐겨찾기 토글, 연결 해제, 삭제)
+    row.addEventListener('contextmenu', (ev) => {
+      ev.preventDefault();
+      const alias = row.dataset.alias;
+      const h = hosts.find(x => x.alias === alias);
+      if (!h) return;
+      showRemoteHostContextMenu(ev.pageX, ev.pageY, h, statuses[alias]);
+    });
+  });
+}
+
+function showRemoteHostContextMenu(x, y, host, status) {
+  // 기존 메뉴 제거
+  document.querySelectorAll('.re-context-menu').forEach(el => el.remove());
+  const menu = document.createElement('div');
+  menu.className = 're-context-menu';
+  menu.style.cssText = `position:fixed;top:${y}px;left:${x}px;background:var(--color-bg-primary);border:1px solid var(--color-border);border-radius:var(--border-radius);padding:4px 0;min-width:180px;z-index:10000;box-shadow:0 4px 16px rgba(0,0,0,0.4);font-size:12px;`;
+  const isConnected = status && status.state === 'connected';
+  const items = [
+    { label: isConnected ? '연결 해제' : '연결', fn: async () => {
+        if (isConnected) await window.electronAPI?.remoteDisconnect?.({ alias: host.alias });
+        else await window.electronAPI?.remoteConnect?.({ alias: host.alias });
+        renderRemoteExplorer();
+      }
+    },
+    { label: host.favorite ? '즐겨찾기 해제' : '즐겨찾기 추가', fn: async () => {
+        await window.electronAPI?.remoteSetFavorite?.({ alias: host.alias, favorite: !host.favorite });
+        renderRemoteExplorer();
+      }
+    },
+  ];
+  items.forEach(it => {
+    const btn = document.createElement('div');
+    btn.style.cssText = 'padding:6px 14px;cursor:pointer;color:var(--color-text-primary);';
+    btn.textContent = it.label;
+    btn.onmouseenter = () => btn.style.background = 'var(--color-bg-hover)';
+    btn.onmouseleave = () => btn.style.background = 'transparent';
+    btn.onclick = () => { menu.remove(); it.fn(); };
+    menu.appendChild(btn);
+  });
+  document.body.appendChild(menu);
+  const close = (e) => { if (!menu.contains(e.target)) { menu.remove(); document.removeEventListener('click', close); } };
+  setTimeout(() => document.addEventListener('click', close), 0);
+}
+
+// Remote 연결 상태 변화 시 Remote Explorer 자동 갱신
+if (window.electronAPI?.onRemoteState) {
+  window.electronAPI.onRemoteState(() => {
+    const panel = document.getElementById('remote-explorer-panel');
+    if (panel && panel.style.display !== 'none') renderRemoteExplorer();
+  });
+}
+
+// Remote 연결 성공 시: 파일 탐색기를 원격 $HOME(또는 lastWorkspace)로 자동 전환.
+// VS Code Remote-SSH처럼 해당 경로가 즉시 파일 탐색기에 표시되도록 한다.
+if (window.electronAPI?.onRemoteConnected) {
+  window.electronAPI.onRemoteConnected(async (ev) => {
+    const hasLastWorkspace = Boolean(ev.workspace);
+    const targetPath = ev.workspace || ev.remoteHome || '/';
+    const aliasLabel = ev.user ? `${ev.user}@${ev.alias}` : ev.alias;
+    try {
+      state.folderPath = targetPath;
+      _projectStats = null; _projectDeps = null; _reviewResults = null; _structureCurrentPath = null;
+      const pathText = document.getElementById('file-tree-path-text');
+      if (pathText) {
+        pathText.textContent = `[SSH: ${aliasLabel}] ${targetPath}`;
+        pathText.title = `Remote host: ${aliasLabel} — ${targetPath}`;
+      }
+      const actions = document.getElementById('file-tree-actions');
+      if (actions) actions.style.display = 'inline-flex';
+      // 파일 탐색기 탭으로 자동 전환
+      document.getElementById('btn-file-explorer')?.click();
+      // SFTP channel may take a moment to open on first use — retry once.
+      let loaded = false;
+      for (let attempt = 0; attempt < 3 && !loaded; attempt++) {
+        try {
+          if (attempt > 0) await new Promise(r => setTimeout(r, 1000));
+          await loadFileTree(targetPath);
+          const tree = document.getElementById('file-tree');
+          if (tree && tree.children.length > 0) loaded = true;
+        } catch (_e) { /* retry */ }
+      }
+      if (!loaded) {
+        console.warn('[remote:connected] file tree load failed after 3 attempts for', targetPath);
+      }
+
+      // 최초 연결 시 (lastWorkspace 없음) workspace picker 자동 오픈
+      if (!hasLastWorkspace && window.RemoteWorkspacePicker) {
+        setTimeout(() => {
+          const picker = window.RemoteWorkspacePicker.show({ alias: ev.alias, startPath: ev.remoteHome || '/' });
+          picker.addEventListener('select', async (se) => {
+            const p = se.detail && se.detail.path;
+            if (!p) return;
+            state.folderPath = p;
+            if (pathText) {
+              pathText.textContent = `[SSH: ${aliasLabel}] ${p}`;
+              pathText.title = `Remote host: ${aliasLabel} — ${p}`;
+            }
+            try { await loadFileTree(p); } catch (_e) {}
+          }, { once: true });
+        }, 300);
+      }
+    } catch (e) {
+      console.error('[remote:connected] failed to open workspace', e);
+    }
   });
 }
 
@@ -3518,7 +4063,7 @@ function renderSettingsTab(o, profiles) {
       try {
         const controller = new AbortController();
         setTimeout(() => controller.abort(), 5000);
-        const r = await fetch('http://localhost:8765/health', { signal: controller.signal });
+        const r = await fetch(`${apiBase()}/health`, { signal: controller.signal });
         statusEl.innerHTML = r.ok ? '<span style="color:var(--color-success)">● 연결됨</span>' : '<span style="color:var(--color-error)">● 오류</span>';
       } catch { statusEl.innerHTML = '<span style="color:var(--color-error)">● 오프라인</span>'; }
     })();
@@ -3527,7 +4072,7 @@ function renderSettingsTab(o, profiles) {
       try {
         const controller = new AbortController();
         setTimeout(() => controller.abort(), 5000);
-        const r = await fetch('http://localhost:8765/health', { signal: controller.signal });
+        const r = await fetch(`${apiBase()}/health`, { signal: controller.signal });
         if (r.ok) {
           const data = await r.json();
           statusEl.innerHTML = `<span style="color:var(--color-success)">● 연결됨</span> <span style="font-size:10px;color:var(--color-text-muted)">v${data.version || '?'}</span>`;
@@ -3592,7 +4137,7 @@ function renderSettingsTab(o, profiles) {
         // 자격증명 가져와서 백엔드에 주입
         const newCreds = await window.electronAPI?.getCredentials(p);
         try {
-          await fetch('http://localhost:8765/api/reset-cache', {
+          await fetch(`${apiBase()}/api/reset-cache`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ profile: p, bedrockUser: state.settings?.bedrockUser || '', credentials: newCreds || null }),
           });
@@ -3887,7 +4432,7 @@ function updateQuotaBar(){
   const profile = state.settings?.awsProfile || '';
   const user = state.settings?.bedrockUser || '';
   console.log(`[QuotaBar] fetch 시작: profile=${profile}, user=${user}`);
-  fetch(`http://localhost:8765/api/quota?profile=${encodeURIComponent(profile)}&user=${encodeURIComponent(user)}`, { signal: AbortSignal.timeout(10000) }).then(r=>r.json()).then(q=>{
+  fetch(`${apiBase()}/api/quota?profile=${encodeURIComponent(profile)}&user=${encodeURIComponent(user)}`, { signal: AbortSignal.timeout(10000) }).then(r=>r.json()).then(q=>{
     console.log('[QuotaBar] 응답:', JSON.stringify(q));
     const remaining = q.remaining_krw || 0;
     if (remaining <= 0) {
@@ -3944,7 +4489,7 @@ async function saveConversation(){
     }
   } catch {}
 }
-async function checkBackend(){const el=document.getElementById('status-backend');try{const r=await fetch('http://localhost:8765/health');if(r.ok){el.textContent=`● ${state.settings?.awsProfile||'bedrock-gw'}`;document.getElementById('status-model').textContent=state.selectedModel?.name||'';}else{el.textContent='● backend error';setTimeout(checkBackend,5000);}}catch{el.textContent='● backend offline';setTimeout(checkBackend,5000);}}
+async function checkBackend(){const el=document.getElementById('status-backend');try{const r=await fetch(`${apiBase()}/health`);if(r.ok){el.textContent=`● ${state.settings?.awsProfile||'bedrock-gw'}`;document.getElementById('status-model').textContent=state.selectedModel?.name||'';}else{el.textContent='● backend error';setTimeout(checkBackend,5000);}}catch{el.textContent='● backend offline';setTimeout(checkBackend,5000);}}
 
 // ===== 패널 드래그 리사이즈 =====
 function initPanelResize() {
@@ -4000,8 +4545,38 @@ document.addEventListener('keydown', e => {
   if (mod && e.shiftKey && e.key === 'F') { e.preventDefault(); switchCenterView('search'); }
   if (mod && e.shiftKey && e.key === 'G') { e.preventDefault(); switchCenterView('git'); }
   if (mod && e.shiftKey && e.key === 'S') { e.preventDefault(); switchCenterView('stats'); }
+  // Show Remote Log — Req 12.3 (tasks.md §28.2). Opens userData/logs/remote-ssh.log
+  // in a read-only editor tab. Acts as a minimal "command palette" entry until a
+  // full palette UI lands.
+  if (mod && e.shiftKey && e.key === 'L') { e.preventDefault(); runShowRemoteLog(); }
   if (e.key === 'Escape' && _activeView !== 'editor' && _activeView !== 'parallel') { switchCenterView('editor'); }
 });
+
+/**
+ * Invoke the `remote:show-log` IPC handler and open the returned log file in
+ * a read-only editor tab. Silently no-ops if the renderer is not running
+ * inside Electron or the handler returns an empty path.
+ *
+ * Req 12.3: "THE Local_Editor SHALL expose a 'Show Remote Log' command that
+ * opens the remote-ssh log in a read-only editor tab."
+ */
+async function runShowRemoteLog() {
+  try {
+    if (!window.electronAPI?.remoteShowLog) {
+      console.warn('[remote:show-log] electronAPI.remoteShowLog unavailable');
+      return;
+    }
+    const res = await window.electronAPI.remoteShowLog();
+    const p = res && res.path;
+    if (!p) {
+      console.warn('[remote:show-log] handler returned empty path');
+      return;
+    }
+    await openFileReadOnly(p, 'remote-ssh.log');
+  } catch (err) {
+    console.error('[remote:show-log] failed:', err);
+  }
+}
 
 async function saveCurrentFile() {
   if (!monacoEditor || !state.activeTab) return;
@@ -4063,7 +4638,7 @@ function updateLivePanel() {
   // 백엔드 상태
   const statusEl = el('live-backend-status');
   if (statusEl) {
-    fetch('http://localhost:8765/health', { signal: AbortSignal.timeout(3000) })
+    fetch(`${apiBase()}/health`, { signal: AbortSignal.timeout(3000) })
       .then(r => { statusEl.innerHTML = r.ok ? '<span style="color:var(--color-success)">● 연결됨</span>' : '<span style="color:var(--color-error)">● 오류</span>'; })
       .catch(() => { statusEl.innerHTML = '<span style="color:var(--color-error)">● 오프라인</span>'; });
   }
@@ -4150,7 +4725,7 @@ function loadSavedConsensusHistory() {
 // ===== RAG 인덱싱 =====
 async function indexProjectForRAG(projectPath) {
   try {
-    const r = await fetch('http://localhost:8765/api/rag/index', {
+    const r = await fetch(`${apiBase()}/api/rag/index`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ projectPath }),

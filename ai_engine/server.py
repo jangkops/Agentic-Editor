@@ -11,7 +11,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="AI Editor Engine", version="0.3.0")
+__version__ = "0.3.0"
+
+app = FastAPI(title="AI Editor Engine", version=__version__)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 # ===== Agent Tool Definitions =====
@@ -100,8 +102,95 @@ AGENT_TOOLS = {
 }
 
 
+# ===== Remote Bridge Tool Routing =====
+# When AE_BRIDGE_URL is set (by Electron), AI agent tools route through
+# the bridge HTTP server which forwards to the remote SSH session.
+import httpx as _httpx
+
+_BRIDGE_URL = os.environ.get("AE_BRIDGE_URL", "")
+_BRIDGE_TOKEN = os.environ.get("AE_BRIDGE_TOKEN", "")
+
+# Dev mode fallback: read discovery file written by Electron main.js
+if not _BRIDGE_URL:
+    import tempfile as _tempfile
+    try:
+        _disc_path = os.path.join(_tempfile.gettempdir(), "ae-bridge.json")
+        with open(_disc_path, "r") as _f:
+            _disc = json.load(_f)
+        _BRIDGE_URL = (_disc.get("url") or "").strip()
+        _BRIDGE_TOKEN = (_disc.get("token") or "").strip()
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+_BRIDGE_TOOLS = {"read_file", "write_file", "list_directory", "search_files", "run_command"}
+
+def _call_bridge(endpoint: str, payload: dict):
+    """Call the Electron bridge server. Returns dict or None on failure."""
+    if not _BRIDGE_URL or not _BRIDGE_TOKEN:
+        return None
+    try:
+        r = _httpx.post(
+            f"{_BRIDGE_URL}/bridge/{endpoint}",
+            headers={"X-AE-Bridge-Token": _BRIDGE_TOKEN},
+            json=payload,
+            timeout=30.0,
+        )
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    return None
+
+def _bridge_is_remote() -> bool:
+    """Check if a remote SSH session is currently active."""
+    res = _call_bridge("status", {})
+    return bool(res and res.get("remote"))
+
+
+def _format_bridge_result(tool_name, br):
+    """Format bridge JSON response into a string for the agent."""
+    if not isinstance(br, dict):
+        return str(br)
+    if not br.get('ok', True):
+        return f'[Bridge Error] {br.get("error", "unknown")}'
+    if tool_name == 'read_file':
+        c = br.get('content', '')
+        _max = int(os.environ.get('AE_READ_FILE_MAX', '120000'))
+        if len(c) > _max:
+            c = c[:_max] + '\n... (truncated)'
+        return c
+    elif tool_name == 'write_file':
+        return 'File saved [remote]'
+    elif tool_name == 'list_directory':
+        entries = br.get('entries', [])
+        lines = []
+        for e in sorted(entries, key=lambda x: (not x.get('isDirectory'), x.get('name', ''))):
+            nm = e.get('name', '')
+            if nm.startswith('.') and nm not in ('.env', '.gitignore'):
+                continue
+            kind = 'DIR' if e.get('isDirectory') else 'FILE'
+            lines.append(f'  {kind}  {nm}')
+        return f'({len(lines)} items) [remote]\n' + '\n'.join(lines[:200])
+    elif tool_name == 'run_command':
+        output = (br.get('stdout', '') + br.get('stderr', ''))
+        _max = int(os.environ.get('AE_RUN_CMD_MAX', '40000'))
+        if len(output) > _max:
+            output = output[:_max] + '\n... (truncated)'
+        return output or '(no output)'
+    elif tool_name == 'search_files':
+        return br.get('output', 'no results')
+    return str(br)
+
+
 def _execute_tool(tool_name: str, tool_input: dict, project_path: str = "") -> str:
     """도구를 실행하고 결과를 문자열로 반환."""
+    # === Remote Bridge Routing ===
+    _REMOTE_TOOLS = {"read_file", "write_file", "list_directory", "search_files", "run_command"}
+    if _BRIDGE_URL and tool_name in _REMOTE_TOOLS and _bridge_is_remote():
+        _br = _call_bridge(tool_name, tool_input)
+        if _br is not None:
+            return _format_bridge_result(tool_name, _br)
+        # bridge returned None = unavailable, fall through to local
+
     try:
         if tool_name == "read_file":
             path = tool_input["path"]
@@ -351,8 +440,9 @@ async def _refresh_and_retry_gw(gw, aws_profile, bedrock_user):
 async def health():
     return {
         "status": "ok",
+        "service": "ai-editor-engine",
         "timestamp": datetime.utcnow().isoformat(),
-        "version": "0.3.0",
+        "version": __version__,
     }
 
 
@@ -509,6 +599,8 @@ async def list_models(request: Request):
 
         resp = client.list_foundation_models()
         catalog = {}
+        seen_model_keys = set()  # 리전/컨텍스트 변형 중복 제거
+
         skip_output = ["IMAGE", "VIDEO", "EMBEDDING"]
         for m in resp.get("modelSummaries", []):
             modes = m.get("outputModalities", [])
@@ -529,8 +621,24 @@ async def list_models(request: Request):
                 continue
 
             # 실제 호출 가능 여부: CRIS profile 존재 여부로 판단
-            # INFERENCE_PROFILE 타입 모델은 us./eu./global. prefix 붙은 profile이 있어야 호출 가능
             model_id = m["modelId"]
+            # 중복 제거: 리전 prefix(us./eu./global.) + context window 변형(:8k,:20k,:1000k,:mm) 정규화
+            _no_region = model_id
+            for _pfx in ("us.", "eu.", "global."):
+                if _no_region.startswith(_pfx):
+                    _no_region = _no_region[len(_pfx):]
+                    break
+            _parts = _no_region.split(":")
+            if len(_parts) >= 2:
+                _base_key = _parts[0] + ":" + _parts[1]
+            else:
+                _base_key = _no_region
+            if _base_key in seen_model_keys:
+                continue
+            seen_model_keys.add(_base_key)
+            if len(_parts) > 2:
+                model_id = _parts[0] + ":" + _parts[1]  # 기본 ID(:0) 우선
+
             if callable_profile_ids is not None and "INFERENCE_PROFILE" in inference_types and "ON_DEMAND" not in inference_types:
                 # 이 모델은 CRIS profile 필수 — profile 존재 여부 확인
                 has_profile = any(
@@ -684,9 +792,11 @@ async def run_agent_with_tools(request: Request):
 
             max_turns = int(os.environ.get("AE_MAX_AGENT_TURNS", "50"))
             refreshed_once = False  # 자격증명 만료 자동복구 1회만
+            tool_unsupported_fallback_tried = False  # tool-use 미지원 모델 fallback 1회만
 
             for turn in range(max_turns):
-                print(f"[Agent] turn={turn}, realtime stream + toolConfig")
+                use_tool_config = not tool_unsupported_fallback_tried
+                print(f"[Agent] turn={turn}, realtime stream, toolConfig={use_tool_config}")
                 text_parts = []
                 tool_use_blocks = []
                 current_tool = {}
@@ -696,7 +806,7 @@ async def run_agent_with_tools(request: Request):
                 try:
                     async for evt in gw.stream_sse_realtime(
                         model_id=stream_model, messages=messages,
-                        system_prompt=system_prompt, tool_config=AGENT_TOOLS,
+                        system_prompt=system_prompt, tool_config=(AGENT_TOOLS if use_tool_config else None),
                     ):
                         evt_type = evt.get("type", "")
                         if evt_type == "content_block_delta":
@@ -752,6 +862,16 @@ async def run_agent_with_tools(request: Request):
                 if turn_error and _is_expired_error(turn_error) and refreshed_once and not text_parts and not tool_use_blocks:
                     # 같은 turn 인덱스를 다시 쓰기 위해 range 를 못 돌리므로, messages 는 그대로 두고 continue 로 다음 turn 에서 재호출
                     continue
+
+
+                # tool-use 미지원 모델 fallback — InternalServerException + 아직 콘텐츠 없음 + 첫 시도
+                if turn_error and not tool_unsupported_fallback_tried and not text_parts and not tool_use_blocks:
+                    err_lower = str(turn_error).lower()
+                    if "internalserverexception" in err_lower or "internal server" in err_lower or "tool" in err_lower:
+                        tool_unsupported_fallback_tried = True
+                        print(f"[Agent] tool-use 미지원 모델 감지 — toolConfig 없이 재시도")
+                        yield f"data: {json.dumps({"info": "tool-unsupported, retrying without tools"}, ensure_ascii=False)}\n\n"
+                        continue
 
                 # content_blocks 조합
                 content_blocks = []

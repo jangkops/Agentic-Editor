@@ -230,8 +230,8 @@
 
 ### Phase 3 — 원격 브리지 (파일 · 터미널 · 포트 포워딩)
 
-- [ ] 14. Port Forwarder 구현
-  - [ ] 14.1 로컬 `net.createServer` → `session.forwardOut`
+- [x] 14. Port Forwarder 구현
+  - [x] 14.1 로컬 `net.createServer` → `session.forwardOut`
     - 파일: `electron/src/remote/port-forwarder.js`
     - `allocatePort()` 로 Local_Forwarded_Port 획득 (재연결 시 동일 포트 유지)
     - 원격 127.0.0.1:8765 로 직통 포워딩
@@ -243,22 +243,22 @@
     - 케이스: 포워드 open → /health 200, 종료 시 바인드 해제
     - _Requirements: 5.1_
 
-- [ ] 15. Remote File Bridge (SFTP 기반)
-  - [ ] 15.1 SFTP wrapper + 기본 ops (list/read/stat/mkdir/rename)
+- [x] 15. Remote File Bridge (SFTP 기반)
+  - [x] 15.1 SFTP wrapper + 기본 ops (list/read/stat/mkdir/rename)
     - 파일: `electron/src/remote/remote-file-bridge.js`
     - `list`, `read(encoding)`, `readStream`, `stat`, `mkdir({recursive})`, `rename`
     - path separator 헬퍼 `pathSep()` — `uname -s` 결과 기반 (Unix `/`, Windows `\`)
     - 16 MB 초과 시 `LargeFileError` 반환
     - _Requirements: 6.1, 6.2, 6.4, 6.5, 11.6_
 
-  - [ ] 15.2 Atomic write (temp → fsync → rename)
+  - [x] 15.2 Atomic write (temp → fsync → rename)
     - 파일: `electron/src/remote/remote-file-bridge.js`
     - `write(remotePath, content)` — `remotePath + '.ae-tmp-' + randHex(6)` 로 쓰기 후 fsync(OpenSSH ext, 미지원 스킵) → rename
     - 실패 시 temp cleanup 보장
     - 에러 코드 (permission/disk-full/io) 를 renderer 로 그대로 전달
     - _Requirements: 6.3, 6.5, 6.6_
 
-  - [ ] 15.3 SFTP polling watcher
+  - [x] 15.3 SFTP polling watcher
     - 파일: `electron/src/remote/remote-file-bridge.js`
     - 활성 디렉터리 500ms, 비활성 2s 폴링 (스냅샷 `(path, mtime, size)` 비교)
     - `remote:event:fs-change` 이벤트 송신 (`created|modified|deleted`)
@@ -270,8 +270,8 @@
     - **Validates: Requirements 6.3, 6.5, 6.6, 11.6**
     - 실패 주입: `{permission, diskFull, io, rename, fsync}` 부분집합. temp 잔류 없음, 실패 시 원본 해시 불변, 성공 시 round-trip.
 
-- [ ] 16. Remote Terminal Bridge (ssh2 shell + PTY)
-  - [ ] 16.1 shell stream create/write/resize/kill
+- [x] 16. Remote Terminal Bridge (ssh2 shell + PTY)
+  - [x] 16.1 shell stream create/write/resize/kill
     - 파일: `electron/src/remote/remote-terminal-bridge.js`
     - `create(id, {cols, rows, cwd, shell})` → `ssh2 shell({term: 'xterm-256color', cols, rows})`
     - Remote OS 기반 `shell` 기본값 결정 (Unix `bash`, Windows OpenSSH pwsh)
@@ -279,13 +279,13 @@
     - UTF-8 인코딩 보존
     - _Requirements: 7.1, 7.2, 7.3, 11.4, 11.6_
 
-  - [ ] 16.2 Disconnect 시 스크롤백 보존 + reattach 스텁
+  - [x] 16.2 Disconnect 시 스크롤백 보존 + reattach 스텁
     - 파일: `electron/src/remote/remote-terminal-bridge.js`
     - 세션 disconnect → 해당 id `disconnected` 이벤트 발행, xterm 버퍼는 renderer 유지
     - v1: 재부착 시도는 "새 shell + 안내" (실제 PTY 복구는 v2)
     - _Requirements: 7.4, 8.5_
 
-  - [ ] 16.3 stdout 백프레셔 완화 (8KB chunk + throttle)
+  - [x] 16.3 stdout 백프레셔 완화 (8KB chunk + throttle)
     - 파일: `electron/src/remote/remote-terminal-bridge.js`
     - 대량 출력 시 8KB chunk 버퍼 + 1ms throttle
     - _Requirements: 7.2_
@@ -295,48 +295,48 @@
     - 케이스: disconnect 이벤트, local-terminal override, UTF-8 왕복
     - _Requirements: 7.4, 7.5, 8.4, 8.5_
 
-- [ ] 17. Checkpoint — Phase 3 완료 확인
+- [x] 17. Checkpoint — Phase 3 완료 확인
   - Ensure all tests pass, ask the user if questions arise.
 
 ---
 
 ### Phase 4 — ai_engine 프로비저닝
 
-- [ ] 18. Provisioner — probe / python check / upload / supervisor
-  - [ ] 18.1 Probe & Python 호환성 검사
+- [x] 18. Provisioner — probe / python check / upload / supervisor
+  - [x] 18.1 Probe & Python 호환성 검사
     - 파일: `electron/src/remote/provisioner.js`
     - `probe()` — `curl 127.0.0.1:<port>/health` 을 SSH exec 로 실행 (3s timeout)
     - `isPythonCompatible(ver)` — semver 기준 major ≥3, minor ≥11
     - 호환 불가 시 `PythonUnsupportedError` + remediation hint
     - _Requirements: 4.1, 4.2, 4.6_
 
-  - [ ] 18.2 ai_engine 트리 content hash + 업로드 스킵 로직
+  - [x] 18.2 ai_engine 트리 content hash + 업로드 스킵 로직
     - 파일: `electron/src/remote/provisioner.js`
     - `~/.agentic-editor/version` 읽어 `aiEngineContentHash` 비교
     - 해시 일치 → 업로드 스킵, 불일치 → SFTP 업로드 (mtime/mode 보존)
     - 업로드 후 version 매니페스트 갱신
     - _Requirements: 4.3, 4.9_
 
-  - [ ] 18.3 venv 생성 + pip install
+  - [x] 18.3 venv 생성 + pip install
     - 파일: `electron/src/remote/provisioner.js`
     - `python3 -m venv ~/.agentic-editor/venv`
     - `pip install -r ~/.agentic-editor/ai_engine/requirements.txt --no-input`
     - `uname -s` 기반 경로 분기 (Linux/macOS vs Windows `%USERPROFILE%`)
     - _Requirements: 4.4, 11.5_
 
-  - [ ] 18.4 Supervisor 스크립트 배포 + 기동
+  - [x] 18.4 Supervisor 스크립트 배포 + 기동
     - 파일: `electron/src/remote/provisioner.js` + 리소스 `electron/src/remote/resources/supervisor.sh`
     - `supervisor.sh` 템플릿 (while loop + sleep 2)
     - PID 파일: `~/.agentic-editor/supervisor.pid`, `~/.agentic-editor/server.pid`
     - 기존 PID 살아있고 /health 200 → 재사용
     - _Requirements: 4.5, 4.8_
 
-  - [ ] 18.5 Manual provisioning mode
+  - [x] 18.5 Manual provisioning mode
     - 파일: `electron/src/remote/provisioner.js`
     - `provisioningMode: 'manual'` 일 때 upload/install 스킵, `/health` 만 확인
     - _Requirements: 4.7_
 
-  - [ ] 18.6 Port occupied by other service 감지
+  - [x] 18.6 Port occupied by other service 감지
     - 파일: `electron/src/remote/provisioner.js`
     - `/health` 응답 본문에 `{"service":"ai-editor-engine"}` 없으면 `PortOccupiedByOtherService` → `failed`
     - ai_engine `/health` 응답에 `service` 필드 추가 (아래 별도 태스크)
@@ -357,27 +357,27 @@
     - 케이스: /health 200 시 업로드 스킵, 수동 모드, 파이썬 없음 에러 메시지
     - _Requirements: 4.1, 4.2, 4.4, 4.7_
 
-- [ ] 19. ai_engine /health 응답에 service 식별자 추가
+- [x] 19. ai_engine /health 응답에 service 식별자 추가
   - 파일: `ai_engine/server.py`
   - `/health` 응답에 `{"service": "ai-editor-engine", "version": "<pkg version>"}` 포함
   - 기존 로컬 동작 하위호환 유지
   - _Requirements: 5.2 (판별), 12.4_
 
-- [ ] 20. Checkpoint — Phase 4 완료 확인
+- [x] 20. Checkpoint — Phase 4 완료 확인
   - Ensure all tests pass, ask the user if questions arise.
 
 ---
 
 ### Phase 5 — IPC 라우팅 통합
 
-- [ ] 21. Session Router + apiBase 헬퍼
-  - [ ] 21.1 SessionRouter 구현
+- [x] 21. Session Router + apiBase 헬퍼
+  - [x] 21.1 SessionRouter 구현
     - 파일: `electron/src/remote/session-router.js`
     - `getActive()` / `isRemoteActive()` / `dispatch(opName, args)` — active.state=='connected' && !forceLocal 시 remote bridge, 아니면 로컬
     - `exec(cmd, {cwd})` → remote 시 SSH exec `{stdout, stderr, code}`, 로컬 시 `execSync` wrap (shape 통일)
     - _Requirements: 5.3, 5.4, 6.1, 7.1, 7.5_
 
-  - [ ] 21.2 apiBase() 헬퍼
+  - [x] 21.2 apiBase() 헬퍼
     - 파일: `electron/src/remote/session-router.js` + `src/lib/utils.js` (renderer 측)
     - connected 이면 `http://127.0.0.1:<localPort>`, 아니면 `http://localhost:8765`
     - _Requirements: 5.3, 5.5_
@@ -392,38 +392,38 @@
     - **Property 11: IPC 라우팅 결정 (fs/terminal)**
     - **Validates: Requirements 5.4, 6.1, 7.1, 7.5**
 
-- [ ] 22. 기존 IPC 핸들러에 Router 분기 삽입
-  - [ ] 22.1 ipc-fs-handlers 원격 라우팅
+- [x] 22. 기존 IPC 핸들러에 Router 분기 삽입
+  - [x] 22.1 ipc-fs-handlers 원격 라우팅
     - 파일: `electron/src/ipc-fs-handlers.js`
     - 각 핸들러 선두에 `const active = sessionRouter.getActive(); if (active?.isRemote) return bridge.remoteFs[op](...)`
     - path 해석은 Remote 시 `hostEntry.remoteWorkspace` 기준
     - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5_
 
-  - [ ] 22.2 ipc-terminal-handlers 원격 라우팅
+  - [x] 22.2 ipc-terminal-handlers 원격 라우팅
     - 파일: `electron/src/ipc-terminal-handlers.js`
     - `terminal:create` 에서 active remote && !forceLocal → `RemoteTerminalBridge.create`
     - `data`/`exit` 이벤트 송신 경로 공용 (`terminal:data`, `terminal:exit`)
     - _Requirements: 7.1, 7.5_
 
-  - [ ] 22.3 ipc-git-handlers 원격 라우팅
+  - [x] 22.3 ipc-git-handlers 원격 라우팅
     - 파일: `electron/src/ipc-git-handlers.js`
     - `execSync(cmd, {cwd})` 호출을 `sessionRouter.exec(cmd, {cwd})` 로 교체
     - 반환 shape: `{stdout, stderr, code}`
     - _Requirements: 6.1_
 
-  - [ ] 22.4 ipc-project-handlers 원격 라우팅
+  - [x] 22.4 ipc-project-handlers 원격 라우팅
     - 파일: `electron/src/ipc-project-handlers.js`
     - 프로젝트 스캔/파일 조작을 Router 경유로 전환
     - _Requirements: 6.1_
 
-- [ ] 23. src/main.js apiBase 치환 및 라이프사이클 통합
-  - [ ] 23.1 fetch URL 을 apiBase() 기반으로 교체
+- [x] 23. src/main.js apiBase 치환 및 라이프사이클 통합
+  - [x] 23.1 fetch URL 을 apiBase() 기반으로 교체
     - 파일: `src/main.js`
     - 모든 `fetch('http://localhost:8765/...')` → `fetch(\`${apiBase()}/...\`)`
     - apiBase 는 `electronAPI.remoteStatus()` 캐시 상태 조회
     - _Requirements: 5.3, 5.5_
 
-  - [ ] 23.2 electron/main.js — Remote Session Manager 부트스트랩 및 ProcessManager 연동
+  - [x] 23.2 electron/main.js — Remote Session Manager 부트스트랩 및 ProcessManager 연동
     - 파일: `electron/main.js`
     - `app.whenReady` 에서 `dataStore.loadRemoteHosts()` → `RemoteSessionManager` 인스턴스화
     - 세션 connected 진입 시 `ProcessManager.stopPython()`, 비활성화 시 `startPython()` 재기동
@@ -431,21 +431,21 @@
     - 모든 핸들러는 **electron/main.js 에만** 등록 (security.md 준수)
     - _Requirements: 5.4, 5.5, 9.5_
 
-  - [ ] 23.3 preload.js 에 electronAPI remote.* 메서드 노출
+  - [x] 23.3 preload.js 에 electronAPI remote.* 메서드 노출
     - 파일: `electron/preload.js`
     - `contextBridge.exposeInMainWorld` 로 whitelisted 메서드만 (design.md 의 preload 섹션 그대로)
     - 이벤트 구독: `onRemoteState`, `onRemoteAuthRequest`, `onRemoteHostKeyPrompt`, `onRemoteFsChange`
     - _Requirements: 10.4_
 
-- [ ] 24. Checkpoint — Phase 5 완료 확인
+- [x] 24. Checkpoint — Phase 5 완료 확인
   - Ensure all tests pass, ask the user if questions arise.
 
 ---
 
 ### Phase 6 — UI 컴포넌트 (Web Components)
 
-- [ ] 25. Remote Host Picker Web Component
-  - [ ] 25.1 `<remote-host-picker>` 구현
+- [x] 25. Remote Host Picker Web Component
+  - [x] 25.1 `<remote-host-picker>` 구현
     - 파일: `src/components/remote-host-picker.js`
     - `customElements.define`, no shadow DOM, single file
     - `electronAPI.remoteListHosts()` 로 목록 조회, favorite 섹션 먼저 + 알파벳 정렬
@@ -454,7 +454,7 @@
     - design token(`variables.css`) 기반 스타일
     - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.6_
 
-  - [ ] 25.2 Ad-hoc host 추가 플로우
+  - [x] 25.2 Ad-hoc host 추가 플로우
     - 파일: `src/components/remote-host-picker.js`
     - 빈 상태 CTA 및 모달 폼 (alias/hostName/user/port/identityFile)
     - `remoteAddAdHocHost()` 호출 → SSH_Config 파일은 변경하지 않음
@@ -475,8 +475,8 @@
     - 커맨드 팔레트 오픈 → 호스트 선택 → Status_Bar 상태 변화 확인
     - _Requirements: 2.1, 2.4_
 
-- [ ] 26. Remote Status Bar Web Component
-  - [ ] 26.1 `<remote-status-bar>` 구현
+- [x] 26. Remote Status Bar Web Component
+  - [x] 26.1 `<remote-status-bar>` 구현
     - 파일: `src/components/remote-status-bar.js`
     - `data-state` 속성 기반 CSS 스타일 (connecting=warning, connected=success, reconnecting=warning+pulse, failed=error)
     - `onRemoteState` 이벤트 구독하여 active alias + state 렌더
@@ -488,15 +488,15 @@
     - 케이스: 각 state 별 data 속성과 design token 적용 확인
     - _Requirements: 12.1, 12.3_
 
-- [ ] 27. Auth & Host Key 다이얼로그
-  - [ ] 27.1 `<remote-auth-dialog>` 구현 (passphrase / password / 2FA)
+- [x] 27. Auth & Host Key 다이얼로그
+  - [x] 27.1 `<remote-auth-dialog>` 구현 (passphrase / password / 2FA)
     - 파일: `src/components/remote-auth-dialog.js`
     - `onRemoteAuthRequest` 수신 시 kind 에 맞는 입력 필드 렌더
     - 2FA 의 경우 서버 prompt 를 verbatim 표시, echo 플래그 반영
     - 입력값은 `remoteRespondAuth` 즉시 호출 후 DOM 제거 (renderer 메모리 잔류 없음)
     - _Requirements: 3.3, 3.9, 10.1, 10.4_
 
-  - [ ] 27.2 `<remote-host-key-dialog>` 구현 (TOFU confirmation)
+  - [x] 27.2 `<remote-host-key-dialog>` 구현 (TOFU confirmation)
     - 파일: `src/components/remote-host-key-dialog.js`
     - SHA256 fingerprint 그룹핑 표시, Accept/Reject 버튼
     - Accept → `remoteRespondAuth` kind=`host-key` payload=`{accept: true}`
@@ -507,14 +507,14 @@
     - mock SSH 서버에서 passphrase prompt → 다이얼로그 입력 → 연결 성공
     - _Requirements: 3.3, 3.9_
 
-- [ ] 28. 에러 메시지 / remediation hint / Show Remote Log
-  - [ ] 28.1 surfaceError() 공통 빌더
+- [x] 28. 에러 메시지 / remediation hint / Show Remote Log
+  - [x] 28.1 surfaceError() 공통 빌더
     - 파일: `electron/src/remote/error-surface.js`
     - `{code, category, alias, state, cause, remediationHint}` 정규화
     - category 별 기본 remediationHint 사전
     - _Requirements: 12.4_
 
-  - [ ] 28.2 "Show Remote Log" 커맨드
+  - [x] 28.2 "Show Remote Log" 커맨드
     - 파일: `electron/main.js` + `src/main.js`
     - `remote:show-log` → read-only editor tab 에서 `userData/logs/remote-ssh.log` 오픈
     - _Requirements: 12.3_
@@ -524,8 +524,8 @@
     - **Property 22: User-facing error message completeness**
     - **Validates: Requirements 12.4**
 
-- [ ] 29. Remote hosts preferences 영속화
-  - [ ] 29.1 remote-hosts.json CRUD
+- [x] 29. Remote hosts preferences 영속화
+  - [x] 29.1 remote-hosts.json CRUD
     - 파일: `electron/core/data-store.js` (확장) + `electron/src/remote/remote-hosts-store.js`
     - `userData/settings/remote-hosts.json` schema: `{schemaVersion, hosts: {alias: {favorite, lastWorkspace, remotePortOverride, provisioningMode, source, adHoc?}}}`
     - `loadHosts()`, `saveHosts(prefs)`, `setFavorite(alias, bool)`, `setWorkspace(alias, path)`, `addAdHoc(...)`
@@ -537,22 +537,22 @@
     - **Property 24: Per-host preference persistence round-trip**
     - **Validates: Requirements 13.3**
 
-- [ ] 30. Checkpoint — Phase 6 완료 확인
+- [x] 30. Checkpoint — Phase 6 완료 확인
   - Ensure all tests pass, ask the user if questions arise.
 
 ---
 
 ### Phase 7 — 연결 복구 및 요청 멱등성
 
-- [ ] 31. Request Queue + ReconnectLoop
-  - [ ] 31.1 Request queue (depth 32, FIFO) 구현
+- [x] 31. Request Queue + ReconnectLoop
+  - [x] 31.1 Request queue (depth 32, FIFO) 구현
     - 파일: `electron/src/remote/request-queue.js`
     - `enqueue(req)` — `|Q|==32` 시 oldest drop + renderer 경고
     - `drain(onSend)` — connected 복귀 시 FIFO replay
     - 큐 대상: `/process`, `/streamprocess` POST
     - _Requirements: 8.7_
 
-  - [ ] 31.2 ReconnectLoop (backoff + 5분 타임아웃)
+  - [x] 31.2 ReconnectLoop (backoff + 5분 타임아웃)
     - 파일: `electron/src/remote/reconnect-loop.js`
     - `backoffMs(n)` (Property 14) 사용, 포워드 포트 동일 번호 유지
     - 5분 초과 시 `failed` 전이
@@ -565,8 +565,8 @@
     - **Property 15: Replay queue invariants**
     - **Validates: Requirements 8.7**
 
-- [ ] 32. ai_engine dedup middleware (requestid 멱등성)
-  - [ ] 32.1 dedup_requestid middleware 추가
+- [x] 32. ai_engine dedup middleware (requestid 멱등성)
+  - [x] 32.1 dedup_requestid middleware 추가
     - 파일: `ai_engine/server.py`
     - `@app.middleware("http")` 로 `/process`, `/streamprocess` POST 에 한해 `requestid` 기반 LRU 캐시 (size 512)
     - `/process`: 중복 rid → 캐시된 응답 반환
@@ -580,64 +580,64 @@
     - **Validates: Requirements 8.8**
     - `hypothesis` 로 임의 `(rid, body)` 시퀀스 생성, upstream mock 의 요청 수 = unique first-success rid 수 검증
 
-- [ ] 33. Checkpoint — Phase 7 완료 확인
+- [x] 33. Checkpoint — Phase 7 완료 확인
   - Ensure all tests pass, ask the user if questions arise.
 
 ---
 
 ### Phase 8 — 통합 테스트 환경 및 문서
 
-- [ ] 34. Docker Compose 통합 테스트 환경 구성
+- [x] 34. Docker Compose 통합 테스트 환경 구성
   - 파일: `tests/integration/remote/docker-compose.yml` + `tests/integration/remote/keys/` + `tests/integration/remote/setup.sh`
   - sshd + sshd-bastion 컨테이너 (linuxserver/openssh-server)
   - 테스트용 Ed25519 키 쌍 생성 스크립트
   - `tc qdisc ... netem delay 50ms` 설정 훅 (CI 가능 환경에서만)
   - _Requirements: 3.10, 4.5, 4.8, 5.6, 6.2, 6.7, 7.2, 7.3, 8.*, 9.3_
 
-- [ ] 35.* SSH handshake 성능 통합 테스트
+- [x] 35.* SSH handshake 성능 통합 테스트
   - 파일: `tests/integration/remote/ssh-handshake.integration.test.js`
   - 50ms RTT 환경에서 handshake ≤10s
   - _Requirements: 3.10_
 
-- [ ] 36.* 프로비저닝 E2E 통합 테스트
+- [x] 36.* 프로비저닝 E2E 통합 테스트
   - 파일: `tests/integration/remote/provisioning.integration.test.js`
   - 캐시된 wheel 환경에서 probe → /health 200 ≤120s
   - supervisor 재기동 동작 확인
   - _Requirements: 4.5, 4.8_
 
-- [ ] 37.* 파일 브리지 성능 테스트
+- [x] 37.* 파일 브리지 성능 테스트
   - 파일: `tests/integration/remote/file-read-perf.integration.test.js`
   - 1 MB 파일 read ≤500ms, forward 첫 /health ≤2s
   - _Requirements: 5.6, 6.2_
 
-- [ ] 38.* Watcher 지연 통합 테스트
+- [x] 38.* Watcher 지연 통합 테스트
   - 파일: `tests/integration/remote/watcher-latency.integration.test.js`
   - 활성 디렉터리 변경 알림 ≤1s (비활성 별도 측정)
   - _Requirements: 6.7_
 
-- [ ] 39.* 터미널 지연 통합 테스트
+- [x] 39.* 터미널 지연 통합 테스트
   - 파일: `tests/integration/remote/terminal-latency.integration.test.js`
   - keypress → render ≤80ms, resize ≤200ms
   - _Requirements: 7.2, 7.3_
 
-- [ ] 40.* Context switch 통합 테스트
+- [x] 40.* Context switch 통합 테스트
   - 파일: `tests/integration/remote/context-switch.integration.test.js`
   - 활성 세션 전환 ≤500ms
   - _Requirements: 9.3_
 
-- [ ] 41.* Reconnect E2E 통합 테스트
+- [x] 41.* Reconnect E2E 통합 테스트
   - 파일: `tests/integration/remote/reconnect.integration.test.js`
   - sshd 컨테이너 재시작 시나리오 → backoff, replay, terminal reattach 안내
   - _Requirements: 8.2, 8.3, 8.4, 8.5, 8.7, 8.8_
 
-- [ ] 42. 사용자 가이드 문서 작성
+- [x] 42. 사용자 가이드 문서 작성
   - 파일: `docs/REMOTE_SSH.md`
   - 지원 SSH_Config 디렉터브, 수동/자동 프로비저닝 전환, 수동 Python 설치 안내
   - 알려진 한계 (Match 미지원, Windows 원격 자동 설치 미지원, 16MB 파일 상한, ProxyCommand 제한)
   - 트러블슈팅 (포트 범위 고갈, Python 버전 미달, 호스트 키 변경)
   - _Requirements: 13.4_
 
-- [ ] 43. 최종 Checkpoint — 전체 테스트 통과
+- [x] 43. 최종 Checkpoint — 전체 테스트 통과
   - Ensure all tests pass, ask the user if questions arise.
 
 ---

@@ -38,18 +38,44 @@ class BedrockEmbedder:
             self._fitted = True
 
     def embed(self, text: str) -> Optional[np.ndarray]:
-        """단일 텍스트 임베딩."""
+        """단일 텍스트 임베딩.
+
+        주의: fit 되지 않은 상태에서는 None을 반환한다. 단일 쿼리로 fit 하면
+        vocabulary가 작아져 캐시된 코퍼스 벡터(예: 1024차원)와 차원이 달라져
+        matmul 차원 불일치를 유발한다.
+        """
         try:
             self._ensure_vectorizer()
             if not self._fitted:
-                # 아직 fit 안 됨 — 단일 텍스트로 fit
-                self._vectorizer.fit([text])
-                self._fitted = True
+                # 코퍼스로 fit 안 됐다면 임베딩 거부 (차원 불일치 방지)
+                print("[Embedder] embed() 호출 시 fit 안 된 상태 — 코퍼스로 fit_corpus() 먼저 호출 필요")
+                return None
             vec = self._vectorizer.transform([text[:8000]]).toarray()[0]
             return vec
         except Exception as e:
             print(f"[Embedder] TF-IDF 임베딩 실패: {e}")
             return None
+
+    def fit_corpus(self, texts: List[str]) -> bool:
+        """캐시된 벡터 차원과 일치하도록 코퍼스로 fit. 성공 시 True."""
+        if not texts:
+            return False
+        try:
+            self.fit(texts)
+            return self._fitted
+        except Exception as e:
+            print(f"[Embedder] fit_corpus 실패: {e}")
+            return False
+
+    @property
+    def vocab_size(self) -> int:
+        """현재 vectorizer의 vocabulary 크기. fit 전엔 0."""
+        if not self._fitted or self._vectorizer is None:
+            return 0
+        try:
+            return len(self._vectorizer.vocabulary_)
+        except Exception:
+            return 0
 
     def embed_batch(self, texts: List[str], batch_size: int = 50) -> List[Optional[np.ndarray]]:
         """배치 임베딩 — 먼저 전체 코퍼스로 fit 후 transform."""

@@ -94,6 +94,72 @@ class DataStore {
     if (fs.existsSync(p)) fs.unlinkSync(p);
   }
 
+  // ──────────────────────────────────────────────────────────────────────────
+  // Remote SSH hosts (remote-ssh feature)
+  // ──────────────────────────────────────────────────────────────────────────
+  // Raw file I/O for `userData/settings/remote-hosts.json`. Higher-level
+  // CRUD (setFavorite, addAdHoc, setProvisioningMode, …) lives in
+  // `electron/src/remote/remote-hosts-store.js` (RemoteHostsStore) which
+  // delegates to these two methods for persistence.
+  //
+  // Schema (matches design.md §Data Model):
+  //   { schemaVersion: number, hosts: { [alias]: {
+  //       favorite?:           boolean,
+  //       lastWorkspace?:      string,
+  //       remotePortOverride?: number | null,
+  //       provisioningMode?:   'auto' | 'manual',
+  //       source?:             'ssh-config' | 'ad-hoc',
+  //       adHoc?:              {hostName, user, port, identityFile}
+  //     }}}
+  //
+  // NEVER store key material or passphrases here (Req 10.5).
+  loadRemoteHosts() {
+    const p = path.join(this.basePath, 'settings', 'remote-hosts.json');
+    if (!fs.existsSync(p)) return { schemaVersion: 1, hosts: {} };
+    let raw;
+    try { raw = fs.readFileSync(p, 'utf-8'); }
+    catch { return { schemaVersion: 1, hosts: {} }; }
+    try {
+      const data = JSON.parse(raw);
+      return {
+        schemaVersion: Number(data && data.schemaVersion) || 1,
+        hosts: (data && typeof data.hosts === 'object' && data.hosts) || {},
+      };
+    } catch {
+      // Malformed JSON — back it up and start fresh so the app keeps
+      // working even if the preferences file was corrupted by a crash or
+      // external edit (Req 13.3).
+      try {
+        const backup = `${p}.corrupt-${Date.now()}.bak`;
+        fs.renameSync(p, backup);
+      } catch { /* ignore — worst case we overwrite on next save */ }
+      return { schemaVersion: 1, hosts: {} };
+    }
+  }
+
+  saveRemoteHosts(data) {
+    const dir = path.join(this.basePath, 'settings');
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const p = path.join(dir, 'remote-hosts.json');
+    const payload = {
+      schemaVersion: (data && Number(data.schemaVersion)) || 1,
+      hosts: (data && typeof data.hosts === 'object' && data.hosts) || {},
+    };
+    // Atomic write: write to tmp file, fsync, then rename over the target.
+    // Guarantees the file is either the old version or the new version,
+    // never a half-written truncation (Req 13.3).
+    const tmp = `${p}.tmp-${process.pid}-${Date.now()}`;
+    const fd = fs.openSync(tmp, 'w');
+    try {
+      fs.writeSync(fd, JSON.stringify(payload, null, 2), 0, 'utf-8');
+      try { fs.fsyncSync(fd); } catch { /* best-effort — some FS reject fsync */ }
+    } finally {
+      try { fs.closeSync(fd); } catch { /* already closed */ }
+    }
+    fs.renameSync(tmp, p);
+    return true;
+  }
+
   // Denied Models — 호출 시 ValidationException/model_denied 발생한 모델 영속 저장
   // 다음 기동 시 자동으로 모델 목록에서 제외 (앱 재시작 후에도 학습 결과 유지)
   loadDeniedModels() {
@@ -118,6 +184,47 @@ class DataStore {
   clearDeniedModels() {
     const p = path.join(this.basePath, 'settings', 'denied-models.json');
     if (fs.existsSync(p)) fs.unlinkSync(p);
+  }
+
+  // Capability Denylist — (modelId, capability) pairs persisted
+  _capabilityDenylistPath() {
+    return path.join(this.basePath, 'settings', 'capability-denylist.json');
+  }
+  loadCapabilityDenylist() {
+    const p = this._capabilityDenylistPath();
+    if (!fs.existsSync(p)) return { version: 1, entries: [] };
+    try {
+      const data = JSON.parse(fs.readFileSync(p, 'utf-8'));
+      if (!data || !Array.isArray(data.entries)) return { version: 1, entries: [] };
+      return { version: data.version || 1, entries: data.entries };
+    } catch { return { version: 1, entries: [] }; }
+  }
+  addCapabilityDenylistEntry(entry) {
+    if (!entry || !entry.modelId || !entry.capability) return false;
+    const clean = String(entry.modelId).replace(/^us\.|^eu\.|^global\./, '');
+    const cap = String(entry.capability);
+    const data = this.loadCapabilityDenylist();
+    if (data.entries.some(e => e.modelId === clean && e.capability === cap)) return false;
+    data.entries.push({ modelId: clean, capability: cap, reason: entry.reason || '', deniedAt: entry.deniedAt || new Date().toISOString() });
+    const p = this._capabilityDenylistPath();
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(data, null, 2), 'utf-8');
+    return true;
+  }
+  removeCapabilityDenylistEntry(modelId, capability) {
+    if (!modelId || !capability) return false;
+    const clean = String(modelId).replace(/^us\.|^eu\.|^global\./, '');
+    const data = this.loadCapabilityDenylist();
+    const before = data.entries.length;
+    data.entries = data.entries.filter(e => !(e.modelId === clean && e.capability === capability));
+    if (data.entries.length === before) return false;
+    fs.writeFileSync(this._capabilityDenylistPath(), JSON.stringify(data, null, 2), 'utf-8');
+    return true;
+  }
+  clearCapabilityDenylist() {
+    const p = this._capabilityDenylistPath();
+    if (fs.existsSync(p)) fs.unlinkSync(p);
+    return true;
   }
 }
 

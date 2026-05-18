@@ -175,7 +175,24 @@ function computeFingerprint(_keyType, keyBase64) {
  * @returns {{ type: string, base64: string } | null}
  */
 function normalizeKey(key) {
-  if (!key || typeof key !== 'object') return null;
+  if (!key) return null;
+
+  // ssh2 passes the raw SSH wire format Buffer to hostVerifier.
+  // Format: [uint32 type_len][type_bytes][... rest]
+  if (Buffer.isBuffer(key)) {
+    try {
+      if (key.length < 4) return null;
+      const typeLen = key.readUInt32BE(0);
+      if (typeLen <= 0 || typeLen > 64 || 4 + typeLen > key.length) return null;
+      const type = key.slice(4, 4 + typeLen).toString('utf8');
+      // base64 of the ENTIRE wire format — that's what known_hosts stores.
+      return { type, base64: key.toString('base64') };
+    } catch (_err) {
+      return null;
+    }
+  }
+
+  if (typeof key !== 'object') return null;
 
   if (typeof key.type === 'string' && typeof key.base64 === 'string' && key.base64.length > 0) {
     return { type: key.type, base64: key.base64 };
@@ -433,12 +450,12 @@ class HostKeyStore {
   verify(host, port, key) {
     const normalized = normalizeKey(key);
     if (!normalized) {
-      return { status: 'unknown', fingerprint: null };
+      return { status: 'unknown', fingerprint: null, keyType: null, keyBase64: null };
     }
     const fingerprint = computeFingerprint(normalized.type, normalized.base64);
     const stored = this.get(host, port);
     if (!stored) {
-      return { status: 'unknown', fingerprint };
+      return { status: 'unknown', fingerprint, keyType: normalized.type, keyBase64: normalized.base64 };
     }
     if (stored.keyType === normalized.type && stored.keyBase64 === normalized.base64) {
       return { status: 'ok', fingerprint };
@@ -454,7 +471,7 @@ class HostKeyStore {
     } catch (_err) {
       // ignore
     }
-    return { status: 'mismatch', fingerprint, storedFingerprint };
+    return { status: 'mismatch', fingerprint, storedFingerprint, keyType: normalized.type, keyBase64: normalized.base64 };
   }
 
   /**

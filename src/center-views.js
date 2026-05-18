@@ -748,6 +748,8 @@ async function showGitDetail(hash) {
 }
 
 // ===== 구조 뷰 =====
+let _structureCurrentPath = null; // 현재 구조 뷰가 보여주는 경로 추적
+
 async function loadStructureView() {
   const container = document.getElementById('view-structure');
   if (!state.folderPath) {
@@ -755,12 +757,17 @@ async function loadStructureView() {
     return;
   }
   container.innerHTML = '<div style="text-align:center;padding:40px"><div class="spinner"></div></div>';
-  const entries = await window.electronAPI?.readDir(state.folderPath);
+  // state.folderPath 가 변경되었으면 루트부터 다시 시작
+  const targetPath = (_structureCurrentPath && _structureCurrentPath.startsWith(state.folderPath))
+    ? _structureCurrentPath
+    : state.folderPath;
+  const entries = await window.electronAPI?.readDir(targetPath);
   if (!entries) { container.innerHTML = '<div style="padding:40px;text-align:center;color:var(--color-text-muted)">로딩 실패</div>'; return; }
-  renderStructureTree(container, entries, state.folderPath);
+  renderStructureTree(container, entries, targetPath);
 }
 
 async function renderStructureTree(container, entries, basePath) {
+  _structureCurrentPath = basePath; // 현재 경로 추적
   const IGNORE = new Set(['node_modules', '__pycache__', '.git', '.venv', 'dist', 'build', '.DS_Store']);
   const sorted = [...entries].filter(e => !IGNORE.has(e.name) && !e.name.startsWith('.')).sort((a, b) => (b.isDirectory - a.isDirectory) || a.name.localeCompare(b.name));
 
@@ -797,6 +804,7 @@ async function renderStructureTree(container, entries, basePath) {
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
       <div class="stats-section-title" style="margin:0">프로젝트 구조</div>
       <div style="display:flex;gap:4px;align-items:center">
+        ${basePath !== state.folderPath ? '<button class="sm-btn" id="structure-root-btn" style="font-size:10px;padding:3px 8px" title="프로젝트 루트로 이동">⌂</button>' : ''}
         ${basePath !== state.folderPath ? '<button class="sm-btn" id="structure-up-btn" style="font-size:10px;padding:3px 8px">← 상위</button>' : ''}
         <button class="sm-btn" id="structure-refresh-btn" style="font-size:10px;padding:3px 8px">↻</button>
         <span style="font-size:11px;color:var(--color-text-muted)">${sorted.length}개 항목</span>
@@ -830,11 +838,21 @@ async function renderStructureTree(container, entries, basePath) {
   });
   // 상위 폴더 이동
   container.querySelector('#structure-up-btn')?.addEventListener('click', async () => {
-    const parent = basePath.substring(0, basePath.lastIndexOf('/'));
-    if (parent && parent.length >= state.folderPath.length) {
+    const sepIdx = basePath.lastIndexOf('/');
+    const parent = sepIdx > 0 ? basePath.substring(0, sepIdx) : basePath;
+    if (parent && parent.length >= state.folderPath.length && parent !== basePath) {
       const children = await window.electronAPI?.readDir(parent);
       if (children) renderStructureTree(container, children, parent);
+    } else {
+      // 상위로 갈 수 없으면 루트로 복귀
+      const children = await window.electronAPI?.readDir(state.folderPath);
+      if (children) renderStructureTree(container, children, state.folderPath);
     }
+  });
+  // 루트로 이동
+  container.querySelector('#structure-root-btn')?.addEventListener('click', async () => {
+    const children = await window.electronAPI?.readDir(state.folderPath);
+    if (children) renderStructureTree(container, children, state.folderPath);
   });
   // 새로고침
   container.querySelector('#structure-refresh-btn')?.addEventListener('click', async () => {
@@ -886,7 +904,11 @@ function renderDependenciesView(container) {
       }).join('')}</div>
     </div>` : ''}
 
-    ${!prodEntries.length && !devEntries.length && !pyDeps.length ? '<div style="text-align:center;padding:40px;color:var(--color-text-muted)">package.json 또는 requirements.txt를 찾을 수 없습니다</div>' : ''}`;
+    ${!prodEntries.length && !devEntries.length && !pyDeps.length ? `<div style="text-align:center;padding:40px;color:var(--color-text-muted)">
+      <div style="margin-bottom:8px;">의존성 파일을 찾을 수 없습니다</div>
+      <div style="font-size:11px;color:var(--color-text-muted);">지원: package.json, requirements.txt, Pipfile, pyproject.toml, Cargo.toml, go.mod</div>
+      <div style="font-size:11px;margin-top:8px;">현재 경로: ${esc(state.folderPath || '(없음)')}</div>
+    </div>` : ''}`;
 
   // 새로고침
   container.querySelector('#deps-refresh-btn')?.addEventListener('click', async () => {
@@ -1099,7 +1121,11 @@ async function loadReviewView() {
     </div>`;
     container.querySelector('#review-start-btn')?.addEventListener('click', async () => {
       container.innerHTML = '<div style="text-align:center;padding:60px"><div class="spinner"></div><div style="margin-top:12px;color:var(--color-text-muted);font-size:12px">코드 분석 중...</div></div>';
-      _reviewResults = await analyzeCodeForReview();
+      try {
+        _reviewResults = await analyzeCodeForReview();
+      } catch (e) {
+        _reviewResults = { score: 0, errors: 0, warnings: 0, suggestions: 0, fileIssues: {}, totalIssues: 0 };
+      }
       renderReviewView(container);
     });
     return;
@@ -1108,17 +1134,39 @@ async function loadReviewView() {
 }
 
 async function analyzeCodeForReview() {
-  const stats = _projectStats || await window.electronAPI?.analyzeProject(state.folderPath);
+  // 타임아웃 래퍼 — 원격 모드에서 analyzeProject가 느릴 수 있음
+  const withTimeout = (promise, ms) => Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms))
+  ]);
+
+  let stats = _projectStats;
+  if (!stats) {
+    try {
+      stats = await withTimeout(
+        window.electronAPI?.analyzeProject(state.folderPath),
+        12000 // 12초 타임아웃 (원격 모드 고려)
+      );
+      _projectStats = stats;
+    } catch (e) {
+      console.warn('[review] analyzeProject timeout/error:', e.message);
+      stats = null;
+    }
+  }
   if (!stats) return { score: 0, issues: [], files: [], fileIssues: {}, errors: 0, warnings: 0, suggestions: 0, totalIssues: 0 };
 
   const fileIssues = {};
 
   // 파일별 정적 분석 — 소스 파일만 (설정/문서 제외)
-  const sourceFiles = (stats.files || []).filter(f => ['js','ts','jsx','tsx','py'].includes(f.ext)).slice(0, 30);
+  // 원격 모드에서는 SFTP 읽기가 느리므로 파일 수 제한 (15개)
+  const isRemote = !!(window.__remoteStatus && window.__remoteStatus.state === 'connected');
+  const maxFiles = isRemote ? 15 : 30;
+  const sourceFiles = (stats.files || []).filter(f => ['js','ts','jsx','tsx','py'].includes(f.ext)).slice(0, maxFiles);
   
   for (const file of sourceFiles) {
     try {
-      const content = await window.electronAPI?.readFile(state.folderPath + '/' + file.path);
+      const readPromise = window.electronAPI?.readFile(state.folderPath + '/' + file.path);
+      const content = await withTimeout(readPromise, 5000); // 파일당 5초 타임아웃
       if (!content) continue;
       const lines = content.split('\n');
 
