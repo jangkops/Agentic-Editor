@@ -215,6 +215,8 @@ def _execute_tool(tool_name: str, tool_input: dict, project_path: str = "") -> s
     """도구를 실행하고 결과를 문자열로 반환."""
     # === Remote Bridge Routing ===
     _REMOTE_TOOLS = {"read_file", "write_file", "list_directory", "search_files", "run_command"}
+    if not _BRIDGE_URL:
+        _refresh_bridge_discovery()
     if _BRIDGE_URL and tool_name in _REMOTE_TOOLS and _bridge_is_remote():
         _br = _call_bridge(tool_name, tool_input)
         if _br is not None:
@@ -473,6 +475,17 @@ async def health():
         "service": "ai-editor-engine",
         "timestamp": datetime.utcnow().isoformat(),
         "version": __version__,
+    }
+
+
+@app.get("/api/debug/bridge")
+async def debug_bridge():
+    """Debug: show bridge state."""
+    _refresh_bridge_discovery()
+    return {
+        "bridge_url": _BRIDGE_URL,
+        "bridge_token_set": bool(_BRIDGE_TOKEN),
+        "is_remote": _bridge_is_remote() if _BRIDGE_URL else False,
     }
 
 
