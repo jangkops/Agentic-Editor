@@ -62,7 +62,7 @@ AI 에디터의 이미지 편집(inpaint/outpaint) 도구 추가, 기존 생성 
     - **Validates: Requirements 2.6, 3.6**
 
 - [ ] 3. _tool_edit_image() outpaint 모드 구현
-  - [ ] 3.1 outpaint 입력 유효성 검증 로직 구현
+  - [x] 3.1 outpaint 입력 유효성 검증 로직 구현
     - image_path 파일 존재 여부 → "file-not-found" 에러
     - 이미지 형식 검증 (PNG/JPEG/WEBP 허용) → "invalid-input" 에러
     - 원본 크기 한 변 4096px 제한 → "invalid-input" 에러
@@ -71,14 +71,14 @@ AI 에디터의 이미지 편집(inpaint/outpaint) 도구 추가, 기존 생성 
     - prompt 길이 검증 (1~512자) → "invalid-parameter" 에러
     - _Requirements: 3.2, 3.4, 3.5, 3.7_
 
-  - [ ] 3.2 outpaint 모델 호출 및 폴백 체인 구현
+  - [x] 3.2 outpaint 모델 호출 및 폴백 체인 구현
     - 원본 이미지 base64 인코딩
     - Titan Image v2 OUTPAINTING taskType 요청 본문 구성
     - direction/extend_pixels를 outPaintingParams에 매핑
     - `gw.invoke_model()` 호출, 실패 시 Nova Canvas로 폴백
     - _Requirements: 3.1, 3.6_
 
-  - [ ] 3.3 outpaint 결과 저장 및 응답 구성
+  - [x] 3.3 outpaint 결과 저장 및 응답 구성
     - 성공 시 `.generated/outpaint_{timestamp}.png` 파일 저장
     - 응답 JSON: `{"path", "model", "width", "height"}` 반환 (최종 이미지 크기 포함)
     - _Requirements: 3.3_
@@ -111,8 +111,8 @@ AI 에디터의 이미지 편집(inpaint/outpaint) 도구 추가, 기존 생성 
     - **Property 3: 이미지 생성 성공 시 응답 구조 완전성**
     - **Validates: Requirements 1.3**
 
-- [ ] 6. generate_pdf 검증 및 개선
-  - [ ] 6.1 기존 _tool_generate_pdf 검증 및 개선
+- [x] 6. generate_pdf 검증 및 개선
+  - [x] 6.1 기존 _tool_generate_pdf 검증 및 개선
     - title 빈 문자열/누락 시 "title is required" 에러 추가 (Req 4.5)
     - sections 빈 배열/누락 시 "sections is required" 에러 확인 (Req 4.4)
     - Heading2 스타일 14pt 볼드, Normal 스타일 10pt 확인 (Req 4.2)
@@ -125,8 +125,8 @@ AI 에디터의 이미지 편집(inpaint/outpaint) 도구 추가, 기존 생성 
     - **Property 7: PDF 생성 라운드트립**
     - **Validates: Requirements 4.1, 4.3**
 
-- [ ] 7. generate_pptx 검증 및 개선
-  - [ ] 7.1 기존 _tool_generate_pptx 검증 및 개선
+- [x] 7. generate_pptx 검증 및 개선
+  - [x] 7.1 기존 _tool_generate_pptx 검증 및 개선
     - title 표지 슬라이드 생성 확인 (Req 5.1)
     - slideCount = len(slides) + 1 (표지 포함) 확인 (Req 5.4)
     - imagePrompt 포함 시 generate_image 호출 및 이미지 삽입 확인 (Req 5.2)
@@ -144,8 +144,8 @@ AI 에디터의 이미지 편집(inpaint/outpaint) 도구 추가, 기존 생성 
 - [ ] 8. Checkpoint — 백엔드 생성 도구 검증 완료
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 9. 채팅 인라인 이미지 렌더러 구현
-  - [ ] 9.1 renderMessages()에 이미지 경로 감지 및 썸네일 렌더링 추가
+- [x] 9. 채팅 인라인 이미지 렌더러 구현
+  - [x] 9.1 renderMessages()에 이미지 경로 감지 및 썸네일 렌더링 추가
     - `src/main.js`의 `renderMessages()` 함수 내 도구 결과 처리 부분 수정
     - `.generated/*.png` 패턴 매칭으로 이미지 경로 추출
     - 썸네일 표시: max-width 320px, max-height 240px, object-fit: contain
@@ -154,12 +154,12 @@ AI 에디터의 이미지 편집(inpaint/outpaint) 도구 추가, 기존 생성 
     - 단일/병렬/합의 모드 모두 동일 레이아웃 적용
     - _Requirements: 6.1, 6.3, 6.5, 6.6_
 
-  - [ ] 9.2 썸네일 클릭 시 에디터 영역 전체 보기 구현
+  - [x] 9.2 썸네일 클릭 시 에디터 영역 전체 보기 구현
     - 썸네일 클릭 이벤트 → 에디터 영역에 이미지 뷰어 표시
     - 뷰포트 맞춤 (max-width/height 100%, 원본 비율 유지)
     - _Requirements: 6.2_
 
-  - [ ] 9.3 이미지 로드 실패 시 에러 플레이스홀더 구현
+  - [x] 9.3 이미지 로드 실패 시 에러 플레이스홀더 구현
     - `onerror` 핸들러로 에러 감지
     - 320px × 80px 영역에 파일 경로 텍스트 표시
     - _Requirements: 6.4_
@@ -168,8 +168,8 @@ AI 에디터의 이미지 편집(inpaint/outpaint) 도구 추가, 기존 생성 
     - **Property 10: 채팅 이미지 표시 개수 제한**
     - **Validates: Requirements 6.6**
 
-- [ ] 10. `<file-preview-panel>` Web Component 구현
-  - [ ] 10.1 파일 목록 로드 및 렌더링 구현
+- [x] 10. `<file-preview-panel>` Web Component 구현
+  - [x] 10.1 파일 목록 로드 및 렌더링 구현
     - `src/components/file-preview-panel.js` 파일 생성
     - `class FilePreviewPanel extends HTMLElement` + `customElements.define('file-preview-panel', FilePreviewPanel)`
     - `.generated/` 폴더 스캔, 수정 시간 기준 최신순 정렬, 최대 100개 표시
@@ -177,20 +177,20 @@ AI 에디터의 이미지 편집(inpaint/outpaint) 도구 추가, 기존 생성 
     - 폴더 비어있거나 미존재 시 "생성된 파일이 없습니다" 메시지
     - _Requirements: 7.1, 7.2, 7.9, 7.11_
 
-  - [ ] 10.2 파일 선택 시 확장자별 뷰어 디스패치 구현
+  - [x] 10.2 파일 선택 시 확장자별 뷰어 디스패치 구현
     - 이미지(.png/.jpg/.webp) → 에디터 영역 이미지 뷰어
     - PDF(.pdf) → 에디터 영역 PDF 뷰어
     - PPTX(.pptx) → 에디터 영역 PPTX 뷰어
     - 50MB 초과 파일 → 미리보기 차단, 다운로드만 허용
     - _Requirements: 7.3, 7.4, 7.5, 7.6_
 
-  - [ ] 10.3 다운로드 버튼 및 Electron 저장 다이얼로그 구현
+  - [x] 10.3 다운로드 버튼 및 Electron 저장 다이얼로그 구현
     - 다운로드 버튼 클릭 → `window.electronAPI.showSaveDialog()` 호출
     - 사용자 선택 경로에 파일 복사
     - 실패 시 에러 메시지 표시
     - _Requirements: 7.7, 7.8_
 
-  - [ ] 10.4 파일 감시(fs.watch) 자동 갱신 구현
+  - [x] 10.4 파일 감시(fs.watch) 자동 갱신 구현
     - `window.electronAPI.watchDirectory('.generated/')` IPC 호출
     - 파일 변경 감지 시 2초 이내 `loadFileList()` 재호출
     - `disconnectedCallback()`에서 watcher 해제
@@ -204,34 +204,34 @@ AI 에디터의 이미지 편집(inpaint/outpaint) 도구 추가, 기존 생성 
     - **Property 12: 파일 목록 정렬 및 제한**
     - **Validates: Requirements 7.1**
 
-- [ ] 11. IPC 핸들러 구현 (파일 미리보기 지원)
-  - [ ] 11.1 watchDirectory IPC 핸들러 구현
+- [x] 11. IPC 핸들러 구현 (파일 미리보기 지원)
+  - [x] 11.1 watchDirectory IPC 핸들러 구현
     - `electron/src/ipc-fs-handlers.js`에 `watch-directory` 핸들러 추가
     - `fs.watch()` 기반 디렉토리 감시, 변경 시 renderer에 이벤트 전송
     - watcher 해제를 위한 `unwatch-directory` 핸들러 추가
     - _Requirements: 7.10_
 
-  - [ ] 11.2 showSaveDialog IPC 핸들러 구현
+  - [x] 11.2 showSaveDialog IPC 핸들러 구현
     - `electron/src/ipc-fs-handlers.js`에 `show-save-dialog` 핸들러 추가
     - `dialog.showSaveDialog()` 호출 후 선택 경로에 파일 복사
     - 실패 시 에러 객체 반환
     - _Requirements: 7.7, 7.8_
 
-  - [ ] 11.3 preload.js에 새 IPC 메서드 노출
+  - [x] 11.3 preload.js에 새 IPC 메서드 노출
     - `electron/preload.js`의 `contextBridge.exposeInMainWorld`에 추가:
       - `watchDirectory(path)` → `ipcRenderer.invoke('watch-directory', path)`
       - `unwatchDirectory(path)` → `ipcRenderer.invoke('unwatch-directory', path)`
       - `showSaveDialog(options)` → `ipcRenderer.invoke('show-save-dialog', options)`
     - _Requirements: 7.7, 7.10_
 
-- [ ] 12. 통합 및 연결
-  - [ ] 12.1 file-preview-panel을 사이드바/에디터 영역에 배치
+- [x] 12. 통합 및 연결
+  - [x] 12.1 file-preview-panel을 사이드바/에디터 영역에 배치
     - `src/index.html`에 `<file-preview-panel>` 태그 추가
     - `src/main.js`에서 컴포넌트 import 및 초기화
     - 사이드바 메뉴에 "생성 파일" 탭 추가
     - _Requirements: 7.11_
 
-  - [ ] 12.2 채팅 이미지 클릭 → file-preview-panel 연동
+  - [x] 12.2 채팅 이미지 클릭 → file-preview-panel 연동
     - 썸네일 클릭 시 file-preview-panel의 해당 파일 선택 상태 동기화
     - CustomEvent 기반 컴포넌트 간 통신
     - _Requirements: 6.2, 7.3_

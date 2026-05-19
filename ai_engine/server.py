@@ -440,7 +440,14 @@ async def _tool_generate_image(tool_input: dict, project_path: str, aws_profile:
 
     # Req 1.2: cap final error detail at 200 chars total
     detail = (last_error or "all image models failed")[:200]
-    return json.dumps({"error": "model-unavailable", "detail": detail})
+    # [hint-image-route] 게이트웨이 라우트/IAM 차단 시 사용자에게 명확한 안내 제공
+    hint = ""
+    if any(t in detail for t in ("execute-api:Invoke", "principal identity", "HTTP 403", "HTTP 404")):
+        hint = "현재 게이트웨이가 이미지 생성 라우트(/invoke-model)를 지원하지 않습니다. 관리자에게 활성화를 요청하세요."
+    payload = {"error": "model-unavailable", "detail": detail}
+    if hint:
+        payload["hint"] = hint
+    return json.dumps(payload)
 
 
 async def _tool_generate_pdf(tool_input: dict, project_path: str) -> str:
@@ -449,9 +456,9 @@ async def _tool_generate_pdf(tool_input: dict, project_path: str) -> str:
     sections = tool_input.get("sections")
 
     if not title:
-        return json.dumps({"error": "invalid-parameter", "detail": "title is required"})
+        return json.dumps({"error": "title is required"})
     if not sections or not isinstance(sections, list):
-        return json.dumps({"error": "invalid-parameter", "detail": "sections is required (non-empty array)"})
+        return json.dumps({"error": "sections is required"})
 
     try:
         from reportlab.lib.pagesizes import A4
@@ -516,9 +523,9 @@ async def _tool_generate_pptx(tool_input: dict, project_path: str, aws_profile: 
     slides_data = tool_input.get("slides")
 
     if not title:
-        return json.dumps({"error": "invalid-parameter", "detail": "title is required"})
+        return json.dumps({"error": "title is required"})
     if not slides_data or not isinstance(slides_data, list):
-        return json.dumps({"error": "invalid-parameter", "detail": "slides is required (non-empty array)"})
+        return json.dumps({"error": "slides is required"})
 
     try:
         from pptx import Presentation
@@ -756,7 +763,12 @@ async def _tool_edit_image(tool_input: dict, project_path: str, aws_profile: str
                 last_error = f"{model_id}: {str(e)[:200]}"
                 continue
 
-        return json.dumps({"error": "model-unavailable", "detail": last_error or "all inpaint models failed"})
+        # [hint-image-route]
+        _det = (last_error or "all inpaint models failed")[:200]
+        _payload = {"error": "model-unavailable", "detail": _det}
+        if any(t in _det for t in ("execute-api:Invoke", "principal identity", "HTTP 403", "HTTP 404")):
+            _payload["hint"] = "현재 게이트웨이가 이미지 편집(inpaint) 라우트(/invoke-model)를 지원하지 않습니다. 관리자에게 활성화를 요청하세요."
+        return json.dumps(_payload)
 
     # outpaint mode
     # Req 3.5: enforce 4096px max on the longer original edge
@@ -869,7 +881,12 @@ async def _tool_edit_image(tool_input: dict, project_path: str, aws_profile: str
             last_error = f"{model_id}: {str(e)[:200]}"
             continue
 
-    return json.dumps({"error": "model-unavailable", "detail": last_error or "all outpaint models failed"})
+    # [hint-image-route]
+    _det = (last_error or "all outpaint models failed")[:200]
+    _payload = {"error": "model-unavailable", "detail": _det}
+    if any(t in _det for t in ("execute-api:Invoke", "principal identity", "HTTP 403", "HTTP 404")):
+        _payload["hint"] = "현재 게이트웨이가 이미지 편집(outpaint) 라우트(/invoke-model)를 지원하지 않습니다. 관리자에게 활성화를 요청하세요."
+    return json.dumps(_payload)
 
 
 
