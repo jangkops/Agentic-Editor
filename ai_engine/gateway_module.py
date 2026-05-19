@@ -107,7 +107,7 @@ class GatewayClient:
         Returns:
             dict: {"images": [...]} 성공 시, {"error": "..."} 실패 시
         """
-        url = f"{self.gateway_url}/invoke-model"
+        url = f"{self.gateway_url}/invoke"
         payload = {"modelId": model_id, "body": body}
         body_bytes = json.dumps(payload).encode()
 
