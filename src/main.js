@@ -2806,88 +2806,211 @@ function renderToolSummary(c, toolUses) {
     }
 
     // === Media generation result: inline preview + download ===
-    // If the tool output is JSON with a .generated/... path, show a card.
+    // 도구 결과 JSON에서 .generated/* 경로를 감지하여 미디어 카드를 렌더한다.
+    // - 이미지(.png/.jpg/.webp/.gif): 갤러리 형태 썸네일 (max 320×240, contain)
+    //   · 단일 도구 결과에 N>4개 이미지가 있으면 4개만 표시 + "+N개 더보기" 링크
+    //   · 썸네일 아래 한 줄 메타: "model · W×H px"
+    //   · 단일/병렬/합의 모드 모두 동일 (renderToolSummary가 공통 진입점)
+    // - PDF/PPTX: 단일 카드(아이콘 + 메타 + 미리보기/다운로드 버튼) — 기존 동작 유지
     if (t.name && /^(generate_image|generate_pdf|generate_pptx|edit_image)$/.test(t.name) && outputTxt) {
       try {
         const parsed = JSON.parse(outputTxt);
-        if (parsed && parsed.path && typeof parsed.path === 'string' && parsed.path.startsWith('.generated/')) {
-          const card = document.createElement('div');
-          card.className = 'tool-media-card';
-          card.style.cssText = 'margin:6px 0 10px 24px;padding:10px;background:var(--color-bg-tertiary,#2d2d30);border:1px solid var(--color-border,#3c3c3c);border-radius:6px;display:flex;gap:12px;align-items:flex-start;';
-          const ext = (parsed.path.split('.').pop() || '').toLowerCase();
-          const isImage = ['png','jpg','jpeg','webp','gif'].includes(ext);
-          const fileName = parsed.path.split('/').pop();
-          const sizeKb = parsed.sizeBytes ? `${(parsed.sizeBytes/1024).toFixed(1)} KB` : '';
-          const dims = (parsed.width && parsed.height) ? ` · ${parsed.width}×${parsed.height}` : '';
-          const pages = parsed.pageCount ? ` · ${parsed.pageCount}페이지` : (parsed.slideCount ? ` · ${parsed.slideCount}슬라이드` : '');
+        // 다중 이미지 표현을 허용: parsed.images = [{path, model, width, height}, ...]
+        // 또는 단일 이미지 표현: parsed.path + parsed.model + parsed.width/height
+        const items = [];
+        if (Array.isArray(parsed?.images)) {
+          for (const it of parsed.images) {
+            if (it && typeof it.path === 'string' && it.path.startsWith('.generated/')) items.push(it);
+          }
+        }
+        if (parsed && typeof parsed.path === 'string' && parsed.path.startsWith('.generated/')) {
+          items.push(parsed);
+        }
 
-          card.innerHTML = `
-            <div class="tmc-thumb" style="flex-shrink:0;width:96px;height:96px;background:#1e1e1e;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:36px;overflow:hidden;cursor:pointer;">
-              ${isImage ? '<span class="tmc-img-placeholder">🖼</span>' : (ext==='pdf'?'📄':ext==='pptx'?'📊':'📎')}
-            </div>
-            <div style="flex:1;min-width:0;">
-              <div style="font-weight:600;font-size:13px;margin-bottom:4px;color:var(--color-text-primary,#ccc);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(fileName)}">${esc(fileName)}</div>
-              <div style="font-size:11px;color:var(--color-text-secondary,#9d9d9d);margin-bottom:8px;">${parsed.model ? esc(parsed.model) + ' · ' : ''}${sizeKb}${dims}${pages}</div>
-              <div style="display:flex;gap:6px;">
-                <button class="tmc-preview" type="button" style="background:var(--color-accent,#007acc);color:#fff;border:none;padding:5px 12px;border-radius:3px;font-size:11px;cursor:pointer;">미리보기</button>
-                <button class="tmc-download" type="button" style="background:transparent;color:var(--color-text-secondary,#9d9d9d);border:1px solid var(--color-border,#3c3c3c);padding:5px 12px;border-radius:3px;font-size:11px;cursor:pointer;">다운로드</button>
-              </div>
-            </div>
-          `;
+        if (items.length) {
+          // 이미지 항목과 비-이미지 항목 분리
+          const isImg = (p) => /\.(png|jpg|jpeg|webp|gif)$/i.test(p || '');
+          const imgItems = items.filter(it => isImg(it.path));
+          const docItems = items.filter(it => !isImg(it.path));
 
-          // Resolve full path: state.folderPath/.generated/... if exists,
-          // or fall back to cwd-side path (Python server stores to local cwd).
-          const resolveFullPath = async () => {
-            // Try project_path first
-            if (state.folderPath) {
-              const p1 = `${state.folderPath.replace(/\/$/, '')}/${parsed.path}`;
-              return p1;
-            }
-            return parsed.path;
+          const resolveFullPath = (relPath) => {
+            if (state.folderPath) return `${state.folderPath.replace(/\/$/, '')}/${relPath}`;
+            return relPath;
           };
 
-          // For image: load thumbnail asynchronously
-          if (isImage) {
-            (async () => {
-              const fp = await resolveFullPath();
-              try {
-                const b64 = await window.electronAPI.readFileBase64(fp);
-                if (b64) {
-                  const mime = ext === 'jpg' ? 'jpeg' : ext;
-                  const thumb = card.querySelector('.tmc-thumb');
-                  if (thumb) thumb.innerHTML = `<img src="data:image/${mime};base64,${b64}" style="width:100%;height:100%;object-fit:cover;" alt="${esc(fileName)}" />`;
+          // ── 이미지 갤러리 (최대 4개) ─────────────────────────────
+          if (imgItems.length) {
+            const MAX_DISPLAY = 4;
+            const displayed = imgItems.slice(0, MAX_DISPLAY);
+            const overflow = imgItems.length - MAX_DISPLAY;
+
+            const gallery = document.createElement('div');
+            gallery.className = 'tool-images';
+            gallery.style.cssText = 'margin:6px 0 10px 24px;display:flex;flex-wrap:wrap;gap:10px;align-items:flex-start;';
+
+            for (const it of displayed) {
+              const ext = (it.path.split('.').pop() || '').toLowerCase();
+              const fileName = it.path.split('/').pop();
+              const dims = (it.width && it.height) ? `${it.width}×${it.height} px` : '';
+              const metaParts = [];
+              if (it.model) metaParts.push(esc(it.model));
+              if (dims) metaParts.push(dims);
+              const metaLine = metaParts.join(' · ');
+
+              const thumb = document.createElement('div');
+              thumb.className = 'tool-image-thumb';
+              thumb.dataset.path = it.path;
+              thumb.style.cssText = 'display:flex;flex-direction:column;gap:4px;cursor:pointer;';
+              thumb.innerHTML = `
+                <div class="tit-frame" style="width:320px;max-width:320px;height:240px;max-height:240px;background:var(--color-bg-tertiary,#2d2d30);border:1px solid var(--color-border,#3c3c3c);border-radius:4px;display:flex;align-items:center;justify-content:center;overflow:hidden;transition:border-color 150ms ease;">
+                  <span class="tit-loading" style="color:var(--color-text-muted,#6a6a6a);font-size:11px;">로딩 중…</span>
+                </div>
+                <div class="tit-meta" style="max-width:320px;font-size:11px;color:var(--color-text-secondary,#9d9d9d);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(fileName)} — ${esc(metaLine)}">${metaLine || esc(fileName)}</div>
+              `;
+
+              // 비동기 base64 로드 → <img>로 교체 (object-fit: contain)
+              (async () => {
+                const fp = resolveFullPath(it.path);
+                try {
+                  const b64 = await window.electronAPI.readFileBase64(fp);
+                  const frame = thumb.querySelector('.tit-frame');
+                  if (!frame) return;
+                  if (b64) {
+                    const mime = ext === 'jpg' ? 'jpeg' : ext;
+                    frame.innerHTML = `<img src="data:image/${mime};base64,${b64}" alt="${esc(fileName)}" style="max-width:320px;max-height:240px;width:100%;height:100%;object-fit:contain;display:block;" />`;
+                  } else {
+                    // 파일 미존재 또는 읽기 실패 → 에러 플레이스홀더 (320×80)
+                    frame.style.height = '80px';
+                    frame.style.maxHeight = '80px';
+                    frame.style.borderColor = 'var(--color-error,#f44747)';
+                    frame.innerHTML = `<div style="padding:8px;font-size:11px;color:var(--color-error,#f44747);text-align:center;word-break:break-all;">이미지 로드 실패<br><span style="color:var(--color-text-muted,#6a6a6a);font-size:10px;">${esc(it.path)}</span></div>`;
+                  }
+                } catch (err) {
+                  const frame = thumb.querySelector('.tit-frame');
+                  if (frame) {
+                    frame.style.height = '80px';
+                    frame.style.maxHeight = '80px';
+                    frame.style.borderColor = 'var(--color-error,#f44747)';
+                    frame.innerHTML = `<div style="padding:8px;font-size:11px;color:var(--color-error,#f44747);text-align:center;word-break:break-all;">이미지 로드 실패<br><span style="color:var(--color-text-muted,#6a6a6a);font-size:10px;">${esc(it.path)}</span></div>`;
+                  }
                 }
-              } catch {}
-            })();
+              })();
+
+              // 썸네일 클릭 → 에디터 영역에서 전체 보기 + file-preview-panel 선택 동기화 (12.2)
+              thumb.addEventListener('click', (ev) => {
+                ev.stopPropagation();
+                const fp = resolveFullPath(it.path);
+                if (typeof openMediaPreview === 'function') openMediaPreview(fp, fileName);
+                // file-preview-panel과 동기화 — 패널이 열려 있으면 해당 항목 활성화
+                document.dispatchEvent(new CustomEvent('preview-panel:select', {
+                  detail: { path: it.path, fullPath: fp, name: fileName },
+                  bubbles: true,
+                }));
+              });
+
+              // 호버 시 우상단 다운로드 버튼 표시 (사용자 query 2 — 채팅 즉시 다운로드)
+              const dlBtn = document.createElement('button');
+              dlBtn.type = 'button';
+              dlBtn.title = '다운로드';
+              dlBtn.textContent = '↓';
+              dlBtn.className = 'tit-download';
+              dlBtn.style.cssText = 'position:absolute;top:6px;right:6px;width:24px;height:24px;border-radius:50%;border:1px solid var(--color-border,#3c3c3c);background:rgba(0,0,0,0.6);color:#fff;font-size:13px;line-height:1;cursor:pointer;display:none;align-items:center;justify-content:center;backdrop-filter:blur(4px);';
+              const frameForBtn = thumb.querySelector('.tit-frame');
+              if (frameForBtn) {
+                frameForBtn.style.position = 'relative';
+                frameForBtn.appendChild(dlBtn);
+              }
+              thumb.addEventListener('mouseenter', () => { dlBtn.style.display = 'flex'; });
+              thumb.addEventListener('mouseleave', () => { dlBtn.style.display = 'none'; });
+              dlBtn.addEventListener('click', async (ev) => {
+                ev.stopPropagation();
+                ev.preventDefault();
+                const fp = resolveFullPath(it.path);
+                try {
+                  const r = await window.electronAPI.showSaveDialog({
+                    defaultPath: fileName,
+                    sourcePath: fp,
+                    filters: [{ name: ext.toUpperCase(), extensions: [ext] }],
+                  });
+                  if (r && r.ok && typeof addLiveLog === 'function') addLiveLog('system', `다운로드 완료: ${r.path}`);
+                } catch (err) {
+                  console.error('[tool-image-thumb] download failed', err);
+                }
+              });
+
+              gallery.appendChild(thumb);
+            }
+
+            if (overflow > 0) {
+              const more = document.createElement('a');
+              more.href = '#';
+              more.className = 'tool-images-more';
+              more.textContent = `+${overflow}개 더보기`;
+              more.style.cssText = 'align-self:center;padding:8px 12px;color:var(--color-accent,#007acc);font-size:12px;text-decoration:none;border:1px dashed var(--color-border,#3c3c3c);border-radius:4px;cursor:pointer;';
+              more.addEventListener('click', (ev) => {
+                ev.preventDefault();
+                ev.stopPropagation();
+                // 12.x에서 file-preview-panel과 연동할 예정 — 현재는 첫 초과 항목으로 점프
+                const first = imgItems[MAX_DISPLAY];
+                if (first && typeof openMediaPreview === 'function') {
+                  openMediaPreview(resolveFullPath(first.path), first.path.split('/').pop());
+                }
+              });
+              gallery.appendChild(more);
+            }
+
+            toolLine.appendChild(gallery);
           }
 
-          card.querySelector('.tmc-preview').addEventListener('click', async (ev) => {
-            ev.stopPropagation();
-            const fp = await resolveFullPath();
-            if (typeof openMediaPreview === 'function') openMediaPreview(fp, fileName);
-          });
-          card.querySelector('.tmc-thumb').addEventListener('click', async (ev) => {
-            ev.stopPropagation();
-            const fp = await resolveFullPath();
-            if (typeof openMediaPreview === 'function') openMediaPreview(fp, fileName);
-          });
-          card.querySelector('.tmc-download').addEventListener('click', async (ev) => {
-            ev.stopPropagation();
-            const fp = await resolveFullPath();
-            try {
-              const r = await window.electronAPI.showSaveDialog({
-                defaultPath: fileName,
-                sourcePath: fp,
-                filters: [{ name: ext.toUpperCase(), extensions: [ext] }],
-              });
-              if (r && r.ok) addLiveLog && addLiveLog('system', `다운로드 완료: ${r.path}`);
-            } catch (e) {
-              console.error('[tool-media-card] download failed', e);
-            }
-          });
-
-          // Insert after toolLine (sibling)
-          toolLine.appendChild(card);
+          // ── 비-이미지 (PDF/PPTX) 단일 카드 ─────────────────────────
+          for (const it of docItems) {
+            const ext = (it.path.split('.').pop() || '').toLowerCase();
+            const fileName = it.path.split('/').pop();
+            const sizeKb = it.sizeBytes ? `${(it.sizeBytes/1024).toFixed(1)} KB` : '';
+            const pages = it.pageCount ? ` · ${it.pageCount}페이지` : (it.slideCount ? ` · ${it.slideCount}슬라이드` : '');
+            const card = document.createElement('div');
+            card.className = 'tool-media-card';
+            card.style.cssText = 'margin:6px 0 10px 24px;padding:10px;background:var(--color-bg-tertiary,#2d2d30);border:1px solid var(--color-border,#3c3c3c);border-radius:6px;display:flex;gap:12px;align-items:flex-start;';
+            card.innerHTML = `
+              <div class="tmc-thumb" style="flex-shrink:0;width:96px;height:96px;background:var(--color-bg-primary,#1e1e1e);border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:36px;overflow:hidden;cursor:pointer;">
+                ${ext==='pdf'?'📄':ext==='pptx'?'📊':'📎'}
+              </div>
+              <div style="flex:1;min-width:0;">
+                <div style="font-weight:600;font-size:13px;margin-bottom:4px;color:var(--color-text-primary,#ccc);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(fileName)}">${esc(fileName)}</div>
+                <div style="font-size:11px;color:var(--color-text-secondary,#9d9d9d);margin-bottom:8px;">${it.model ? esc(it.model) + ' · ' : ''}${sizeKb}${pages}</div>
+                <div style="display:flex;gap:6px;">
+                  <button class="tmc-preview" type="button" style="background:var(--color-accent,#007acc);color:#fff;border:none;padding:5px 12px;border-radius:3px;font-size:11px;cursor:pointer;">미리보기</button>
+                  <button class="tmc-download" type="button" style="background:transparent;color:var(--color-text-secondary,#9d9d9d);border:1px solid var(--color-border,#3c3c3c);padding:5px 12px;border-radius:3px;font-size:11px;cursor:pointer;">다운로드</button>
+                </div>
+              </div>
+            `;
+            const open = (ev) => {
+              ev.stopPropagation();
+              const fp = resolveFullPath(it.path);
+              if (typeof openMediaPreview === 'function') openMediaPreview(fp, fileName);
+              document.dispatchEvent(new CustomEvent('preview-panel:select', {
+                detail: { path: it.path, fullPath: fp, name: fileName },
+                bubbles: true,
+              }));
+            };
+            card.querySelector('.tmc-preview').addEventListener('click', open);
+            card.querySelector('.tmc-thumb').addEventListener('click', open);
+            card.querySelector('.tmc-download').addEventListener('click', async (ev) => {
+              ev.stopPropagation();
+              const fp = resolveFullPath(it.path);
+              try {
+                const r = await window.electronAPI.showSaveDialog({
+                  defaultPath: fileName,
+                  sourcePath: fp,
+                  filters: [{ name: ext.toUpperCase(), extensions: [ext] }],
+                });
+                if (r && r.ok) addLiveLog && addLiveLog('system', `다운로드 완료: ${r.path}`);
+              } catch (e) {
+                console.error('[tool-media-card] download failed', e);
+              }
+            });
+            toolLine.appendChild(card);
+          }
         }
       } catch { /* not JSON, skip */ }
     }

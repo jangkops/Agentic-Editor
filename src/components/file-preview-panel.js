@@ -41,13 +41,43 @@ class FilePreviewPanel extends HTMLElement {
     this._render();
     this._refresh();
     this._setupWatcher();
+    // 12.2: 채팅 썸네일 클릭 시 file-preview-panel의 항목 선택 상태 동기화
+    this._onSelect = (e) => {
+      const detail = e?.detail || {};
+      const target = detail.path || detail.fullPath || detail.name;
+      if (!target) return;
+      this._highlightItem(target);
+    };
+    document.addEventListener('preview-panel:select', this._onSelect);
   }
 
   disconnectedCallback() {
     if (this._unsub) try { this._unsub(); } catch {}
+    if (this._onSelect) {
+      document.removeEventListener('preview-panel:select', this._onSelect);
+      this._onSelect = null;
+    }
     if (this._watchedDir && window.electronAPI && typeof window.electronAPI.unwatchDirectory === 'function') {
       try { window.electronAPI.unwatchDirectory(this._watchedDir); } catch {}
     }
+  }
+
+  _highlightItem(target) {
+    // target 은 .generated/ 상대 경로, 절대 경로, 또는 파일명일 수 있음
+    const norm = (s) => (s || '').toLowerCase().replace(/\\/g, '/');
+    const t = norm(target);
+    const list = this.querySelector('.fpp-list');
+    if (!list) return;
+    const rows = list.querySelectorAll('.fpp-item');
+    rows.forEach((row) => {
+      const rp = norm(row.dataset.path || '');
+      const rn = norm(row.dataset.name || '');
+      const match = rp === t || rp.endsWith(t) || rn === t.split('/').pop();
+      row.classList.toggle('fpp-item-active', match);
+      if (match) {
+        try { row.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); } catch {}
+      }
+    });
   }
 
   set projectPath(p) {
@@ -192,6 +222,8 @@ class FilePreviewPanel extends HTMLElement {
           border-bottom: 1px solid rgba(60,60,60,0.3);
         }
         .fpp-item:hover { background: var(--color-bg-hover, #2a2d2e); }
+        .fpp-item-active { background: rgba(0,122,204,0.18); border-left: 2px solid var(--color-accent, #007acc); }
+        .fpp-item-active:hover { background: rgba(0,122,204,0.24); }
         .fpp-icon { font-size: 18px; flex-shrink: 0; }
         .fpp-info { flex: 1; min-width: 0; }
         .fpp-name { font-size: 12px; color: var(--color-text-primary, #ccc); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -221,7 +253,7 @@ class FilePreviewPanel extends HTMLElement {
       return;
     }
     list.innerHTML = this._items.map((item, idx) => `
-      <div class="fpp-item" data-idx="${idx}">
+      <div class="fpp-item" data-idx="${idx}" data-path="${this._escape(item.path || item.name)}" data-name="${this._escape(item.name)}">
         <div class="fpp-icon">${this._iconFor(item.name)}</div>
         <div class="fpp-info">
           <div class="fpp-name" title="${item.name}">${this._escape(item.name)}</div>

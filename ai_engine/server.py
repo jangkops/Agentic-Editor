@@ -311,8 +311,10 @@ def _format_bridge_result(tool_name, br):
 
 # Image generation model fallback chain
 IMAGE_MODELS = [
+    "stability.stable-image-ultra-v1:1",
     "stability.sd3-5-large-v1:0",
     "stability.stable-image-core-v1:1",
+    "amazon.nova-canvas-v1:0",
     "amazon.titan-image-generator-v2:0",
 ]
 IMAGE_EDIT_MODELS = [
@@ -321,7 +323,7 @@ IMAGE_EDIT_MODELS = [
 ]
 
 
-async def _tool_generate_image(tool_input: dict, project_path: str) -> str:
+async def _tool_generate_image(tool_input: dict, project_path: str, aws_profile: str = '', bedrock_user: str = '') -> str:  # [patched-credentials]
     """Generate an image via Bedrock image models with fallback chain.
 
     Returns JSON string: {path, model, width, height} on success,
@@ -355,8 +357,9 @@ async def _tool_generate_image(tool_input: dict, project_path: str) -> str:
     output_path = os.path.join(gen_dir, filename)
     relative_path = f".generated/{filename}"
 
-    aws_profile = os.environ.get("AWS_PROFILE", "bedrock-gw")
-    bedrock_user = os.environ.get("BEDROCK_USER", "")
+    # [patched-credentials] honor explicit kw-args, fall back to env
+    aws_profile = aws_profile or os.environ.get("AWS_PROFILE", "bedrock-gw")
+    bedrock_user = bedrock_user or os.environ.get("BEDROCK_USER", "")
     gw = _get_gw(aws_profile, bedrock_user)
 
     last_error = ""
@@ -384,7 +387,8 @@ async def _tool_generate_image(tool_input: dict, project_path: str) -> str:
             else:
                 body = {"prompt": prompt, "width": w, "height": h}
 
-            result = await gw.invoke_model(model_id, body, timeout=60)
+            callable_id = _resolve_callable_model_id(model_id, aws_profile, bedrock_user)
+            result = await gw.invoke_model(callable_id, body, timeout=60)
 
             if "error" in result:
                 last_error = f"{model_id}: {result['error'][:200]}"
@@ -424,6 +428,7 @@ async def _tool_generate_image(tool_input: dict, project_path: str) -> str:
             return json.dumps({
                 "path": relative_path,
                 "model": model_id,
+                "size": f"{w}x{h}",
                 "width": aw,
                 "height": ah,
                 "sizeBytes": len(img_bytes),
@@ -433,7 +438,9 @@ async def _tool_generate_image(tool_input: dict, project_path: str) -> str:
             last_error = f"{model_id}: {str(e)[:200]}"
             continue
 
-    return json.dumps({"error": "model-unavailable", "detail": last_error or "all image models failed"})
+    # Req 1.2: cap final error detail at 200 chars total
+    detail = (last_error or "all image models failed")[:200]
+    return json.dumps({"error": "model-unavailable", "detail": detail})
 
 
 async def _tool_generate_pdf(tool_input: dict, project_path: str) -> str:
@@ -469,6 +476,11 @@ async def _tool_generate_pdf(tool_input: dict, project_path: str) -> str:
     try:
         doc = SimpleDocTemplate(output_path, pagesize=A4)
         styles = getSampleStyleSheet()
+        # Req 4.2: enforce Heading2 = 14pt bold, Normal = 10pt explicitly so
+        # the contract holds regardless of reportlab version defaults.
+        styles["Heading2"].fontName = "Helvetica-Bold"
+        styles["Heading2"].fontSize = 14
+        styles["Normal"].fontSize = 10
         story = [Paragraph(title, styles["Title"]), Spacer(1, 1 * cm)]
 
         for sec in sections:
@@ -485,16 +497,20 @@ async def _tool_generate_pdf(tool_input: dict, project_path: str) -> str:
 
         doc.build(story)
         size_bytes = os.path.getsize(output_path)
+        # Req 4.3: prefer reportlab's actual page counter; fall back to
+        # section count if the attribute is unavailable.
+        page_count = getattr(doc, "page", 0) or len(sections)
         return json.dumps({
             "path": relative_path,
-            "pageCount": len(sections),
+            "pageCount": page_count,
             "sizeBytes": size_bytes,
+            "fileSize": size_bytes,
         })
     except Exception as e:
         return json.dumps({"error": "pdf-generation-failed", "detail": str(e)[:200]})
 
 
-async def _tool_generate_pptx(tool_input: dict, project_path: str) -> str:
+async def _tool_generate_pptx(tool_input: dict, project_path: str, aws_profile: str = '', bedrock_user: str = '') -> str:  # [patched-credentials]
     """Generate a PowerPoint presentation using python-pptx."""
     title = (tool_input.get("title") or "").strip()
     slides_data = tool_input.get("slides")
@@ -562,10 +578,8 @@ async def _tool_generate_pptx(tool_input: dict, project_path: str) -> str:
             img_prompt = sd.get("imagePrompt", "")
             if img_prompt:
                 try:
-                    img_result_str = await _tool_generate_image(
-                        {"prompt": img_prompt, "size": "1024x1024"},
-                        project_path,
-                    )
+                    img_result_str = await _tool_generate_image({"prompt": img_prompt, "size": "1024x1024"},
+                        project_path, aws_profile=aws_profile, bedrock_user=bedrock_user)  # [patched-credentials]
                     img_result = json.loads(img_result_str)
                     if "path" in img_result:
                         img_path = os.path.join(project_path, img_result["path"]) if project_path else img_result["path"]
@@ -589,7 +603,7 @@ async def _tool_generate_pptx(tool_input: dict, project_path: str) -> str:
         return json.dumps({"error": "pptx-generation-failed", "detail": str(e)[:200]})
 
 
-async def _tool_edit_image(tool_input: dict, project_path: str) -> str:
+async def _tool_edit_image(tool_input: dict, project_path: str, aws_profile: str = '', bedrock_user: str = '') -> str:  # [patched-credentials]
     """Edit an image using inpaint or outpaint."""
     import time as _t, base64
     mode = tool_input.get("mode", "")
@@ -614,6 +628,8 @@ async def _tool_edit_image(tool_input: dict, project_path: str) -> str:
         return json.dumps({"error": "file-not-found", "detail": f"image not found: {image_path}"})
 
     # Validate format and size
+    # Req 3.5: outpaint surfaces "invalid-input"; inpaint (Req 2.9) keeps "invalid-image"
+    _fmt_err = "invalid-input" if mode == "outpaint" else "invalid-image"
     try:
         with open(full_path, "rb") as f:
             magic = f.read(8)
@@ -624,21 +640,26 @@ async def _tool_edit_image(tool_input: dict, project_path: str) -> str:
         elif magic[:4] == b"RIFF":
             fmt = "webp"
         else:
-            return json.dumps({"error": "invalid-image", "detail": "unsupported format (PNG/JPEG/WEBP only)"})
+            return json.dumps({"error": _fmt_err, "detail": "unsupported format (PNG/JPEG/WEBP only)"})
     except Exception as e:
-        return json.dumps({"error": "invalid-image", "detail": str(e)[:200]})
+        return json.dumps({"error": _fmt_err, "detail": str(e)[:200]})
 
     file_size = os.path.getsize(full_path)
     if file_size > 5 * 1024 * 1024:
         return json.dumps({"error": "invalid-image", "detail": "image exceeds 5MB"})
+
+    # Req 2.9: inpaint allows only PNG/JPEG (outpaint additionally accepts WEBP per Req 3.5)
+    if mode == "inpaint" and fmt == "webp":
+        return json.dumps({"error": "invalid-image", "detail": "inpaint requires PNG or JPEG"})
 
     # Encode image
     with open(full_path, "rb") as f:
         img_b64 = base64.b64encode(f.read()).decode("ascii")
 
     # Build request body per mode
-    aws_profile = os.environ.get("AWS_PROFILE", "bedrock-gw")
-    bedrock_user = os.environ.get("BEDROCK_USER", "")
+    # [patched-credentials] honor explicit kw-args, fall back to env
+    aws_profile = aws_profile or os.environ.get("AWS_PROFILE", "bedrock-gw")
+    bedrock_user = bedrock_user or os.environ.get("BEDROCK_USER", "")
     gw = _get_gw(aws_profile, bedrock_user)
 
     last_error = ""
@@ -653,6 +674,22 @@ async def _tool_edit_image(tool_input: dict, project_path: str) -> str:
             mask_full = mask_path
         if not os.path.isfile(mask_full):
             return json.dumps({"error": "mask-not-found", "detail": f"mask not found: {mask_path}"})
+
+        # Req 2.8: mask dimensions must match the original image
+        try:
+            from PIL import Image as _PIL_dim
+            with _PIL_dim.open(full_path) as _img_orig:
+                _orig_size = _img_orig.size
+            with _PIL_dim.open(mask_full) as _img_mask:
+                _mask_size = _img_mask.size
+        except Exception as _e:
+            return json.dumps({"error": "invalid-image", "detail": f"failed to read image dimensions: {str(_e)[:160]}"})
+        if _orig_size != _mask_size:
+            return json.dumps({
+                "error": "mask-dimension-mismatch",
+                "detail": f"mask {_mask_size[0]}x{_mask_size[1]} does not match image {_orig_size[0]}x{_orig_size[1]}"
+            })
+
         with open(mask_full, "rb") as f:
             mask_b64 = base64.b64encode(f.read()).decode("ascii")
 
@@ -678,7 +715,8 @@ async def _tool_edit_image(tool_input: dict, project_path: str) -> str:
                         },
                         "imageGenerationConfig": {"numberOfImages": 1},
                     }
-                result = await gw.invoke_model(model_id, body, timeout=60)
+                callable_id = _resolve_callable_model_id(model_id, aws_profile, bedrock_user)
+                result = await gw.invoke_model(callable_id, body, timeout=60)
                 if "error" in result:
                     last_error = f"{model_id}: {result['error'][:200]}"
                     continue
@@ -721,14 +759,52 @@ async def _tool_edit_image(tool_input: dict, project_path: str) -> str:
         return json.dumps({"error": "model-unavailable", "detail": last_error or "all inpaint models failed"})
 
     # outpaint mode
-    direction = tool_input.get("direction", ["right"])
-    extend_pixels = int(tool_input.get("extend_pixels", 256))
-    if not isinstance(direction, list) or not direction:
-        direction = ["right"]
-    valid_dirs = {"left", "right", "top", "bottom"}
-    direction = [d for d in direction if d in valid_dirs][:4]
-    if not direction:
-        return json.dumps({"error": "invalid-parameter", "detail": "direction must include left/right/top/bottom"})
+    # Req 3.5: enforce 4096px max on the longer original edge
+    try:
+        from PIL import Image as _PIL_dim_op
+        with _PIL_dim_op.open(full_path) as _src_img:
+            _src_w, _src_h = _src_img.size
+    except Exception as _e:
+        return json.dumps({"error": "invalid-input", "detail": f"failed to read image dimensions: {str(_e)[:160]}"})
+    if max(_src_w, _src_h) > 4096:
+        return json.dumps({
+            "error": "invalid-input",
+            "detail": f"image dimension exceeds 4096px (got {_src_w}x{_src_h})",
+        })
+
+    # Req 3.7: direction is required, must be a list of 1..4 entries from the allowed set.
+    # AGENT_TOOLS schema exposes "up"/"down" while spec uses "top"/"bottom"; accept both
+    # and normalize to {left, right, top, bottom}.
+    raw_direction = tool_input.get("direction", ["right"])
+    if not isinstance(raw_direction, list) or not (1 <= len(raw_direction) <= 4):
+        return json.dumps({
+            "error": "invalid-parameter",
+            "detail": "direction must be a list of 1-4 values (left/right/top/bottom)",
+        })
+    _dir_alias = {"up": "top", "down": "bottom", "top": "top", "bottom": "bottom",
+                  "left": "left", "right": "right"}
+    normalized = []
+    seen = set()
+    for d in raw_direction:
+        if not isinstance(d, str) or d not in _dir_alias:
+            return json.dumps({
+                "error": "invalid-parameter",
+                "detail": f"invalid direction value: {d!r} (allowed: left/right/top/bottom)",
+            })
+        nd = _dir_alias[d]
+        if nd not in seen:
+            seen.add(nd)
+            normalized.append(nd)
+    direction = normalized
+
+    # Req 3.7: extend_pixels must be an integer in [1, 1024]
+    raw_extend = tool_input.get("extend_pixels", 256)
+    if isinstance(raw_extend, bool) or not isinstance(raw_extend, int):
+        return json.dumps({
+            "error": "invalid-parameter",
+            "detail": "extend_pixels must be an integer in 1-1024",
+        })
+    extend_pixels = raw_extend
     if not (1 <= extend_pixels <= 1024):
         return json.dumps({"error": "invalid-parameter", "detail": "extend_pixels must be 1-1024"})
 
@@ -753,7 +829,8 @@ async def _tool_edit_image(tool_input: dict, project_path: str) -> str:
                     },
                     "imageGenerationConfig": {"numberOfImages": 1},
                 }
-            result = await gw.invoke_model(model_id, body, timeout=60)
+            callable_id = _resolve_callable_model_id(model_id, aws_profile, bedrock_user)
+            result = await gw.invoke_model(callable_id, body, timeout=60)
             if "error" in result:
                 last_error = f"{model_id}: {result['error'][:200]}"
                 continue
@@ -796,7 +873,7 @@ async def _tool_edit_image(tool_input: dict, project_path: str) -> str:
 
 
 
-def _execute_tool(tool_name: str, tool_input: dict, project_path: str = "") -> str:
+def _execute_tool(tool_name: str, tool_input: dict, project_path: str = "", aws_profile: str = "", bedrock_user: str = "") -> str:
     """도구를 실행하고 결과를 문자열로 반환."""
     # === Remote Bridge Routing ===
     _REMOTE_TOOLS = {"read_file", "write_file", "list_directory", "search_files", "run_command"}
@@ -813,13 +890,13 @@ def _execute_tool(tool_name: str, tool_input: dict, project_path: str = "") -> s
         try:
             import asyncio as _asyncio
             if tool_name == "generate_image":
-                return _asyncio.run(_tool_generate_image(tool_input, project_path))
+                return _asyncio.run(_tool_generate_image(tool_input, project_path, aws_profile=aws_profile, bedrock_user=bedrock_user))
             if tool_name == "generate_pdf":
                 return _asyncio.run(_tool_generate_pdf(tool_input, project_path))
             if tool_name == "generate_pptx":
-                return _asyncio.run(_tool_generate_pptx(tool_input, project_path))
+                return _asyncio.run(_tool_generate_pptx(tool_input, project_path, aws_profile=aws_profile, bedrock_user=bedrock_user))
             if tool_name == "edit_image":
-                return _asyncio.run(_tool_edit_image(tool_input, project_path))
+                return _asyncio.run(_tool_edit_image(tool_input, project_path, aws_profile=aws_profile, bedrock_user=bedrock_user))
         except Exception as e:
             return json.dumps({"error": "tool-execution-failed", "detail": str(e)[:300]})
 
@@ -1251,22 +1328,52 @@ async def list_models(request: Request):
         catalog = {}
         seen_model_keys = set()  # 리전/컨텍스트 변형 중복 제거
 
-        skip_output = ["IMAGE", "VIDEO", "EMBEDDING"]
+        skip_output = ["VIDEO", "EMBEDDING"]  # IMAGE 별도 카탈로그
+        image_catalog = {}
+        seen_image_keys = set()
         for m in resp.get("modelSummaries", []):
             modes = m.get("outputModalities", [])
-            if any(s in str(modes) for s in skip_output):
-                continue
             if m.get("modelLifecycle", {}).get("status") in ["EOL"]:
                 continue
-            # TEXT 입력을 지원하는 모델만 (converse API 호환)
             input_modes = m.get("inputModalities", [])
+
+            # === Image generation/edit models ===
+            if "IMAGE" in modes:
+                _mid = m["modelId"]
+                _no_region = _mid
+                for _pfx in ("us.", "eu.", "global."):
+                    if _no_region.startswith(_pfx):
+                        _no_region = _no_region[len(_pfx):]
+                        break
+                _parts = _no_region.split(":")
+                _img_base = _parts[0] + ":" + _parts[1] if len(_parts) >= 2 else _no_region
+                if _img_base in seen_image_keys:
+                    continue
+                seen_image_keys.add(_img_base)
+                inference_types = m.get("inferenceTypesSupported", [])
+                callable_id = _mid
+                if callable_profile_ids is not None and "ON_DEMAND" not in inference_types:
+                    for pid in callable_profile_ids:
+                        if pid.endswith(_mid) or pid.endswith(f"{_mid}:0") or _mid in pid:
+                            callable_id = pid
+                            break
+                _prov = m.get("providerName", "Unknown")
+                if _prov not in image_catalog:
+                    image_catalog[_prov] = []
+                image_catalog[_prov].append({
+                    "id": callable_id,
+                    "name": m.get("modelName", _mid),
+                })
+                continue
+
+            # === Text models ===
+            if any(s in str(modes) for s in skip_output):
+                continue
             if "TEXT" not in input_modes:
                 continue
-            # ON_DEMAND 또는 INFERENCE_PROFILE 추론을 지원하는 모델만
             inference_types = m.get("inferenceTypesSupported", [])
             if inference_types and "ON_DEMAND" not in inference_types and "INFERENCE_PROFILE" not in inference_types:
                 continue
-            # 스트리밍 지원 확인
             if m.get("responseStreamingSupported") is False:
                 continue
 
@@ -1307,7 +1414,9 @@ async def list_models(request: Request):
             })
         return JSONResponse(content={
             "models": catalog,
+            "image_models": image_catalog,
             "count": sum(len(v) for v in catalog.values()),
+            "image_count": sum(len(v) for v in image_catalog.values()),
         })
     except Exception as e:
         return JSONResponse(content={"models": {}, "error": str(e)})
@@ -1561,7 +1670,7 @@ async def run_agent_with_tools(request: Request):
                     import time as _time
                     _tool_start = _time.time()
                     try:
-                        tool_output = await asyncio.to_thread(_execute_tool, tool_name, tool_input, project_path)
+                        tool_output = await asyncio.to_thread(_execute_tool, tool_name, tool_input, project_path, aws_profile, bedrock_user)  # [patched-credentials]
                     except Exception as e:
                         tool_output = f"도구 실행 예외: {e}"
                     _tool_duration_ms = int((_time.time() - _tool_start) * 1000)
@@ -1893,7 +2002,7 @@ async def _orchestrator_run_agent(
                 tid = tu.get("toolUseId", "")
                 tinput = tu.get("input", {})
                 await emit_queue.put({"type": "agent_tool", "taskId": task_id, "tool": tname, "input": tinput, "status": "running"})
-                tout = await asyncio.to_thread(_execute_tool, tname, tinput, project_path)
+                tout = await asyncio.to_thread(_execute_tool, tname, tinput, project_path, aws_profile, bedrock_user)  # [patched-credentials]
                 tool_log.append({"name": tname, "input": tinput, "output": tout[:400]})
                 await emit_queue.put({"type": "agent_tool", "taskId": task_id, "tool": tname, "status": "done", "output": tout[:300]})
                 _tr_max = int(os.environ.get("AE_TOOL_RESULT_MAX", "80000"))

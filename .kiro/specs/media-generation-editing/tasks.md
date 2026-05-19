@@ -20,7 +20,7 @@ AI 에디터의 이미지 편집(inpaint/outpaint) 도구 추가, 기존 생성 
     - mask_path(inpaint용), direction/extend_pixels(outpaint용) 조건부 파라미터 정의
     - _Requirements: 8.1, 8.2, 8.3, 8.4_
 
-  - [ ] 1.3 _execute_tool에 edit_image 라우팅 추가
+  - [x] 1.3 _execute_tool에 edit_image 라우팅 추가
     - `_execute_tool()` 함수에 `elif tool_name == "edit_image":` 분기 추가
     - `asyncio.run(_tool_edit_image(tool_input, project_path))` 호출
     - _Requirements: 8.1, 8.6_
@@ -30,7 +30,7 @@ AI 에디터의 이미지 편집(inpaint/outpaint) 도구 추가, 기존 생성 
     - **Validates: Requirements 8.5**
 
 - [ ] 2. _tool_edit_image() inpaint 모드 구현
-  - [ ] 2.1 입력 유효성 검증 로직 구현
+  - [x] 2.1 입력 유효성 검증 로직 구현
     - mode 검증: "inpaint"/"outpaint" 외 값 → "invalid-mode" 에러
     - image_path 파일 존재 여부 → "file-not-found" 에러
     - 이미지 형식 검증 (PNG/JPEG만 허용) → "invalid-image" 에러
@@ -40,10 +40,10 @@ AI 에디터의 이미지 편집(inpaint/outpaint) 도구 추가, 기존 생성 
     - prompt 길이 검증 (1~512자) → "invalid-parameter" 에러
     - _Requirements: 2.2, 2.4, 2.5, 2.8, 2.9, 8.5_
 
-  - [ ] 2.2 inpaint 모델 호출 및 폴백 체인 구현
+  - [x] 2.2 inpaint 모델 호출 및 폴백 체인 구현
     - 원본 이미지 + 마스크 이미지를 base64 인코딩
     - Titan Image v2 INPAINTING taskType 요청 본문 구성
-    - `gw.invoke_model()` 호출, 실패 시 Nova Canvas로 폴백
+    - `gw.invoke_model()` 호출, 실패 시 Nova Canvas로 폴백 (`_resolve_callable_model_id` 거쳐 us./global. prefix 자동 부착)
     - 타임아웃 30초 초과 또는 에러 응답 시 다음 모델로 전환
     - 모든 모델 실패 시 "model-unavailable" 에러 반환
     - _Requirements: 2.1, 2.6, 2.7_
@@ -91,7 +91,7 @@ AI 에디터의 이미지 편집(inpaint/outpaint) 도구 추가, 기존 생성 
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 5. generate_image 폴백 체인 검증 및 개선
-  - [ ] 5.1 기존 _tool_generate_image 폴백 로직 검증 및 개선
+  - [x] 5.1 기존 _tool_generate_image 폴백 로직 검증 및 개선
     - 폴백 체인 순서 확인: SD3.5 → Stable Image Core → Titan Image v2
     - prompt 빈 문자열/누락 시 에러 응답 검증 (Req 1.6)
     - prompt 2000자 초과 시 에러 응답 추가 (Req 1.7)
