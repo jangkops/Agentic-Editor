@@ -92,7 +92,11 @@ async def probe_invoke(gw, model_id, types, modal):
         else:
             body = {"inputText": "ping"}
     elif modal == "rerank":
-        body = {"query": "AI", "documents": [{"text": "machine learning"}, {"text": "cats"}], "top_n": 2}
+        # Cohere Rerank v3.5: documents must be string array, not [{text:...}]
+        if raw.startswith("cohere"):
+            body = {"query": "AI", "documents": ["machine learning", "cats"], "top_n": 2, "api_version": 2}
+        else:
+            body = {"query": "AI", "documents": [{"text": "machine learning"}, {"text": "cats"}], "top_n": 2}
     elif modal == "video":
         return {"ok": False, "ms": 0, "skipped": True, "reason": "video model — async only"}
     else:

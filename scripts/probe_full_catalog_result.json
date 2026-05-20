@@ -1,11 +1,11 @@
 {
-  "timestamp": 1779240094.281337,
+  "timestamp": 1779244263.8553011,
   "total": 97,
-  "ok": 66,
+  "ok": 73,
   "by_modal": {
     "text": {
-      "ok": 56,
-      "fail": 11,
+      "ok": 61,
+      "fail": 6,
       "skip": 0
     },
     "image": {
@@ -14,13 +14,13 @@
       "skip": 13
     },
     "embedding": {
-      "ok": 6,
-      "fail": 5,
+      "ok": 7,
+      "fail": 4,
       "skip": 0
     },
     "rerank": {
-      "ok": 1,
-      "fail": 1,
+      "ok": 2,
+      "fail": 0,
       "skip": 0
     },
     "video": {
@@ -32,7 +32,7 @@
   "results": [
     {
       "ok": true,
-      "ms": 3383,
+      "ms": 4592,
       "model_id": "nvidia.nemotron-nano-12b-v2",
       "modal": "text",
       "types": [
@@ -41,7 +41,7 @@
     },
     {
       "ok": true,
-      "ms": 3370,
+      "ms": 1454,
       "model_id": "anthropic.claude-haiku-4-5-20251001-v1:0",
       "modal": "text",
       "types": [
@@ -50,7 +50,7 @@
     },
     {
       "ok": true,
-      "ms": 2405,
+      "ms": 2302,
       "model_id": "qwen.qwen3-235b-a22b-2507-v1:0",
       "modal": "text",
       "types": [
@@ -59,7 +59,7 @@
     },
     {
       "ok": true,
-      "ms": 980,
+      "ms": 901,
       "model_id": "moonshotai.kimi-k2.5",
       "modal": "text",
       "types": [
@@ -68,7 +68,7 @@
     },
     {
       "ok": true,
-      "ms": 859,
+      "ms": 3027,
       "model_id": "openai.gpt-oss-120b-1:0",
       "modal": "text",
       "types": [
@@ -88,7 +88,7 @@
     },
     {
       "ok": true,
-      "ms": 878,
+      "ms": 841,
       "model_id": "qwen.qwen3-next-80b-a3b",
       "modal": "text",
       "types": [
@@ -97,7 +97,7 @@
     },
     {
       "ok": true,
-      "ms": 861,
+      "ms": 870,
       "model_id": "deepseek.v3.2",
       "modal": "text",
       "types": [
@@ -106,7 +106,7 @@
     },
     {
       "ok": true,
-      "ms": 843,
+      "ms": 864,
       "model_id": "nvidia.nemotron-nano-3-30b",
       "modal": "text",
       "types": [
@@ -115,7 +115,7 @@
     },
     {
       "ok": true,
-      "ms": 1853,
+      "ms": 1794,
       "model_id": "anthropic.claude-sonnet-4-6",
       "modal": "text",
       "types": [
@@ -124,7 +124,7 @@
     },
     {
       "ok": true,
-      "ms": 905,
+      "ms": 841,
       "model_id": "minimax.minimax-m2",
       "modal": "text",
       "types": [
@@ -133,7 +133,7 @@
     },
     {
       "ok": true,
-      "ms": 835,
+      "ms": 865,
       "model_id": "zai.glm-4.7-flash",
       "modal": "text",
       "types": [
@@ -142,7 +142,7 @@
     },
     {
       "ok": true,
-      "ms": 1117,
+      "ms": 800,
       "model_id": "mistral.voxtral-mini-3b-2507",
       "modal": "text",
       "types": [
@@ -151,7 +151,7 @@
     },
     {
       "ok": true,
-      "ms": 1063,
+      "ms": 1234,
       "model_id": "amazon.nova-pro-v1:0",
       "modal": "text",
       "types": [
@@ -182,7 +182,7 @@
     },
     {
       "ok": true,
-      "ms": 962,
+      "ms": 1205,
       "model_id": "amazon.nova-2-lite-v1:0",
       "modal": "text",
       "types": [
@@ -202,7 +202,7 @@
     },
     {
       "ok": true,
-      "ms": 899,
+      "ms": 775,
       "model_id": "minimax.minimax-m2.5",
       "modal": "text",
       "types": [
@@ -211,7 +211,7 @@
     },
     {
       "ok": true,
-      "ms": 1104,
+      "ms": 783,
       "model_id": "google.gemma-3-12b-it",
       "modal": "text",
       "types": [
@@ -231,7 +231,7 @@
     },
     {
       "ok": true,
-      "ms": 880,
+      "ms": 907,
       "model_id": "moonshot.kimi-k2-thinking",
       "modal": "text",
       "types": [
@@ -240,7 +240,7 @@
     },
     {
       "ok": true,
-      "ms": 816,
+      "ms": 792,
       "model_id": "mistral.mistral-large-3-675b-instruct",
       "modal": "text",
       "types": [
@@ -249,8 +249,8 @@
     },
     {
       "ok": false,
-      "ms": 757,
-      "reason": "HTTP 500: {\"decision\": \"ERROR\", \"error\": \"bedrock invocation failed: An error occurred (AccessDeniedException) when calling the Converse operation: Model access",
+      "ms": 674,
+      "reason": "HTTP 500: {\"decision\": \"ERROR\", \"error\": \"bedrock invocation failed: An error occurred (ValidationException) when calling the Converse operation: This action do",
       "model_id": "twelvelabs.pegasus-1-2-v1:0",
       "modal": "text",
       "types": [
@@ -259,7 +259,7 @@
     },
     {
       "ok": false,
-      "ms": 639,
+      "ms": 655,
       "reason": "HTTP 500: {\"decision\": \"ERROR\", \"error\": \"bedrock invocation failed: An error occurred (ValidationException) when calling the Converse operation: This action do",
       "model_id": "amazon.nova-2-sonic-v1:0",
       "modal": "text",
@@ -269,7 +269,7 @@
     },
     {
       "ok": true,
-      "ms": 829,
+      "ms": 821,
       "model_id": "mistral.devstral-2-123b",
       "modal": "text",
       "types": [
@@ -278,7 +278,7 @@
     },
     {
       "ok": true,
-      "ms": 893,
+      "ms": 824,
       "model_id": "minimax.minimax-m2.1",
       "modal": "text",
       "types": [
@@ -287,7 +287,7 @@
     },
     {
       "ok": true,
-      "ms": 925,
+      "ms": 905,
       "model_id": "nvidia.nemotron-super-3-120b",
       "modal": "text",
       "types": [
@@ -296,7 +296,7 @@
     },
     {
       "ok": true,
-      "ms": 782,
+      "ms": 841,
       "model_id": "qwen.qwen3-32b-v1:0",
       "modal": "text",
       "types": [
@@ -305,7 +305,7 @@
     },
     {
       "ok": true,
-      "ms": 804,
+      "ms": 850,
       "model_id": "mistral.ministral-3-14b-instruct",
       "modal": "text",
       "types": [
@@ -314,7 +314,7 @@
     },
     {
       "ok": true,
-      "ms": 841,
+      "ms": 808,
       "model_id": "anthropic.claude-opus-4-6-v1",
       "modal": "text",
       "types": [
@@ -323,7 +323,7 @@
     },
     {
       "ok": true,
-      "ms": 837,
+      "ms": 828,
       "model_id": "nvidia.nemotron-nano-9b-v2",
       "modal": "text",
       "types": [
@@ -332,7 +332,7 @@
     },
     {
       "ok": true,
-      "ms": 839,
+      "ms": 749,
       "model_id": "mistral.ministral-3-8b-instruct",
       "modal": "text",
       "types": [
@@ -341,7 +341,7 @@
     },
     {
       "ok": true,
-      "ms": 881,
+      "ms": 855,
       "model_id": "mistral.voxtral-small-24b-2507",
       "modal": "text",
       "types": [
@@ -350,7 +350,7 @@
     },
     {
       "ok": true,
-      "ms": 958,
+      "ms": 893,
       "model_id": "zai.glm-5",
       "modal": "text",
       "types": [
@@ -359,7 +359,7 @@
     },
     {
       "ok": true,
-      "ms": 6585,
+      "ms": 1830,
       "model_id": "openai.gpt-oss-20b-1:0",
       "modal": "text",
       "types": [
@@ -368,7 +368,7 @@
     },
     {
       "ok": true,
-      "ms": 854,
+      "ms": 771,
       "model_id": "google.gemma-3-4b-it",
       "modal": "text",
       "types": [
@@ -388,7 +388,7 @@
     },
     {
       "ok": true,
-      "ms": 816,
+      "ms": 760,
       "model_id": "anthropic.claude-opus-4-7",
       "modal": "text",
       "types": [
@@ -408,7 +408,7 @@
     },
     {
       "ok": true,
-      "ms": 881,
+      "ms": 819,
       "model_id": "openai.gpt-oss-safeguard-120b",
       "modal": "text",
       "types": [
@@ -417,7 +417,7 @@
     },
     {
       "ok": true,
-      "ms": 841,
+      "ms": 908,
       "model_id": "google.gemma-3-27b-it",
       "modal": "text",
       "types": [
@@ -437,7 +437,7 @@
     },
     {
       "ok": true,
-      "ms": 1819,
+      "ms": 2433,
       "model_id": "anthropic.claude-sonnet-4-5-20250929-v1:0",
       "modal": "text",
       "types": [
@@ -446,7 +446,7 @@
     },
     {
       "ok": true,
-      "ms": 895,
+      "ms": 1890,
       "model_id": "qwen.qwen3-vl-235b-a22b",
       "modal": "text",
       "types": [
@@ -455,7 +455,7 @@
     },
     {
       "ok": true,
-      "ms": 1304,
+      "ms": 839,
       "model_id": "zai.glm-4.7",
       "modal": "text",
       "types": [
@@ -464,7 +464,7 @@
     },
     {
       "ok": true,
-      "ms": 862,
+      "ms": 857,
       "model_id": "writer.palmyra-vision-7b",
       "modal": "text",
       "types": [
@@ -495,7 +495,7 @@
     },
     {
       "ok": true,
-      "ms": 881,
+      "ms": 789,
       "model_id": "anthropic.claude-opus-4-1-20250805-v1:0",
       "modal": "text",
       "types": [
@@ -504,7 +504,7 @@
     },
     {
       "ok": true,
-      "ms": 6139,
+      "ms": 2079,
       "model_id": "qwen.qwen3-coder-480b-a35b-v1:0",
       "modal": "text",
       "types": [
@@ -543,9 +543,8 @@
       ]
     },
     {
-      "ok": false,
-      "ms": 588,
-      "reason": "HTTP 403: {\"decision\": \"DENY\", \"denial_reason\": \"model us.cohere.embed-v4:0 not in allowed list\"}",
+      "ok": true,
+      "ms": 1204,
       "model_id": "cohere.embed-v4:0",
       "modal": "embedding",
       "types": [
@@ -554,7 +553,7 @@
     },
     {
       "ok": true,
-      "ms": 893,
+      "ms": 818,
       "model_id": "deepseek.v3-v1:0",
       "modal": "text",
       "types": [
@@ -563,7 +562,7 @@
     },
     {
       "ok": false,
-      "ms": 15260,
+      "ms": 15296,
       "reason": "The read operation timed out",
       "model_id": "mistral.ministral-3-3b-instruct",
       "modal": "text",
@@ -573,7 +572,7 @@
     },
     {
       "ok": true,
-      "ms": 725,
+      "ms": 779,
       "model_id": "anthropic.claude-opus-4-5-20251101-v1:0",
       "modal": "text",
       "types": [
@@ -592,9 +591,8 @@
       ]
     },
     {
-      "ok": false,
-      "ms": 15260,
-      "reason": "The read operation timed out",
+      "ok": true,
+      "ms": 4107,
       "model_id": "qwen.qwen3-coder-30b-a3b-v1:0",
       "modal": "text",
       "types": [
@@ -603,7 +601,7 @@
     },
     {
       "ok": true,
-      "ms": 818,
+      "ms": 805,
       "model_id": "openai.gpt-oss-safeguard-20b",
       "modal": "text",
       "types": [
@@ -612,7 +610,7 @@
     },
     {
       "ok": true,
-      "ms": 980,
+      "ms": 1054,
       "model_id": "amazon.titan-embed-g1-text-02",
       "modal": "embedding",
       "types": [
@@ -621,7 +619,7 @@
     },
     {
       "ok": true,
-      "ms": 1022,
+      "ms": 843,
       "model_id": "amazon.nova-lite-v1:0",
       "modal": "text",
       "types": [
@@ -630,7 +628,7 @@
     },
     {
       "ok": true,
-      "ms": 861,
+      "ms": 900,
       "model_id": "amazon.nova-micro-v1:0",
       "modal": "text",
       "types": [
@@ -639,7 +637,7 @@
     },
     {
       "ok": false,
-      "ms": 479,
+      "ms": 568,
       "reason": "HTTP 403: {\"decision\": \"DENY\", \"denial_reason\": \"model amazon.titan-embed-text-v1:2:8k not in allowed list\"}",
       "model_id": "amazon.titan-embed-text-v1:2:8k",
       "modal": "embedding",
@@ -649,7 +647,7 @@
     },
     {
       "ok": true,
-      "ms": 976,
+      "ms": 1023,
       "model_id": "amazon.titan-embed-text-v1",
       "modal": "embedding",
       "types": [
@@ -658,7 +656,7 @@
     },
     {
       "ok": true,
-      "ms": 1200,
+      "ms": 1138,
       "model_id": "amazon.titan-embed-text-v2:0",
       "modal": "embedding",
       "types": [
@@ -667,7 +665,7 @@
     },
     {
       "ok": false,
-      "ms": 504,
+      "ms": 531,
       "reason": "HTTP 403: {\"decision\": \"DENY\", \"denial_reason\": \"model amazon.titan-embed-image-v1:0 not in allowed list\"}",
       "model_id": "amazon.titan-embed-image-v1:0",
       "modal": "embedding",
@@ -677,7 +675,7 @@
     },
     {
       "ok": true,
-      "ms": 947,
+      "ms": 1048,
       "model_id": "amazon.titan-embed-image-v1",
       "modal": "embedding",
       "types": [
@@ -686,7 +684,7 @@
     },
     {
       "ok": true,
-      "ms": 938,
+      "ms": 883,
       "model_id": "amazon.rerank-v1:0",
       "modal": "rerank",
       "types": [
@@ -695,7 +693,7 @@
     },
     {
       "ok": true,
-      "ms": 9746,
+      "ms": 7916,
       "model_id": "stability.sd3-5-large-v1:0",
       "modal": "image",
       "types": [
@@ -704,7 +702,7 @@
     },
     {
       "ok": true,
-      "ms": 7706,
+      "ms": 7710,
       "model_id": "stability.stable-image-core-v1:1",
       "modal": "image",
       "types": [
@@ -713,7 +711,7 @@
     },
     {
       "ok": true,
-      "ms": 12304,
+      "ms": 11557,
       "model_id": "stability.stable-image-ultra-v1:1",
       "modal": "image",
       "types": [
@@ -722,7 +720,7 @@
     },
     {
       "ok": false,
-      "ms": 541,
+      "ms": 497,
       "reason": "HTTP 403: {\"decision\": \"DENY\", \"denial_reason\": \"model cohere.embed-english-v3:0:512 not in allowed list\"}",
       "model_id": "cohere.embed-english-v3:0:512",
       "modal": "embedding",
@@ -732,7 +730,7 @@
     },
     {
       "ok": true,
-      "ms": 941,
+      "ms": 971,
       "model_id": "cohere.embed-english-v3",
       "modal": "embedding",
       "types": [
@@ -741,7 +739,7 @@
     },
     {
       "ok": false,
-      "ms": 493,
+      "ms": 714,
       "reason": "HTTP 403: {\"decision\": \"DENY\", \"denial_reason\": \"model cohere.embed-multilingual-v3:0:512 not in allowed list\"}",
       "model_id": "cohere.embed-multilingual-v3:0:512",
       "modal": "embedding",
@@ -751,7 +749,7 @@
     },
     {
       "ok": true,
-      "ms": 966,
+      "ms": 1174,
       "model_id": "cohere.embed-multilingual-v3",
       "modal": "embedding",
       "types": [
@@ -759,9 +757,8 @@
       ]
     },
     {
-      "ok": false,
-      "ms": 751,
-      "reason": "HTTP 502: {\"decision\": \"ERROR\", \"error\": \"bedrock invocation failed: An error occurred (ValidationException) when calling the InvokeModel operation: Malformed i",
+      "ok": true,
+      "ms": 862,
       "model_id": "cohere.rerank-v3-5:0",
       "modal": "rerank",
       "types": [
@@ -770,7 +767,7 @@
     },
     {
       "ok": true,
-      "ms": 1056,
+      "ms": 965,
       "model_id": "deepseek.r1-v1:0",
       "modal": "text",
       "types": [
@@ -779,7 +776,7 @@
     },
     {
       "ok": true,
-      "ms": 914,
+      "ms": 750,
       "model_id": "meta.llama3-8b-instruct-v1:0",
       "modal": "text",
       "types": [
@@ -788,7 +785,7 @@
     },
     {
       "ok": true,
-      "ms": 814,
+      "ms": 838,
       "model_id": "meta.llama3-70b-instruct-v1:0",
       "modal": "text",
       "types": [
@@ -797,7 +794,7 @@
     },
     {
       "ok": false,
-      "ms": 567,
+      "ms": 598,
       "reason": "HTTP 403: {\"decision\": \"DENY\", \"denial_reason\": \"model meta.llama3-1-8b-instruct-v1:0:128k not in allowed list\"}",
       "model_id": "meta.llama3-1-8b-instruct-v1:0:128k",
       "modal": "text",
@@ -806,9 +803,8 @@
       ]
     },
     {
-      "ok": false,
-      "ms": 528,
-      "reason": "HTTP 403: {\"decision\": \"DENY\", \"denial_reason\": \"model meta.llama3-1-8b-instruct-v1:0 not in allowed list\"}",
+      "ok": true,
+      "ms": 856,
       "model_id": "meta.llama3-1-8b-instruct-v1:0",
       "modal": "text",
       "types": [
@@ -818,7 +814,7 @@
     },
     {
       "ok": false,
-      "ms": 498,
+      "ms": 546,
       "reason": "HTTP 403: {\"decision\": \"DENY\", \"denial_reason\": \"model meta.llama3-1-70b-instruct-v1:0:128k not in allowed list\"}",
       "model_id": "meta.llama3-1-70b-instruct-v1:0:128k",
       "modal": "text",
@@ -827,9 +823,8 @@
       ]
     },
     {
-      "ok": false,
-      "ms": 528,
-      "reason": "HTTP 403: {\"decision\": \"DENY\", \"denial_reason\": \"model meta.llama3-1-70b-instruct-v1:0 not in allowed list\"}",
+      "ok": true,
+      "ms": 1015,
       "model_id": "meta.llama3-1-70b-instruct-v1:0",
       "modal": "text",
       "types": [
@@ -839,7 +834,7 @@
     },
     {
       "ok": false,
-      "ms": 522,
+      "ms": 504,
       "reason": "HTTP 403: {\"decision\": \"DENY\", \"denial_reason\": \"model meta.llama3-3-70b-instruct-v1:0:128k not in allowed list\"}",
       "model_id": "meta.llama3-3-70b-instruct-v1:0:128k",
       "modal": "text",
@@ -847,7 +842,7 @@
     },
     {
       "ok": true,
-      "ms": 878,
+      "ms": 856,
       "model_id": "meta.llama3-3-70b-instruct-v1:0",
       "modal": "text",
       "types": [
@@ -856,7 +851,7 @@
     },
     {
       "ok": true,
-      "ms": 945,
+      "ms": 896,
       "model_id": "meta.llama4-scout-17b-instruct-v1:0",
       "modal": "text",
       "types": [
@@ -865,7 +860,7 @@
     },
     {
       "ok": true,
-      "ms": 906,
+      "ms": 844,
       "model_id": "meta.llama4-maverick-17b-instruct-v1:0",
       "modal": "text",
       "types": [
@@ -874,7 +869,7 @@
     },
     {
       "ok": true,
-      "ms": 813,
+      "ms": 806,
       "model_id": "mistral.mistral-7b-instruct-v0:2",
       "modal": "text",
       "types": [
@@ -883,7 +878,7 @@
     },
     {
       "ok": true,
-      "ms": 751,
+      "ms": 919,
       "model_id": "mistral.mixtral-8x7b-instruct-v0:1",
       "modal": "text",
       "types": [
@@ -892,7 +887,7 @@
     },
     {
       "ok": true,
-      "ms": 819,
+      "ms": 814,
       "model_id": "mistral.mistral-large-2402-v1:0",
       "modal": "text",
       "types": [
@@ -901,7 +896,7 @@
     },
     {
       "ok": true,
-      "ms": 865,
+      "ms": 898,
       "model_id": "mistral.mistral-large-2407-v1:0",
       "modal": "text",
       "types": [
@@ -929,9 +924,8 @@
       ]
     },
     {
-      "ok": false,
-      "ms": 860,
-      "reason": "HTTP 500: {\"decision\": \"ERROR\", \"error\": \"bedrock invocation failed: An error occurred (AccessDeniedException) when calling the Converse operation: Model access",
+      "ok": true,
+      "ms": 820,
       "model_id": "writer.palmyra-x4-v1:0",
       "modal": "text",
       "types": [
@@ -939,9 +933,8 @@
       ]
     },
     {
-      "ok": false,
-      "ms": 734,
-      "reason": "HTTP 500: {\"decision\": \"ERROR\", \"error\": \"bedrock invocation failed: An error occurred (AccessDeniedException) when calling the Converse operation: Model access",
+      "ok": true,
+      "ms": 776,
       "model_id": "writer.palmyra-x5-v1:0",
       "modal": "text",
       "types": [
