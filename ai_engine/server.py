@@ -1458,6 +1458,18 @@ async def run_agent_stream(request: Request):
         if open_file:
             system_prompt += f"\n현재 열린 파일: {open_file}"
 
+
+    # 에이전트 모드 기본 지시 — 도구 사용 강제 + 작업 완료 후 보고
+    _AGENT_BASE = (
+        "\n\n[에이전트 모드 지시]\n"
+        "- 사용자의 요청을 완수하기 위해 제공된 도구를 반드시 실행하세요.\n"
+        "- 도구를 실행하지 않고 텍스트로만 답변하지 마세요.\n"
+        "- 작업을 모두 완료한 후 결과를 간결하게 보고하세요.\n"
+        "- 이미지/PDF/PPTX 생성 요청 시 generate_image/generate_pdf/generate_pptx 도구를 즉시 호출하세요.\n"
+        "- 파일 읽기/쓰기/검색이 필요하면 read_file/write_file/search_files 도구를 사용하세요.\n"
+    )
+    system_prompt = (system_prompt or "") + _AGENT_BASE
+
     if project_path and _is_code_related(prompt):
         try:
             from ai_engine.rag.context_builder import build_system_prompt
