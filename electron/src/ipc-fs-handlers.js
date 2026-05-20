@@ -288,6 +288,32 @@ function registerFsHandlers(mainWindow) {
       return [];
     }
   });
+
+  /**
+   * Show file/folder in OS file explorer (Finder/Explorer).
+   */
+  ipcMain.handle('fs:show-item-in-folder', async (_, filePath) => {
+    try {
+      const { shell } = require('electron');
+      shell.showItemInFolder(filePath);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err && err.message };
+    }
+  });
+
+  /**
+   * Open a path (file or folder) with the OS default handler.
+   */
+  ipcMain.handle('fs:open-path', async (_, targetPath) => {
+    try {
+      const { shell } = require('electron');
+      await shell.openPath(targetPath);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err && err.message };
+    }
+  });
 }
 
 module.exports = { registerFsHandlers };

@@ -2865,7 +2865,10 @@ function renderToolSummary(c, toolUses) {
                 <div class="tit-frame" style="width:320px;max-width:320px;height:240px;max-height:240px;background:var(--color-bg-tertiary,#2d2d30);border:1px solid var(--color-border,#3c3c3c);border-radius:4px;display:flex;align-items:center;justify-content:center;overflow:hidden;transition:border-color 150ms ease;">
                   <span class="tit-loading" style="color:var(--color-text-muted,#6a6a6a);font-size:11px;">로딩 중…</span>
                 </div>
-                <div class="tit-meta" style="max-width:320px;font-size:11px;color:var(--color-text-secondary,#9d9d9d);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(fileName)} — ${esc(metaLine)}">${metaLine || esc(fileName)}</div>
+                <div class="tit-meta" style="max-width:320px;font-size:11px;color:var(--color-text-secondary,#9d9d9d);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:flex;align-items:center;gap:6px;" title="${esc(fileName)} — ${esc(metaLine)}">
+                  <span style="flex:1;overflow:hidden;text-overflow:ellipsis;">${metaLine || esc(fileName)}</span>
+                  <button class="tit-open-folder" type="button" title="폴더에서 보기" style="background:none;border:none;color:var(--color-text-muted,#6a6a6a);cursor:pointer;font-size:13px;padding:0 2px;">📂</button>
+                </div>
               `;
 
               // 비동기 base64 로드 → <img>로 교체 (object-fit: contain)
@@ -2907,6 +2910,19 @@ function renderToolSummary(c, toolUses) {
                   bubbles: true,
                 }));
               });
+
+              // 폴더 열기 버튼
+              const folderBtn = thumb.querySelector('.tit-open-folder');
+              if (folderBtn) {
+                folderBtn.addEventListener('click', (ev) => {
+                  ev.stopPropagation();
+                  ev.preventDefault();
+                  const fp = resolveFullPath(it.path);
+                  if (window.electronAPI && window.electronAPI.showItemInFolder) {
+                    window.electronAPI.showItemInFolder(fp);
+                  }
+                });
+              }
 
               // 호버 시 우상단 다운로드 버튼 표시 (사용자 query 2 — 채팅 즉시 다운로드)
               const dlBtn = document.createElement('button');

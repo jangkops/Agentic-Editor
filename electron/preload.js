@@ -15,6 +15,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   watchDirectory: (p) => ipcRenderer.invoke('fs:watch-directory', p),
   unwatchDirectory: (p) => ipcRenderer.invoke('fs:unwatch-directory', p),
   showSaveDialog: (opts) => ipcRenderer.invoke('fs:show-save-dialog', opts),
+  showItemInFolder: (p) => ipcRenderer.invoke('fs:show-item-in-folder', p),
+  openPath: (p) => ipcRenderer.invoke('fs:open-path', p),
   onDirectoryChanged: (cb) => {
     const wrapped = (_evt, data) => cb(data);
     ipcRenderer.on('fs:directory-changed', wrapped);
