@@ -1,0 +1,183 @@
+{
+  "timestamp": 1779169546.438656,
+  "profile": "bedrock-gw",
+  "user": "cgjang",
+  "ok": [],
+  "fail": [
+    {
+      "id": "stability.sd3-5-large-v1:0",
+      "callable_id": "stability.sd3-5-large-v1:0",
+      "ok": false,
+      "reason": "HTTP 403: {\"Message\":\"User: arn:aws:sts::107650139384:assumed-role/BedrockUser-cgjang/ai-editor is not authorized to perform: execute-api:Invoke on resource: arn:aws:execute-api:us-west-2:********9384",
+      "ms": 9201,
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "id": "stability.stable-image-core-v1:1",
+      "callable_id": "stability.stable-image-core-v1:1",
+      "ok": false,
+      "reason": "HTTP 403: {\"Message\":\"User: arn:aws:sts::107650139384:assumed-role/BedrockUser-cgjang/ai-editor is not authorized to perform: execute-api:Invoke on resource: arn:aws:execute-api:us-west-2:********9384",
+      "ms": 6805,
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "id": "stability.stable-image-ultra-v1:1",
+      "callable_id": "stability.stable-image-ultra-v1:1",
+      "ok": false,
+      "reason": "HTTP 403: {\"Message\":\"User: arn:aws:sts::107650139384:assumed-role/BedrockUser-cgjang/ai-editor is not authorized to perform: execute-api:Invoke on resource: arn:aws:execute-api:us-west-2:********9384",
+      "ms": 6625,
+      "types": [
+        "ON_DEMAND"
+      ]
+    }
+  ],
+  "skip": [
+    {
+      "id": "stability.stable-creative-upscale-v1:0",
+      "callable_id": "us.stability.stable-creative-upscale-v1:0",
+      "ok": false,
+      "skipped": true,
+      "reason": "edit-only (needs source image)",
+      "types": [
+        "INFERENCE_PROFILE"
+      ],
+      "ms": 0
+    },
+    {
+      "id": "stability.stable-image-remove-background-v1:0",
+      "callable_id": "us.stability.stable-image-remove-background-v1:0",
+      "ok": false,
+      "skipped": true,
+      "reason": "edit-only (needs source image)",
+      "types": [
+        "INFERENCE_PROFILE"
+      ],
+      "ms": 0
+    },
+    {
+      "id": "stability.stable-image-control-sketch-v1:0",
+      "callable_id": "us.stability.stable-image-control-sketch-v1:0",
+      "ok": false,
+      "skipped": true,
+      "reason": "edit-only (needs source image)",
+      "types": [
+        "INFERENCE_PROFILE"
+      ],
+      "ms": 0
+    },
+    {
+      "id": "stability.stable-conservative-upscale-v1:0",
+      "callable_id": "us.stability.stable-conservative-upscale-v1:0",
+      "ok": false,
+      "skipped": true,
+      "reason": "edit-only (needs source image)",
+      "types": [
+        "INFERENCE_PROFILE"
+      ],
+      "ms": 0
+    },
+    {
+      "id": "stability.stable-image-search-recolor-v1:0",
+      "callable_id": "us.stability.stable-image-search-recolor-v1:0",
+      "ok": false,
+      "skipped": true,
+      "reason": "edit-only (needs source image)",
+      "types": [
+        "INFERENCE_PROFILE"
+      ],
+      "ms": 0
+    },
+    {
+      "id": "stability.stable-fast-upscale-v1:0",
+      "callable_id": "us.stability.stable-fast-upscale-v1:0",
+      "ok": false,
+      "skipped": true,
+      "reason": "edit-only (needs source image)",
+      "types": [
+        "INFERENCE_PROFILE"
+      ],
+      "ms": 0
+    },
+    {
+      "id": "stability.stable-image-erase-object-v1:0",
+      "callable_id": "us.stability.stable-image-erase-object-v1:0",
+      "ok": false,
+      "skipped": true,
+      "reason": "edit-only (needs source image)",
+      "types": [
+        "INFERENCE_PROFILE"
+      ],
+      "ms": 0
+    },
+    {
+      "id": "stability.stable-image-control-structure-v1:0",
+      "callable_id": "us.stability.stable-image-control-structure-v1:0",
+      "ok": false,
+      "skipped": true,
+      "reason": "edit-only (needs source image)",
+      "types": [
+        "INFERENCE_PROFILE"
+      ],
+      "ms": 0
+    },
+    {
+      "id": "stability.stable-outpaint-v1:0",
+      "callable_id": "us.stability.stable-outpaint-v1:0",
+      "ok": false,
+      "skipped": true,
+      "reason": "edit-only (needs source image)",
+      "types": [
+        "INFERENCE_PROFILE"
+      ],
+      "ms": 0
+    },
+    {
+      "id": "stability.stable-image-inpaint-v1:0",
+      "callable_id": "us.stability.stable-image-inpaint-v1:0",
+      "ok": false,
+      "skipped": true,
+      "reason": "edit-only (needs source image)",
+      "types": [
+        "INFERENCE_PROFILE"
+      ],
+      "ms": 0
+    },
+    {
+      "id": "stability.stable-image-style-guide-v1:0",
+      "callable_id": "us.stability.stable-image-style-guide-v1:0",
+      "ok": false,
+      "skipped": true,
+      "reason": "edit-only (needs source image)",
+      "types": [
+        "INFERENCE_PROFILE"
+      ],
+      "ms": 0
+    },
+    {
+      "id": "stability.stable-style-transfer-v1:0",
+      "callable_id": "us.stability.stable-style-transfer-v1:0",
+      "ok": false,
+      "skipped": true,
+      "reason": "edit-only (needs source image)",
+      "types": [
+        "INFERENCE_PROFILE"
+      ],
+      "ms": 0
+    },
+    {
+      "id": "stability.stable-image-search-replace-v1:0",
+      "callable_id": "us.stability.stable-image-search-replace-v1:0",
+      "ok": false,
+      "skipped": true,
+      "reason": "edit-only (needs source image)",
+      "types": [
+        "INFERENCE_PROFILE"
+      ],
+      "ms": 0
+    }
+  ]
+}

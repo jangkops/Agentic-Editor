@@ -1,0 +1,952 @@
+{
+  "timestamp": 1779240094.281337,
+  "total": 97,
+  "ok": 66,
+  "by_modal": {
+    "text": {
+      "ok": 56,
+      "fail": 11,
+      "skip": 0
+    },
+    "image": {
+      "ok": 3,
+      "fail": 0,
+      "skip": 13
+    },
+    "embedding": {
+      "ok": 6,
+      "fail": 5,
+      "skip": 0
+    },
+    "rerank": {
+      "ok": 1,
+      "fail": 1,
+      "skip": 0
+    },
+    "video": {
+      "ok": 0,
+      "fail": 0,
+      "skip": 1
+    }
+  },
+  "results": [
+    {
+      "ok": true,
+      "ms": 3383,
+      "model_id": "nvidia.nemotron-nano-12b-v2",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 3370,
+      "model_id": "anthropic.claude-haiku-4-5-20251001-v1:0",
+      "modal": "text",
+      "types": [
+        "INFERENCE_PROFILE"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 2405,
+      "model_id": "qwen.qwen3-235b-a22b-2507-v1:0",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 980,
+      "model_id": "moonshotai.kimi-k2.5",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 859,
+      "model_id": "openai.gpt-oss-120b-1:0",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": false,
+      "ms": 0,
+      "skipped": true,
+      "reason": "edit-only (needs source image)",
+      "model_id": "stability.stable-creative-upscale-v1:0",
+      "modal": "image",
+      "types": [
+        "INFERENCE_PROFILE"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 878,
+      "model_id": "qwen.qwen3-next-80b-a3b",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 861,
+      "model_id": "deepseek.v3.2",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 843,
+      "model_id": "nvidia.nemotron-nano-3-30b",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 1853,
+      "model_id": "anthropic.claude-sonnet-4-6",
+      "modal": "text",
+      "types": [
+        "INFERENCE_PROFILE"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 905,
+      "model_id": "minimax.minimax-m2",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 835,
+      "model_id": "zai.glm-4.7-flash",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 1117,
+      "model_id": "mistral.voxtral-mini-3b-2507",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 1063,
+      "model_id": "amazon.nova-pro-v1:0",
+      "modal": "text",
+      "types": [
+        "INFERENCE_PROFILE"
+      ]
+    },
+    {
+      "ok": false,
+      "ms": 0,
+      "skipped": true,
+      "reason": "edit-only (needs source image)",
+      "model_id": "stability.stable-image-remove-background-v1:0",
+      "modal": "image",
+      "types": [
+        "INFERENCE_PROFILE"
+      ]
+    },
+    {
+      "ok": false,
+      "ms": 0,
+      "skipped": true,
+      "reason": "edit-only (needs source image)",
+      "model_id": "stability.stable-image-control-sketch-v1:0",
+      "modal": "image",
+      "types": [
+        "INFERENCE_PROFILE"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 962,
+      "model_id": "amazon.nova-2-lite-v1:0",
+      "modal": "text",
+      "types": [
+        "INFERENCE_PROFILE"
+      ]
+    },
+    {
+      "ok": false,
+      "ms": 0,
+      "skipped": true,
+      "reason": "edit-only (needs source image)",
+      "model_id": "stability.stable-conservative-upscale-v1:0",
+      "modal": "image",
+      "types": [
+        "INFERENCE_PROFILE"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 899,
+      "model_id": "minimax.minimax-m2.5",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 1104,
+      "model_id": "google.gemma-3-12b-it",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": false,
+      "ms": 0,
+      "skipped": true,
+      "reason": "edit-only (needs source image)",
+      "model_id": "stability.stable-image-search-recolor-v1:0",
+      "modal": "image",
+      "types": [
+        "INFERENCE_PROFILE"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 880,
+      "model_id": "moonshot.kimi-k2-thinking",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 816,
+      "model_id": "mistral.mistral-large-3-675b-instruct",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": false,
+      "ms": 757,
+      "reason": "HTTP 500: {\"decision\": \"ERROR\", \"error\": \"bedrock invocation failed: An error occurred (AccessDeniedException) when calling the Converse operation: Model access",
+      "model_id": "twelvelabs.pegasus-1-2-v1:0",
+      "modal": "text",
+      "types": [
+        "INFERENCE_PROFILE"
+      ]
+    },
+    {
+      "ok": false,
+      "ms": 639,
+      "reason": "HTTP 500: {\"decision\": \"ERROR\", \"error\": \"bedrock invocation failed: An error occurred (ValidationException) when calling the Converse operation: This action do",
+      "model_id": "amazon.nova-2-sonic-v1:0",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 829,
+      "model_id": "mistral.devstral-2-123b",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 893,
+      "model_id": "minimax.minimax-m2.1",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 925,
+      "model_id": "nvidia.nemotron-super-3-120b",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 782,
+      "model_id": "qwen.qwen3-32b-v1:0",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 804,
+      "model_id": "mistral.ministral-3-14b-instruct",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 841,
+      "model_id": "anthropic.claude-opus-4-6-v1",
+      "modal": "text",
+      "types": [
+        "INFERENCE_PROFILE"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 837,
+      "model_id": "nvidia.nemotron-nano-9b-v2",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 839,
+      "model_id": "mistral.ministral-3-8b-instruct",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 881,
+      "model_id": "mistral.voxtral-small-24b-2507",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 958,
+      "model_id": "zai.glm-5",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 6585,
+      "model_id": "openai.gpt-oss-20b-1:0",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 854,
+      "model_id": "google.gemma-3-4b-it",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": false,
+      "ms": 0,
+      "skipped": true,
+      "reason": "edit-only (needs source image)",
+      "model_id": "stability.stable-fast-upscale-v1:0",
+      "modal": "image",
+      "types": [
+        "INFERENCE_PROFILE"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 816,
+      "model_id": "anthropic.claude-opus-4-7",
+      "modal": "text",
+      "types": [
+        "INFERENCE_PROFILE"
+      ]
+    },
+    {
+      "ok": false,
+      "ms": 0,
+      "skipped": true,
+      "reason": "edit-only (needs source image)",
+      "model_id": "stability.stable-image-erase-object-v1:0",
+      "modal": "image",
+      "types": [
+        "INFERENCE_PROFILE"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 881,
+      "model_id": "openai.gpt-oss-safeguard-120b",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 841,
+      "model_id": "google.gemma-3-27b-it",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": false,
+      "ms": 0,
+      "skipped": true,
+      "reason": "edit-only (needs source image)",
+      "model_id": "stability.stable-image-control-structure-v1:0",
+      "modal": "image",
+      "types": [
+        "INFERENCE_PROFILE"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 1819,
+      "model_id": "anthropic.claude-sonnet-4-5-20250929-v1:0",
+      "modal": "text",
+      "types": [
+        "INFERENCE_PROFILE"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 895,
+      "model_id": "qwen.qwen3-vl-235b-a22b",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 1304,
+      "model_id": "zai.glm-4.7",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 862,
+      "model_id": "writer.palmyra-vision-7b",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": false,
+      "ms": 0,
+      "skipped": true,
+      "reason": "edit-only (needs source image)",
+      "model_id": "stability.stable-outpaint-v1:0",
+      "modal": "image",
+      "types": [
+        "INFERENCE_PROFILE"
+      ]
+    },
+    {
+      "ok": false,
+      "ms": 0,
+      "skipped": true,
+      "reason": "edit-only (needs source image)",
+      "model_id": "stability.stable-image-inpaint-v1:0",
+      "modal": "image",
+      "types": [
+        "INFERENCE_PROFILE"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 881,
+      "model_id": "anthropic.claude-opus-4-1-20250805-v1:0",
+      "modal": "text",
+      "types": [
+        "INFERENCE_PROFILE"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 6139,
+      "model_id": "qwen.qwen3-coder-480b-a35b-v1:0",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": false,
+      "ms": 0,
+      "skipped": true,
+      "reason": "edit-only (needs source image)",
+      "model_id": "stability.stable-image-style-guide-v1:0",
+      "modal": "image",
+      "types": [
+        "INFERENCE_PROFILE"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 900,
+      "model_id": "mistral.magistral-small-2509",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": false,
+      "ms": 0,
+      "skipped": true,
+      "reason": "edit-only (needs source image)",
+      "model_id": "stability.stable-style-transfer-v1:0",
+      "modal": "image",
+      "types": [
+        "INFERENCE_PROFILE"
+      ]
+    },
+    {
+      "ok": false,
+      "ms": 588,
+      "reason": "HTTP 403: {\"decision\": \"DENY\", \"denial_reason\": \"model us.cohere.embed-v4:0 not in allowed list\"}",
+      "model_id": "cohere.embed-v4:0",
+      "modal": "embedding",
+      "types": [
+        "INFERENCE_PROFILE"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 893,
+      "model_id": "deepseek.v3-v1:0",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": false,
+      "ms": 15260,
+      "reason": "The read operation timed out",
+      "model_id": "mistral.ministral-3-3b-instruct",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 725,
+      "model_id": "anthropic.claude-opus-4-5-20251101-v1:0",
+      "modal": "text",
+      "types": [
+        "INFERENCE_PROFILE"
+      ]
+    },
+    {
+      "ok": false,
+      "ms": 0,
+      "skipped": true,
+      "reason": "edit-only (needs source image)",
+      "model_id": "stability.stable-image-search-replace-v1:0",
+      "modal": "image",
+      "types": [
+        "INFERENCE_PROFILE"
+      ]
+    },
+    {
+      "ok": false,
+      "ms": 15260,
+      "reason": "The read operation timed out",
+      "model_id": "qwen.qwen3-coder-30b-a3b-v1:0",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 818,
+      "model_id": "openai.gpt-oss-safeguard-20b",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 980,
+      "model_id": "amazon.titan-embed-g1-text-02",
+      "modal": "embedding",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 1022,
+      "model_id": "amazon.nova-lite-v1:0",
+      "modal": "text",
+      "types": [
+        "INFERENCE_PROFILE"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 861,
+      "model_id": "amazon.nova-micro-v1:0",
+      "modal": "text",
+      "types": [
+        "INFERENCE_PROFILE"
+      ]
+    },
+    {
+      "ok": false,
+      "ms": 479,
+      "reason": "HTTP 403: {\"decision\": \"DENY\", \"denial_reason\": \"model amazon.titan-embed-text-v1:2:8k not in allowed list\"}",
+      "model_id": "amazon.titan-embed-text-v1:2:8k",
+      "modal": "embedding",
+      "types": [
+        "PROVISIONED"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 976,
+      "model_id": "amazon.titan-embed-text-v1",
+      "modal": "embedding",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 1200,
+      "model_id": "amazon.titan-embed-text-v2:0",
+      "modal": "embedding",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": false,
+      "ms": 504,
+      "reason": "HTTP 403: {\"decision\": \"DENY\", \"denial_reason\": \"model amazon.titan-embed-image-v1:0 not in allowed list\"}",
+      "model_id": "amazon.titan-embed-image-v1:0",
+      "modal": "embedding",
+      "types": [
+        "PROVISIONED"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 947,
+      "model_id": "amazon.titan-embed-image-v1",
+      "modal": "embedding",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 938,
+      "model_id": "amazon.rerank-v1:0",
+      "modal": "rerank",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 9746,
+      "model_id": "stability.sd3-5-large-v1:0",
+      "modal": "image",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 7706,
+      "model_id": "stability.stable-image-core-v1:1",
+      "modal": "image",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 12304,
+      "model_id": "stability.stable-image-ultra-v1:1",
+      "modal": "image",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": false,
+      "ms": 541,
+      "reason": "HTTP 403: {\"decision\": \"DENY\", \"denial_reason\": \"model cohere.embed-english-v3:0:512 not in allowed list\"}",
+      "model_id": "cohere.embed-english-v3:0:512",
+      "modal": "embedding",
+      "types": [
+        "PROVISIONED"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 941,
+      "model_id": "cohere.embed-english-v3",
+      "modal": "embedding",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": false,
+      "ms": 493,
+      "reason": "HTTP 403: {\"decision\": \"DENY\", \"denial_reason\": \"model cohere.embed-multilingual-v3:0:512 not in allowed list\"}",
+      "model_id": "cohere.embed-multilingual-v3:0:512",
+      "modal": "embedding",
+      "types": [
+        "PROVISIONED"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 966,
+      "model_id": "cohere.embed-multilingual-v3",
+      "modal": "embedding",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": false,
+      "ms": 751,
+      "reason": "HTTP 502: {\"decision\": \"ERROR\", \"error\": \"bedrock invocation failed: An error occurred (ValidationException) when calling the InvokeModel operation: Malformed i",
+      "model_id": "cohere.rerank-v3-5:0",
+      "modal": "rerank",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 1056,
+      "model_id": "deepseek.r1-v1:0",
+      "modal": "text",
+      "types": [
+        "INFERENCE_PROFILE"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 914,
+      "model_id": "meta.llama3-8b-instruct-v1:0",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 814,
+      "model_id": "meta.llama3-70b-instruct-v1:0",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": false,
+      "ms": 567,
+      "reason": "HTTP 403: {\"decision\": \"DENY\", \"denial_reason\": \"model meta.llama3-1-8b-instruct-v1:0:128k not in allowed list\"}",
+      "model_id": "meta.llama3-1-8b-instruct-v1:0:128k",
+      "modal": "text",
+      "types": [
+        "PROVISIONED"
+      ]
+    },
+    {
+      "ok": false,
+      "ms": 528,
+      "reason": "HTTP 403: {\"decision\": \"DENY\", \"denial_reason\": \"model meta.llama3-1-8b-instruct-v1:0 not in allowed list\"}",
+      "model_id": "meta.llama3-1-8b-instruct-v1:0",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND",
+        "INFERENCE_PROFILE"
+      ]
+    },
+    {
+      "ok": false,
+      "ms": 498,
+      "reason": "HTTP 403: {\"decision\": \"DENY\", \"denial_reason\": \"model meta.llama3-1-70b-instruct-v1:0:128k not in allowed list\"}",
+      "model_id": "meta.llama3-1-70b-instruct-v1:0:128k",
+      "modal": "text",
+      "types": [
+        "PROVISIONED"
+      ]
+    },
+    {
+      "ok": false,
+      "ms": 528,
+      "reason": "HTTP 403: {\"decision\": \"DENY\", \"denial_reason\": \"model meta.llama3-1-70b-instruct-v1:0 not in allowed list\"}",
+      "model_id": "meta.llama3-1-70b-instruct-v1:0",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND",
+        "INFERENCE_PROFILE"
+      ]
+    },
+    {
+      "ok": false,
+      "ms": 522,
+      "reason": "HTTP 403: {\"decision\": \"DENY\", \"denial_reason\": \"model meta.llama3-3-70b-instruct-v1:0:128k not in allowed list\"}",
+      "model_id": "meta.llama3-3-70b-instruct-v1:0:128k",
+      "modal": "text",
+      "types": []
+    },
+    {
+      "ok": true,
+      "ms": 878,
+      "model_id": "meta.llama3-3-70b-instruct-v1:0",
+      "modal": "text",
+      "types": [
+        "INFERENCE_PROFILE"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 945,
+      "model_id": "meta.llama4-scout-17b-instruct-v1:0",
+      "modal": "text",
+      "types": [
+        "INFERENCE_PROFILE"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 906,
+      "model_id": "meta.llama4-maverick-17b-instruct-v1:0",
+      "modal": "text",
+      "types": [
+        "INFERENCE_PROFILE"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 813,
+      "model_id": "mistral.mistral-7b-instruct-v0:2",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 751,
+      "model_id": "mistral.mixtral-8x7b-instruct-v0:1",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 819,
+      "model_id": "mistral.mistral-large-2402-v1:0",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 865,
+      "model_id": "mistral.mistral-large-2407-v1:0",
+      "modal": "text",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": true,
+      "ms": 884,
+      "model_id": "mistral.pixtral-large-2502-v1:0",
+      "modal": "text",
+      "types": [
+        "INFERENCE_PROFILE"
+      ]
+    },
+    {
+      "ok": false,
+      "ms": 0,
+      "skipped": true,
+      "reason": "video model — async only",
+      "model_id": "luma.ray-v2:0",
+      "modal": "video",
+      "types": [
+        "ON_DEMAND"
+      ]
+    },
+    {
+      "ok": false,
+      "ms": 860,
+      "reason": "HTTP 500: {\"decision\": \"ERROR\", \"error\": \"bedrock invocation failed: An error occurred (AccessDeniedException) when calling the Converse operation: Model access",
+      "model_id": "writer.palmyra-x4-v1:0",
+      "modal": "text",
+      "types": [
+        "INFERENCE_PROFILE"
+      ]
+    },
+    {
+      "ok": false,
+      "ms": 734,
+      "reason": "HTTP 500: {\"decision\": \"ERROR\", \"error\": \"bedrock invocation failed: An error occurred (AccessDeniedException) when calling the Converse operation: Model access",
+      "model_id": "writer.palmyra-x5-v1:0",
+      "modal": "text",
+      "types": [
+        "INFERENCE_PROFILE"
+      ]
+    }
+  ]
+}
