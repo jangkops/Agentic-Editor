@@ -125,6 +125,12 @@ class GatewayClient:
                     # Gateway 응답에서 이미지 데이터 추출
                     if "images" in data:
                         return {"images": data["images"]}
+                    # /invoke 라우트 래핑 응답: {"decision":"ALLOW","output":{...},"usage":{...},"cost_krw":...}
+                    if "output" in data and isinstance(data.get("output"), dict):
+                        out = data["output"]
+                        if "images" in out:
+                            return {"images": out["images"]}
+                        return out
                     # 모델 응답이 body 안에 래핑된 경우
                     resp_body = data.get("body", data)
                     if isinstance(resp_body, str):
