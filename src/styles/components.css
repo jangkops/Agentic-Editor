@@ -742,15 +742,16 @@
   50% { opacity: 0.65; }
 }
 
-/* ===== Model Recommender Card ===== */
+/* ===== Model Recommender Card — Refined ===== */
 .model-recommend-card {
   margin: 8px 12px;
-  padding: 12px 16px;
+  padding: 0;
   background: var(--color-bg-tertiary);
   border: 1px solid var(--color-accent);
   border-left: 3px solid var(--color-accent);
-  border-radius: var(--border-radius);
-  animation: recommend-slide-in 200ms ease-out;
+  border-radius: 6px;
+  overflow: hidden;
+  animation: recommend-slide-in 250ms ease-out;
 }
 .model-recommend-card.recommend-fade-out {
   opacity: 0;
@@ -764,51 +765,118 @@
 .recommend-header {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-bottom: 6px;
+  gap: 8px;
+  padding: 10px 14px 6px;
 }
 .recommend-icon { font-size: 14px; }
 .recommend-title {
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 700;
   color: var(--color-accent);
   flex: 1;
 }
 .recommend-dismiss {
   cursor: pointer;
   color: var(--color-text-muted);
-  font-size: 12px;
-  padding: 2px 4px;
+  font-size: 13px;
+  padding: 3px 5px;
   border-radius: 3px;
+  transition: all 150ms;
 }
 .recommend-dismiss:hover { background: var(--color-bg-hover); color: var(--color-text-primary); }
 .recommend-reason {
   font-size: 11px;
   color: var(--color-text-secondary);
-  margin-bottom: 8px;
+  padding: 0 14px 8px;
   line-height: 1.4;
 }
 .recommend-actions {
   display: flex;
   gap: 6px;
+  padding: 0 14px 10px;
+  flex-wrap: wrap;
 }
 .recommend-btn {
-  font-size: 10px;
-  padding: 4px 10px;
-  border-radius: var(--border-radius);
+  font-size: 11px;
+  padding: 5px 12px;
+  border-radius: 4px;
   border: 1px solid var(--color-border);
   background: var(--color-bg-secondary);
   color: var(--color-text-primary);
   cursor: pointer;
   transition: all 150ms;
+  font-weight: 500;
 }
-.recommend-btn:hover { background: var(--color-bg-hover); }
+.recommend-btn:hover {
+  background: var(--color-bg-hover);
+  border-color: var(--color-text-muted);
+}
 .recommend-btn.accept {
   background: var(--color-accent);
   border-color: var(--color-accent);
   color: #fff;
+  font-weight: 600;
 }
-.recommend-btn.accept:hover { background: var(--color-accent-hover); }
+.recommend-btn.accept:hover { background: var(--color-accent-hover, #1a8ad4); }
+.recommend-btn.recommend-multi {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-primary);
+  text-align: left;
+  width: 100%;
+}
+.recommend-btn.recommend-multi:hover {
+  border-color: var(--color-accent);
+  background: rgba(0, 122, 204, 0.06);
+}
+.recommend-rank {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  font-size: 10px; font-weight: 700;
+  background: var(--color-accent);
+  color: #fff; flex-shrink: 0;
+}
+.recommend-model-name { font-weight: 600; font-size: 11px; color: var(--color-text-primary); }
+.recommend-model-desc { font-size: 10px; color: var(--color-text-muted); margin-left: auto; }
+/* Tabs */
+.recommend-tabs {
+  display: flex; gap: 0; padding: 0 14px;
+  border-bottom: 1px solid var(--color-border);
+}
+.recommend-tab {
+  background: transparent; border: none;
+  color: var(--color-text-muted); font-size: 11px;
+  padding: 8px 12px; cursor: pointer; font-weight: 600;
+  border-bottom: 2px solid transparent; transition: all 150ms;
+}
+.recommend-tab:hover { color: var(--color-text-primary); }
+.recommend-tab.active { color: var(--color-accent); border-bottom-color: var(--color-accent); }
+.recommend-tab-body { padding: 10px 14px; }
+.recommend-strategy-list { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+.recommend-strategy-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px; background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border); border-radius: 4px;
+  font-size: 11px; color: var(--color-text-primary);
+  transition: border-color 150ms;
+}
+.recommend-strategy-item:hover { border-color: var(--color-accent); }
+.recommend-strategy-item .strategy-name { font-weight: 600; flex: 1; }
+.recommend-strategy-item .strategy-desc { color: var(--color-text-secondary); font-size: 10px; }
+.recommend-stage {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px; border-radius: 50%;
+  font-size: 9px; font-weight: 700;
+  background: var(--color-accent); color: #fff; flex-shrink: 0;
+}
+.recommend-stage-label { flex: 1; font-weight: 500; color: var(--color-text-primary); font-size: 11px; }
 
 /* ===== Generated File Action Buttons (통일) ===== */
 .tmc-action-btn{
