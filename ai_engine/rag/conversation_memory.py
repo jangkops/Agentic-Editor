@@ -103,7 +103,15 @@ class ConversationMemory:
             if total_chars + len(content) > max_total_chars:
                 break
             total_chars += len(content)
-            selected.insert(0, {"role": msg["role"], "content": [{"text": content}]})
+            # 이미지 첨부가 있는 user 메시지 → Bedrock image 블록 포함
+            content_blocks = [{"text": content}]
+            if msg.get("role") == "user" and msg.get("images"):
+                for img in msg["images"][:5]:
+                    fmt = img.get("format", "png")
+                    b64 = img.get("base64", "")
+                    if b64:
+                        content_blocks.append({"image": {"format": fmt, "source": {"bytes": b64}}})
+            selected.insert(0, {"role": msg["role"], "content": content_blocks})
 
         messages.extend(selected)
 
