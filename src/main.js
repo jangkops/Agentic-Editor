@@ -1897,8 +1897,62 @@ async function runParallel(prompt) {
     }
   } catch (e) { console.error('[parallel] sessionMessages 저장 실패:', e); }
 
+  // === 병렬 완료 후 추천 카드 — 결과를 컨텍스트로 활용한 다음 단계 제안 ===
+  _showPostParallelRecommendation(prompt);
+
   saveParallelResults();
   renderMessages();
+}
+
+// 병렬 완료 후 추천 카드 — 파일 생성 작업이면 결과를 오케스트레이터에 전달
+function _showPostParallelRecommendation(originalPrompt) {
+  if (!originalPrompt) return;
+  const _filePattern = /(?:pdf|xlsx|엑셀|pptx|파워포인트|docx|워드|hwp|이미지|image).*(생성|만들|작성|제작|그려)|(?:생성|만들|작성|제작|그려).*(?:pdf|xlsx|엑셀|pptx|파워포인트|docx|워드|hwp|이미지|image)|파일.*(?:3|4|5|여러).*(?:종|개|장)/i;
+  const isFileTask = _filePattern.test(originalPrompt);
+
+  const doneResults = [...state.parallelResults.values()].filter(r => r.status === 'done');
+  if (doneResults.length < 1) return;
+
+  const container = document.getElementById('chat-messages');
+  if (!container) return;
+
+  const card = document.createElement('div');
+  card.className = 'model-recommend-card';
+  card.innerHTML = `
+    <div class="recommend-header">
+      <span class="recommend-title">${isFileTask ? '실제 파일 생성하기' : '다음 단계'}</span>
+      <span class="recommend-dismiss" title="무시">✕</span>
+    </div>
+    <div class="recommend-reason">${isFileTask
+      ? `병렬 모드는 텍스트 응답만 가능하여 실제 파일이 생성되지 않았습니다. ${doneResults.length}개 모델 응답을 종합해 에이전트가 실제 파일을 생성할 수 있습니다.`
+      : `${doneResults.length}개 모델의 응답을 비교하거나 합의 도출 후 다음 작업으로 이어갑니다.`}</div>
+    <div class="recommend-actions">
+      ${isFileTask ? `<button class="recommend-btn accept" data-action="orchestrate-with-context">에이전트로 실제 파일 생성</button>` : ''}
+      ${doneResults.length >= 2 ? `<button class="recommend-btn" data-action="consensus">합의 도출</button>` : ''}
+      <button class="recommend-btn dismiss">닫기</button>
+    </div>
+  `;
+  container.appendChild(card);
+  container.scrollTop = container.scrollHeight;
+
+  const cleanup = () => { card.classList.add('recommend-fade-out'); setTimeout(() => card.remove(), 300); };
+  card.querySelector('.recommend-dismiss')?.addEventListener('click', cleanup);
+  card.querySelector('.recommend-btn.dismiss')?.addEventListener('click', cleanup);
+
+  // 핵심: 병렬 결과를 컨텍스트로 합쳐서 오케스트레이터에 전달
+  card.querySelector('[data-action="orchestrate-with-context"]')?.addEventListener('click', () => {
+    cleanup();
+    const contextSummary = doneResults.map((r, i) =>
+      `### [참고 답변 ${i+1}] ${r.modelName}\n${(r.content || '').substring(0, 1500)}`
+    ).join('\n\n---\n\n');
+    const enrichedPrompt = `${originalPrompt}\n\n--- 이전 ${doneResults.length}개 모델의 답변 (참고용) ---\n${contextSummary}\n\n위 답변들을 참고하여 실제 파일을 생성해주세요. 각 모델이 제안한 구조와 내용을 종합해 사용자 의도에 가장 부합하는 결과물을 만들어주세요.`;
+    runOrchestrated(enrichedPrompt);
+  });
+
+  card.querySelector('[data-action="consensus"]')?.addEventListener('click', () => {
+    cleanup();
+    if (typeof runConsensus === 'function') runConsensus();
+  });
 }
 
 let _consensusModelId = null;

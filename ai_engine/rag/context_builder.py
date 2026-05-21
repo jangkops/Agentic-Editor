@@ -55,7 +55,29 @@ def get_searcher(
                 # GatewayClient가 없으면 BM25만 사용
                 raise RuntimeError("GatewayClient 필요")
             # 캐시된 벡터 저장소 로드 시도
-            cache_dir = os.path.join(project_path, ".rag_cache")
+            # project_path가 read-only 파일시스템(예: /fsx)이면 ~/.cache로 fallback
+            _primary_cache = os.path.join(project_path, ".rag_cache")
+            cache_dir = _primary_cache
+            try:
+                os.makedirs(cache_dir, exist_ok=True)
+                # 쓰기 가능 여부 테스트
+                _test_path = os.path.join(cache_dir, ".write_test")
+                with open(_test_path, "w") as _tf:
+                    _tf.write("ok")
+                os.remove(_test_path)
+            except (OSError, PermissionError) as _e:
+                # Read-only 파일시스템 → 사용자 홈 디렉토리 캐시로 fallback
+                import hashlib
+                _proj_hash = hashlib.md5(project_path.encode()).hexdigest()[:12]
+                cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "ae_rag", _proj_hash)
+                try:
+                    os.makedirs(cache_dir, exist_ok=True)
+                    print(f"[RAG] 프로젝트 경로 쓰기 불가 ({_e}) → fallback: {cache_dir}")
+                except Exception as _e2:
+                    # 그것도 실패 → /tmp
+                    cache_dir = os.path.join("/tmp", "ae_rag", _proj_hash)
+                    os.makedirs(cache_dir, exist_ok=True)
+                    print(f"[RAG] 홈 캐시도 실패 → /tmp fallback: {cache_dir}")
             store = VectorStore()
             cache_path = os.path.join(cache_dir, "vectors")
 
