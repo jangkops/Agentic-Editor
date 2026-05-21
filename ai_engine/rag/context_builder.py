@@ -55,29 +55,57 @@ def get_searcher(
                 # GatewayClient가 없으면 BM25만 사용
                 raise RuntimeError("GatewayClient 필요")
             # 캐시된 벡터 저장소 로드 시도
-            # project_path가 read-only 파일시스템(예: /fsx)이면 ~/.cache로 fallback
-            _primary_cache = os.path.join(project_path, ".rag_cache")
-            cache_dir = _primary_cache
-            try:
-                os.makedirs(cache_dir, exist_ok=True)
-                # 쓰기 가능 여부 테스트
-                _test_path = os.path.join(cache_dir, ".write_test")
-                with open(_test_path, "w") as _tf:
-                    _tf.write("ok")
-                os.remove(_test_path)
-            except (OSError, PermissionError) as _e:
-                # Read-only 파일시스템 → 사용자 홈 디렉토리 캐시로 fallback
-                import hashlib
-                _proj_hash = hashlib.md5(project_path.encode()).hexdigest()[:12]
-                cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "ae_rag", _proj_hash)
+            # 우선순위:
+            # 1) /fsx/home/<user>/.cache/ae_rag/<projhash> — FSx 사용자 홈 (원격 모드)
+            # 2) ~/.cache/ae_rag/<projhash>              — 일반 사용자 홈
+            # 3) /tmp/ae_rag/<projhash>                  — 최종 fallback
+            import hashlib
+            _proj_hash = hashlib.md5(project_path.encode()).hexdigest()[:12]
+
+            def _try_dir(d):
+                """디렉토리에 쓰기 가능한지 검증. 가능하면 경로 반환, 아니면 None."""
                 try:
-                    os.makedirs(cache_dir, exist_ok=True)
-                    print(f"[RAG] 프로젝트 경로 쓰기 불가 ({_e}) → fallback: {cache_dir}")
-                except Exception as _e2:
-                    # 그것도 실패 → /tmp
-                    cache_dir = os.path.join("/tmp", "ae_rag", _proj_hash)
-                    os.makedirs(cache_dir, exist_ok=True)
-                    print(f"[RAG] 홈 캐시도 실패 → /tmp fallback: {cache_dir}")
+                    os.makedirs(d, exist_ok=True)
+                    _t = os.path.join(d, ".write_test")
+                    with open(_t, "w") as _tf:
+                        _tf.write("ok")
+                    os.remove(_t)
+                    return d
+                except (OSError, PermissionError):
+                    return None
+
+            cache_dir = None
+
+            # 후보 1: FSx 사용자 홈 (project_path가 /fsx/home/<user>/... 형태일 때)
+            _fsx_user_home = None
+            if project_path.startswith("/fsx/home/"):
+                _parts = project_path.split("/")
+                if len(_parts) >= 4:  # ['', 'fsx', 'home', '<user>', ...]
+                    _fsx_user_home = "/".join(_parts[:4])  # /fsx/home/<user>
+            if _fsx_user_home:
+                _candidate = os.path.join(_fsx_user_home, ".cache", "ae_rag", _proj_hash)
+                cache_dir = _try_dir(_candidate)
+                if cache_dir:
+                    print(f"[RAG] FSx 사용자 홈 캐시 사용: {cache_dir}")
+
+            # 후보 2: project_path 자체 (~/dev/myproj 같은 일반 로컬 경로)
+            if cache_dir is None:
+                _candidate = os.path.join(project_path, ".rag_cache")
+                cache_dir = _try_dir(_candidate)
+
+            # 후보 3: 사용자 홈 .cache
+            if cache_dir is None:
+                _candidate = os.path.join(os.path.expanduser("~"), ".cache", "ae_rag", _proj_hash)
+                cache_dir = _try_dir(_candidate)
+                if cache_dir:
+                    print(f"[RAG] 사용자 홈 캐시 fallback: {cache_dir}")
+
+            # 후보 4: /tmp (최종)
+            if cache_dir is None:
+                cache_dir = os.path.join("/tmp", "ae_rag", _proj_hash)
+                os.makedirs(cache_dir, exist_ok=True)
+                print(f"[RAG] /tmp fallback: {cache_dir}")
+
             store = VectorStore()
             cache_path = os.path.join(cache_dir, "vectors")
 

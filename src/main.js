@@ -1751,6 +1751,7 @@ async function retryFailedParallel(prompt) {
 async function runParallel(prompt) {
   if (!state.parallelSlots.length) return;
   state.isStreaming = true;
+  state._lastParallelPrompt = prompt; // 합의 도출 후 에이전트 전환 시 원본 프롬프트 참조
   state._streamStartTime = Date.now();
   state._abortController = new AbortController();
 
@@ -2232,8 +2233,47 @@ ${dr.map((r, i) => `### 모델 ${i + 1}: ${r.model}\n${r.content.substring(0, 30
   saveConsensusResults();
   renderConsensusView();
 
+  // 합의 결과를 이용한 다음 단계 추천 (파일 생성 작업이면 에이전트로 실제 파일 생성 제안)
+  _showPostConsensusRecommendation(msg.content || '', state._lastParallelPrompt || '');
+
   renderMessages();
   saveConversation();
+}
+
+// 합의 도출 후 추천 — 합의된 텍스트를 컨텍스트로 에이전트에 전달
+function _showPostConsensusRecommendation(consensusText, originalPrompt) {
+  if (!consensusText || !originalPrompt) return;
+  const _filePattern = /(?:pdf|xlsx|엑셀|pptx|파워포인트|docx|워드|hwp|이미지|image).*(생성|만들|작성|제작|그려)|(?:생성|만들|작성|제작|그려).*(?:pdf|xlsx|엑셀|pptx|파워포인트|docx|워드|hwp|이미지|image)/i;
+  if (!_filePattern.test(originalPrompt)) return;
+
+  const container = document.getElementById('chat-messages');
+  if (!container) return;
+
+  const card = document.createElement('div');
+  card.className = 'model-recommend-card';
+  card.innerHTML = `
+    <div class="recommend-header">
+      <span class="recommend-title">합의 결과로 실제 파일 생성</span>
+      <span class="recommend-dismiss" title="무시">✕</span>
+    </div>
+    <div class="recommend-reason">합의된 답변을 바탕으로 에이전트가 실제 파일을 생성합니다 (도구 사용).</div>
+    <div class="recommend-actions">
+      <button class="recommend-btn accept" data-action="orchestrate-from-consensus">합의 내용으로 파일 생성</button>
+      <button class="recommend-btn dismiss">닫기</button>
+    </div>
+  `;
+  container.appendChild(card);
+  container.scrollTop = container.scrollHeight;
+
+  const cleanup = () => { card.classList.add('recommend-fade-out'); setTimeout(() => card.remove(), 300); };
+  card.querySelector('.recommend-dismiss')?.addEventListener('click', cleanup);
+  card.querySelector('.recommend-btn.dismiss')?.addEventListener('click', cleanup);
+
+  card.querySelector('[data-action="orchestrate-from-consensus"]')?.addEventListener('click', () => {
+    cleanup();
+    const enrichedPrompt = `${originalPrompt}\n\n--- 합의된 답변 (참고용, 모든 모델이 동의한 내용) ---\n${consensusText.substring(0, 4000)}\n\n위 합의된 내용을 그대로 활용하여 실제 파일을 생성해주세요.`;
+    runOrchestrated(enrichedPrompt);
+  });
 }
 
 function renderConsensusView() {
