@@ -1,12 +1,13 @@
 /* ===== Model Result Cards ===== */
 .model-card{
   background:var(--color-bg-card);border:1px solid var(--color-border);
-  border-radius:var(--radius-sm);overflow:hidden;transition:border-color var(--transition);
+  border-radius:var(--radius-sm);overflow:hidden;transition:border-color 150ms, box-shadow 250ms;
   display:flex;flex-direction:column;
 }
 .model-card:hover{border-color:#555;}
 .model-card.error{border-color:var(--color-error);}
 .model-card.done{border-color:var(--color-success);}
+.model-card.expanded{box-shadow:0 4px 16px rgba(0,0,0,0.3);border-color:var(--color-accent);}
 .model-card-header{
   display:flex;align-items:center;justify-content:space-between;
   padding:6px 10px;border-bottom:1px solid var(--color-border);font-size:12px;
@@ -19,9 +20,10 @@
 .badge-pending{background:var(--color-text-muted);}
 .model-card-body{
   padding:8px 10px;font-size:12px;color:var(--color-text-primary);
-  max-height:250px;overflow-y:auto;white-space:pre-wrap;line-height:1.6;flex:1;
+  max-height:180px;overflow-y:auto;white-space:pre-wrap;line-height:1.6;flex:1;
+  transition:max-height 250ms cubic-bezier(0.4, 0, 0.2, 1);
 }
-.model-card.expanded .model-card-body{max-height:none;}
+.model-card.expanded .model-card-body{max-height:none;overflow-y:auto;}
 
 /* ===== Chat Messages ===== */
 .chat-msg{padding:4px 12px;}

@@ -1142,16 +1142,20 @@ async function sendMessage() {
   if (!recHandled) {
     // === Intent Classifier 기반 라우팅 ===
     // LLM으로 의도를 분류하고, 결과에 따라 최적 실행 경로를 선택한다.
-    // 분류 실패 시 기존 모드 기반 fallback.
+    // 분류 실패 시 기존 모드 기반 fallback. 3초 타임아웃.
     let intent = null;
     try {
+      const _classifyCtrl = new AbortController();
+      const _classifyTimeout = setTimeout(() => _classifyCtrl.abort(), 3000);
       const classifyResp = await fetch(`${apiBase()}/api/agents/classify-intent`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt: content, awsProfile: state.settings?.awsProfile || 'bedrock-gw', bedrockUser: state.settings?.bedrockUser || '' }),
+        signal: _classifyCtrl.signal,
       });
+      clearTimeout(_classifyTimeout);
       if (classifyResp.ok) intent = await classifyResp.json();
     } catch (e) {
-      console.warn('[Intent] 분류 실패, fallback 사용:', e.message);
+      console.warn('[Intent] 분류 실패/타임아웃, fallback 사용:', e.message);
     }
 
     if (intent && intent.intent) {
@@ -2263,17 +2267,28 @@ function renderParallelResultGrid() {
       </div>`;
 
     card.querySelector('.card-toggle').addEventListener('click', () => {
-      if (card.classList.contains('expanded')) {
-        card.classList.remove('expanded');
-      } else {
-        card.classList.add('expanded');
-      }
-      // 상태 저장 후 재렌더링하지 않고 직접 DOM 조작
       const body = card.querySelector('.model-card-body');
-      const isNowExp = card.classList.contains('expanded');
-      body.style.maxHeight = isNowExp ? 'none' : '180px';
-      body.textContent = isNowExp ? (r.content || '') : (r.status === 'error' && r.content.length > 80 ? r.content.substring(0, 80) + '...' : r.content);
-      card.querySelector('.card-toggle').textContent = isNowExp ? '축소' : '확장';
+      const isExpanding = !card.classList.contains('expanded');
+
+      if (isExpanding) {
+        // 확장: 현재 높이 → scrollHeight 애니메이션
+        card.classList.add('expanded');
+        body.style.maxHeight = body.scrollHeight + 'px';
+        body.innerHTML = r.status === 'done' ? fmtMd(r.content || '') : esc(r.content || '');
+        // 애니메이션 완료 후 maxHeight 제거 (내용 변경 시 자연스럽게)
+        setTimeout(() => { body.style.maxHeight = 'none'; }, 250);
+      } else {
+        // 축소: scrollHeight → 180px 애니메이션
+        body.style.maxHeight = body.scrollHeight + 'px';
+        // 강제 reflow 후 축소
+        body.offsetHeight; // force reflow
+        card.classList.remove('expanded');
+        body.style.maxHeight = '180px';
+        const displayContent = r.status === 'error' && (r.content || '').length > 80
+          ? r.content.substring(0, 80) + '...' : (r.content || '');
+        setTimeout(() => { body.textContent = displayContent; }, 250);
+      }
+      card.querySelector('.card-toggle').textContent = isExpanding ? '축소' : '확장';
     });
 
     // 복사 버튼
