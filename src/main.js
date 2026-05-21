@@ -1138,8 +1138,45 @@ async function sendMessage() {
   }
 
   if (!recHandled) {
-    if (state.mode === 'parallel') await runParallel(content);
-    else await runSingle(content);
+    // === Intent Classifier 기반 라우팅 ===
+    // LLM으로 의도를 분류하고, 결과에 따라 최적 실행 경로를 선택한다.
+    // 분류 실패 시 기존 모드 기반 fallback.
+    let intent = null;
+    try {
+      const classifyResp = await fetch(`${apiBase()}/api/agents/classify-intent`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: content, awsProfile: state.settings?.awsProfile || 'bedrock-gw', bedrockUser: state.settings?.bedrockUser || '' }),
+      });
+      if (classifyResp.ok) intent = await classifyResp.json();
+    } catch (e) {
+      console.warn('[Intent] 분류 실패, fallback 사용:', e.message);
+    }
+
+    if (intent && intent.intent) {
+      addLiveLog('system', `의도 분류: ${intent.intent} (tools=${intent.needs_tools}, parallel=${intent.parallel_useful})`);
+
+      if (intent.needs_tools && (intent.intent === 'file_generation' || intent.intent === 'code_change')) {
+        // 도구가 필요한 작업 → 오케스트레이터 또는 에이전트
+        if (intent.complexity === 'complex' || (intent.file_types && intent.file_types.length > 1)) {
+          await runOrchestrated(content);
+        } else {
+          await runSingle(content); // runSingle → runAgentWorkflow (tool_use 포함)
+        }
+      } else if (intent.parallel_useful && state.mode === 'parallel') {
+        // 병렬 비교가 유용한 작업 + 사용자가 병렬 모드 선택
+        await runParallel(content);
+      } else if (state.mode === 'parallel' && !intent.needs_tools) {
+        // 병렬 모드이지만 도구 불필요 → 병렬 텍스트 비교
+        await runParallel(content);
+      } else {
+        // 기본: 단일 모드
+        await runSingle(content);
+      }
+    } else {
+      // 분류 실패 fallback — 기존 모드 기반
+      if (state.mode === 'parallel') await runParallel(content);
+      else await runSingle(content);
+    }
   }
 
   sendBtn.textContent = '전송';
