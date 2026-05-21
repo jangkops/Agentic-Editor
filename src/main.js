@@ -2363,24 +2363,48 @@ function renderParallelResultGrid() {
     card.querySelector('.card-toggle').addEventListener('click', () => {
       const body = card.querySelector('.model-card-body');
       const isExpanding = !card.classList.contains('expanded');
+      const fullContent = r.status === 'done' ? fmtMd(r.content || '') : esc(r.content || '');
+      const compactContent = r.status === 'error' && (r.content || '').length > 80
+        ? r.content.substring(0, 80) + '...' : (r.content || '');
 
       if (isExpanding) {
-        // 확장: 현재 높이 → scrollHeight 애니메이션
-        card.classList.add('expanded');
-        body.style.maxHeight = body.scrollHeight + 'px';
-        body.innerHTML = r.status === 'done' ? fmtMd(r.content || '') : esc(r.content || '');
-        // 애니메이션 완료 후 maxHeight 제거 (내용 변경 시 자연스럽게)
-        setTimeout(() => { body.style.maxHeight = 'none'; }, 250);
+        // 확장: 본체에 전체 내용 주입 → 현재 높이에서 전체 높이로 부드럽게 확장
+        const startHeight = body.offsetHeight;
+        body.innerHTML = fullContent;
+        body.style.maxHeight = startHeight + 'px';
+        // 다음 프레임에 목표 높이로 transition
+        requestAnimationFrame(() => {
+          card.classList.add('expanded');
+          const targetHeight = body.scrollHeight;
+          body.style.maxHeight = targetHeight + 'px';
+        });
+        // transition 완료 후 maxHeight 해제 (스크롤 가능하게)
+        const onEnd = () => {
+          if (card.classList.contains('expanded')) {
+            body.style.maxHeight = 'none';
+          }
+          body.removeEventListener('transitionend', onEnd);
+        };
+        body.addEventListener('transitionend', onEnd);
       } else {
-        // 축소: scrollHeight → 180px 애니메이션
-        body.style.maxHeight = body.scrollHeight + 'px';
-        // 강제 reflow 후 축소
-        body.offsetHeight; // force reflow
-        card.classList.remove('expanded');
-        body.style.maxHeight = '180px';
-        const displayContent = r.status === 'error' && (r.content || '').length > 80
-          ? r.content.substring(0, 80) + '...' : (r.content || '');
-        setTimeout(() => { body.textContent = displayContent; }, 250);
+        // 축소: 현재 전체 높이 → 180px로 부드럽게 축소
+        const currentHeight = body.scrollHeight;
+        body.style.maxHeight = currentHeight + 'px';
+        // 강제 reflow
+        void body.offsetHeight;
+        // 축소 시작
+        requestAnimationFrame(() => {
+          card.classList.remove('expanded');
+          body.style.maxHeight = '180px';
+        });
+        // transition 완료 후 텍스트 축약
+        const onEnd = () => {
+          if (!card.classList.contains('expanded')) {
+            body.innerHTML = (r.status === 'done' ? fmtMd(compactContent) : esc(compactContent));
+          }
+          body.removeEventListener('transitionend', onEnd);
+        };
+        body.addEventListener('transitionend', onEnd);
       }
       card.querySelector('.card-toggle').textContent = isExpanding ? '축소' : '확장';
     });

@@ -21,9 +21,14 @@
 .model-card-body{
   padding:8px 10px;font-size:12px;color:var(--color-text-primary);
   max-height:180px;overflow-y:auto;white-space:pre-wrap;line-height:1.6;flex:1;
-  transition:max-height 250ms cubic-bezier(0.4, 0, 0.2, 1);
+  transition: max-height 280ms cubic-bezier(0.4, 0, 0.2, 1);
 }
-.model-card.expanded .model-card-body{max-height:none;overflow-y:auto;}
+/* 확장 상태 — JS가 transitionend 후 max-height: none으로 직접 설정.
+   여기 클래스 룰은 fallback (JS 비활성 시) */
+.model-card.expanded .model-card-body{
+  /* JS가 inline style로 'none'을 직접 설정하므로 여기는 큰 값으로 안전 fallback */
+  max-height: 9999px;
+}
 
 /* ===== Chat Messages ===== */
 .chat-msg{padding:4px 12px;}
