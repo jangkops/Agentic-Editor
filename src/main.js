@@ -1117,9 +1117,11 @@ async function sendMessage() {
   sendBtn.textContent = '취소';
   sendBtn.style.background = 'var(--color-error)';
 
-  // 모드와 무관하게 추천 검사 — 병렬 모드에서도 더 적합한 전략(파이프라인/이미지 생성 등) 제안
+  // 모드와 무관하게 추천 검사 — 단, 병렬 모드에서 이미 2개 이상 모델을 선택한 경우 억제
+  // (사용자가 의도적으로 모델을 구성한 상태이므로 추천 불필요)
   let recHandled = false;
-  if (typeof getModelRecommendation === 'function') {
+  const _skipRecommend = state.mode === 'parallel' && Array.isArray(state.parallelSlots) && state.parallelSlots.length >= 2;
+  if (!_skipRecommend && typeof getModelRecommendation === 'function') {
     const rec = getModelRecommendation(content, state.selectedModel?.id || '');
     if (rec) {
       const choice = await showRecommendationCard(rec);
