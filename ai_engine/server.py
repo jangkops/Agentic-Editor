@@ -1513,6 +1513,97 @@ async def list_models(request: Request):
         return JSONResponse(content={"models": {}, "error": str(e)})
 
 
+# ─────────────────────────────────────────────────────────────────
+# Intent Classifier — LLM 기반 의도 분류
+# 사용자 메시지를 분석하여 최적 실행 전략을 결정한다.
+# ─────────────────────────────────────────────────────────────────
+
+INTENT_CLASSIFIER_PROMPT = """사용자 요청을 분석하여 최적 실행 전략을 결정하세요.
+
+[분류 카테고리]
+- file_generation: 실제 파일을 생성/수정해야 함 (PDF/XLSX/DOCX/PPTX/HWP/이미지/코드파일)
+- code_change: 기존 코드 파일을 수정/리팩토링/디버깅
+- analysis: 코드/문서/데이터 분석, 설명, 리뷰
+- generation_text: 글/콘텐츠/아이디어 생성 (파일 저장 불필요)
+- simple_qa: 간단한 질문, 사실 확인, 짧은 응답
+
+[복잡도]
+- simple: 1-2 문단 응답으로 충분
+- moderate: 여러 단계 추론 필요
+- complex: 다중 파일/모듈/긴 작업
+
+[병렬 유용성]
+- true: 여러 모델의 다른 관점 비교가 가치 있음 (분석, 창작, 리뷰)
+- false: 정답이 하나거나 도구 실행이 필수 (파일 생성, 코드 수정)
+
+반드시 아래 JSON 형식으로만 응답하세요 (마크다운 없이):
+{
+  "intent": "file_generation" | "code_change" | "analysis" | "generation_text" | "simple_qa",
+  "needs_tools": true | false,
+  "complexity": "simple" | "moderate" | "complex",
+  "parallel_useful": true | false,
+  "file_types": ["pdf", "xlsx", ...],
+  "reasoning": "한 문장 이유"
+}
+"""
+
+
+@app.post("/api/agents/classify-intent")
+async def classify_intent(request: Request):
+    """사용자 메시지의 의도를 LLM으로 분류한다. Haiku로 빠르게(<1초)."""
+    body = await request.json()
+    prompt = body.get("prompt", "")
+    aws_profile = body.get("awsProfile", os.environ.get("AWS_PROFILE", "bedrock-gw"))
+    bedrock_user = body.get("bedrockUser", os.environ.get("BEDROCK_USER", ""))
+
+    if not prompt or len(prompt.strip()) < 2:
+        return JSONResponse({
+            "intent": "simple_qa", "needs_tools": False,
+            "complexity": "simple", "parallel_useful": False,
+            "file_types": [], "reasoning": "empty or trivial prompt"
+        })
+
+    gw = _get_gw(aws_profile, bedrock_user)
+    classifier_model = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+    try:
+        result = await asyncio.wait_for(
+            gw.converse(
+                model_id=classifier_model,
+                messages=[{"role": "user", "content": [{"text": prompt[:1500]}]}],
+                system_prompt=INTENT_CLASSIFIER_PROMPT,
+            ),
+            timeout=10
+        )
+        if result.get("decision") != "ALLOW":
+            raise RuntimeError(f"classifier failed: {result.get('error') or result.get('decision')}")
+
+        output = result.get("output", {}).get("message", {}).get("content", [])
+        text = "\n".join(c.get("text", "") for c in output if "text" in c).strip()
+        # JSON 추출
+        m = re.search(r"\{[\s\S]*\}", text)
+        if not m:
+            raise RuntimeError(f"no JSON in classifier response: {text[:200]}")
+        parsed = json.loads(m.group(0))
+        # 기본값 보정
+        return JSONResponse({
+            "intent": parsed.get("intent", "simple_qa"),
+            "needs_tools": bool(parsed.get("needs_tools", False)),
+            "complexity": parsed.get("complexity", "simple"),
+            "parallel_useful": bool(parsed.get("parallel_useful", False)),
+            "file_types": parsed.get("file_types", []) or [],
+            "reasoning": parsed.get("reasoning", "")[:200],
+        })
+    except Exception as e:
+        # 분류 실패 시 안전한 기본값 (단순 QA로 처리)
+        print(f"[Intent] 분류 실패: {e}")
+        return JSONResponse({
+            "intent": "simple_qa", "needs_tools": False,
+            "complexity": "simple", "parallel_useful": False,
+            "file_types": [], "reasoning": f"classifier failed: {str(e)[:100]}"
+        })
+
+
 @app.post("/api/agents/run-stream")
 async def run_agent_stream(request: Request):
     body = await request.json()

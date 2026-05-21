@@ -2967,7 +2967,10 @@ function renderToolSummary(c, toolUses) {
                 </div>
                 <div class="tit-meta" style="max-width:320px;font-size:11px;color:var(--color-text-secondary,#9d9d9d);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:flex;align-items:center;gap:6px;" title="${esc(fileName)} — ${esc(metaLine)}">
                   <span style="flex:1;overflow:hidden;text-overflow:ellipsis;">${metaLine || esc(fileName)}</span>
-                  <button class="tit-open-folder" type="button" title="폴더에서 보기" style="background:none;border:none;color:var(--color-text-muted,#6a6a6a);cursor:pointer;font-size:13px;padding:0 2px;">📂</button>
+                  <button class="tit-open-folder tmc-action-btn" type="button" title="폴더에서 보기">폴더</button>
+                  <button class="tit-edit tmc-action-btn" type="button" title="수정">수정</button>
+                  <button class="tit-delete tmc-action-btn" type="button" title="삭제">삭제</button>
+                  <button class="tit-download tmc-action-btn" type="button" title="다운로드">다운로드</button>
                 </div>
               `;
 
@@ -3021,6 +3024,46 @@ function renderToolSummary(c, toolUses) {
                   if (window.electronAPI && window.electronAPI.showItemInFolder) {
                     window.electronAPI.showItemInFolder(fp);
                   }
+                });
+              }
+              // 수정 버튼 — 파일을 채팅 첨부로 등록
+              const editBtn = thumb.querySelector('.tit-edit');
+              if (editBtn) {
+                editBtn.addEventListener('click', (ev) => {
+                  ev.stopPropagation();
+                  const fp = resolveFullPath(it.path);
+                  _attachGeneratedFileForEdit({ path: fp, name: fileName, ext });
+                });
+              }
+              // 삭제 버튼
+              const deleteBtn = thumb.querySelector('.tit-delete');
+              if (deleteBtn) {
+                deleteBtn.addEventListener('click', async (ev) => {
+                  ev.stopPropagation();
+                  if (!confirm(`"${fileName}" 파일을 삭제하시겠습니까?`)) return;
+                  const fp = resolveFullPath(it.path);
+                  try {
+                    if (window.electronAPI?.deleteFile) {
+                      await window.electronAPI.deleteFile(fp);
+                      thumb.remove();
+                      addLiveLog && addLiveLog('system', `삭제됨: ${fileName}`);
+                    }
+                  } catch (e) { console.error('[gallery] delete failed', e); }
+                });
+              }
+              // 다운로드 버튼
+              const dlBtnMeta = thumb.querySelector('.tit-download');
+              if (dlBtnMeta) {
+                dlBtnMeta.addEventListener('click', async (ev) => {
+                  ev.stopPropagation();
+                  const fp = resolveFullPath(it.path);
+                  try {
+                    const r = await window.electronAPI.showSaveDialog({
+                      defaultPath: fileName, sourcePath: fp,
+                      filters: [{ name: ext.toUpperCase(), extensions: [ext] }],
+                    });
+                    if (r && r.ok) addLiveLog && addLiveLog('system', `다운로드 완료: ${r.path}`);
+                  } catch (e) { console.error('[gallery] download failed', e); }
                 });
               }
 

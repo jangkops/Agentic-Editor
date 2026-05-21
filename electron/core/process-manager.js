@@ -42,52 +42,41 @@ class ProcessManager {
     if (this._pythonProcess) { this._pythonProcess.kill('SIGTERM'); this._pythonProcess = null; }
   }
 
-  createTerminal(id, mainWindow) {
+  createTerminal(id, target, opts = {}) {
     try {
-      const shell = process.platform === 'win32' ? 'powershell.exe' : (process.env.SHELL || '/bin/bash');
+      const shell = opts.shell || (process.platform === 'win32' ? 'powershell.exe' : (process.env.SHELL || '/bin/bash'));
+      const cwd = opts.cwd || process.env.HOME || process.cwd();
+
+      const webContents = target && typeof target.send === 'function'
+        ? target
+        : (target && target.webContents ? target.webContents : null);
+
+      const safeSend = (channel, payload) => {
+        try {
+          if (webContents && !webContents.isDestroyed()) webContents.send(channel, payload);
+        } catch (_) {}
+      };
 
       if (pty) {
-        // node-pty — 진짜 PTY
         const term = pty.spawn(shell, [], {
           name: 'xterm-256color',
-          cols: 120, rows: 30,
-          cwd: process.env.HOME || process.cwd(),
+          cols: opts.cols || 120, rows: opts.rows || 30,
+          cwd,
           env: { ...process.env, TERM: 'xterm-256color' },
         });
         this._terminals.set(id, { type: 'pty', proc: term });
-        term.onData((data) => {
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('terminal:data', { id, data });
-          }
-        });
-        term.onExit(({ exitCode }) => {
-          this._terminals.delete(id);
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('terminal:exit', { id, code: exitCode });
-          }
-        });
-        console.log(`[PTY] node-pty 터미널 생성: ${shell} (pid: ${term.pid})`);
+        term.onData((data) => safeSend('terminal:data', { id, data }));
+        term.onExit(({ exitCode }) => { this._terminals.delete(id); safeSend('terminal:exit', { id, code: exitCode }); });
+        console.log(`[PTY] node-pty 터미널 생성: ${shell} (pid: ${term.pid}) cwd: ${cwd}`);
         return { success: true, id };
       }
 
-      // fallback: child_process.spawn (echo 없음, 기본 동작)
       console.log(`[PTY] node-pty 없음, spawn fallback: ${shell}`);
-      const proc = spawn(shell, [], {
-        cwd: process.env.HOME || process.cwd(),
-        env: { ...process.env, TERM: 'dumb' },
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
+      const proc = spawn(shell, [], { cwd, env: { ...process.env, TERM: 'dumb' }, stdio: ['pipe', 'pipe', 'pipe'] });
       this._terminals.set(id, { type: 'spawn', proc });
-      proc.stdout.on('data', (d) => {
-        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('terminal:data', { id, data: d.toString() });
-      });
-      proc.stderr.on('data', (d) => {
-        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('terminal:data', { id, data: d.toString() });
-      });
-      proc.on('exit', (code) => {
-        this._terminals.delete(id);
-        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('terminal:exit', { id, code });
-      });
+      proc.stdout.on('data', (d) => safeSend('terminal:data', { id, data: d.toString() }));
+      proc.stderr.on('data', (d) => safeSend('terminal:data', { id, data: d.toString() }));
+      proc.on('exit', (code) => { this._terminals.delete(id); safeSend('terminal:exit', { id, code }); });
       return { success: true, id };
     } catch (e) {
       console.error(`[PTY] 터미널 생성 실패:`, e.message);
@@ -108,6 +97,14 @@ class ProcessManager {
     if (entry.type === 'pty') entry.proc.kill();
     else entry.proc.kill('SIGTERM');
     this._terminals.delete(id);
+  }
+
+  resizeTerminal(id, cols, rows) {
+    const entry = this._terminals.get(id);
+    if (!entry) return;
+    if (entry.type === 'pty' && typeof entry.proc.resize === 'function') {
+      entry.proc.resize(cols, rows);
+    }
   }
 
   stopAll() {

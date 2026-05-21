@@ -809,3 +809,15 @@
   color: #fff;
 }
 .recommend-btn.accept:hover { background: var(--color-accent-hover); }
+
+/* ===== Generated File Action Buttons (통일) ===== */
+.tmc-action-btn{
+  background:none;border:none;
+  color:var(--color-text-muted);cursor:pointer;
+  font-size:10px;padding:2px 5px;border-radius:3px;
+  transition:all 150ms;font-weight:500;
+}
+.tmc-action-btn:hover{
+  background:var(--color-bg-hover);color:var(--color-text-primary);
+}
+.tmc-action-btn[title="삭제"]:hover{color:var(--color-error);}
