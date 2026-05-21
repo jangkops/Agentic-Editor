@@ -1951,6 +1951,20 @@ async def run_agent_parallel(request: Request):
             if rag_context:
                 sp = (sp + "\n\n" + rag_context) if sp else rag_context
 
+            # 할루시네이션 방지 — 병렬 모드는 텍스트 응답만 가능 (도구 없음)
+            _anti = (
+                "\n\n[중요 제약] 이 호출에서는 파일 생성/수정 도구가 제공되지 않습니다. "
+                "실제로 파일을 생성하거나 저장할 수 없습니다. "
+                "'파일을 생성했습니다', '저장 완료' 등 거짓 주장을 하지 마세요. "
+                "대신 파일 내용(코드, 텍스트, 구조)을 텍스트로 출력하세요."
+            )
+            sp = (sp + _anti) if sp else _anti.strip()
+
+            # 병렬 실행 검증 로그
+            import time as _time
+            _t_start = _time.time()
+            print(f"[Parallel] START slot={slot_id} model={model_id} t=0.000s")
+
             # 자동 재시도 (최대 3회, 지수 백오프)
             for attempt in range(3):
                 try:
@@ -1972,6 +1986,7 @@ async def run_agent_parallel(request: Request):
                     if decision == "ALLOW":
                         output = result.get("output", {}).get("message", {}).get("content", [])
                         text = "\n".join(c.get("text", "") for c in output if "text" in c)
+                        print(f"[Parallel] DONE  slot={slot_id} model={model_id} elapsed={_time.time()-_t_start:.2f}s")
                         return {"slotId": slot_id, "modelId": model_id, "status": "done", "content": text}
                     elif decision == "ACCEPTED":
                         job_id = result.get("job_id", "")
@@ -2001,13 +2016,20 @@ async def run_agent_parallel(request: Request):
             return {"slotId": slot_id, "modelId": model_id, "status": "error", "content": "재시도 3회 실패"}
 
         # 배치 실행: 10개씩 동시 호출 (rate limit 방지) + 배치 간 heartbeat
+        # asyncio.create_task로 명시적 즉시 스케줄링 → 진짜 동시 실행 보장
+        import time as _time
         batch_size = 10
         for i in range(0, len(models), batch_size):
             batch = models[i:i+batch_size]
-            tasks = [call_model(slot) for slot in batch]
+            _batch_t0 = _time.time()
+            print(f"[Parallel] BATCH start size={len(batch)} models={[s.get('modelId') for s in batch]}")
+            # 모든 task를 즉시 스케줄링 — 이벤트 루프가 다음 await에서 모두 시작
+            tasks = [asyncio.create_task(call_model(slot)) for slot in batch]
+            # as_completed로 완료 순서대로 yield
             for coro in asyncio.as_completed(tasks):
                 result = await coro
                 yield f"data: {json.dumps(result, ensure_ascii=False)}\n\n"
+            print(f"[Parallel] BATCH done elapsed={_time.time()-_batch_t0:.2f}s")
             # 배치 간 heartbeat — 클라이언트 idle timeout 방지
             if i + batch_size < len(models):
                 yield f"data: {json.dumps({'heartbeat': True, 'progress': min(i+batch_size, len(models)), 'total': len(models)})}\n\n"
