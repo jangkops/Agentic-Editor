@@ -64,9 +64,11 @@ function _removeModelFromCatalog(modelId) {
 async function _loadDeniedModelsFromDisk() {
   try {
     const list = await window.electronAPI?.loadDeniedModels?.();
-    if (Array.isArray(list)) {
-      list.forEach(id => _deniedModels.add(id));
-      console.log(`[Model] denylist 로드: ${list.length}개`);
+    if (Array.isArray(list) && list.length > 0) {
+      // 게이트웨이 allowlist 확장(v22)으로 이전 denylist 무효화 — 자동 초기화
+      console.log(`[Model] denylist ${list.length}개 발견 — 게이트웨이 업데이트로 초기화`);
+      try { await window.electronAPI?.clearDeniedModels?.(); } catch (_) {}
+      _deniedModels.clear();
     }
   } catch (err) {
     console.warn('[Model] denylist 로드 실패:', err?.message || err);
@@ -508,10 +510,29 @@ async function showSSODialog(isInitial) {
           }
           const md = await mr.json();
           if (md.models && Object.keys(md.models).length > 0) {
+            // 채팅 모델 + 추가 카탈로그 합치기
+            const _allMd = {};
+            for (const [p, ms] of Object.entries(md.models)) {
+              _allMd[p] = ms.map(m => ({ ...m, capabilities: { ...(m.capabilities || {}), chat: true } }));
+            }
+            for (const { data, cap } of [
+              { data: md.image_models, cap: 'image_gen' },
+              { data: md.video_models, cap: 'video_gen' },
+              { data: md.embed_models, cap: 'embedding' },
+              { data: md.rerank_models, cap: 'rerank' },
+            ]) {
+              if (!data) continue;
+              for (const [p, ms] of Object.entries(data)) {
+                if (!_allMd[p]) _allMd[p] = [];
+                _allMd[p] = _allMd[p].concat(ms.map(m => ({ ...m, capabilities: { ...(m.capabilities || {}), [cap]: true } })));
+              }
+            }
             Object.keys(MODEL_CATALOG).forEach(k => delete MODEL_CATALOG[k]);
-            Object.assign(MODEL_CATALOG, md.models);
+            Object.assign(MODEL_CATALOG, _allMd);
             rebuildModelList();
-            if (ALL_MODELS.length > 0) state.selectedModel = ALL_MODELS[0];
+            const _chatMs = ALL_MODELS.filter(m => m.capabilities && m.capabilities.chat);
+            if (_chatMs.length > 0) state.selectedModel = _chatMs[0];
+            else if (ALL_MODELS.length > 0) state.selectedModel = ALL_MODELS[0];
             renderModelList('');
             document.getElementById('model-dropdown-btn').textContent = (state.selectedModel?.name || '모델 선택') + ' ▾';
             document.getElementById('topbar-model-count').textContent = `${ALL_MODELS.length}개 모델`;
@@ -799,13 +820,35 @@ async function loadModelsFromServer(retryCount) {
       return;
     }
     if (d.models && Object.keys(d.models).length > 0) {
-      // 디스크 denylist 적용 — 호출 실패 이력이 있는 모델은 목록에 포함하지 않음
-      const filtered = {};
-      let droppedCount = 0;
+      // 채팅 모델에 chat:true capability 자동 부여
+      const allModels = {};
       for (const [provider, models] of Object.entries(d.models)) {
+        allModels[provider] = models.map(m => ({
+          ...m,
+          capabilities: { ...(m.capabilities || {}), chat: true },
+        }));
+      }
+      // 추가 카탈로그 (image/video/embed/rerank) 합치기 + capability 주입
+      const extraCatalogs = [
+        { data: d.image_models, cap: 'image_gen' },
+        { data: d.video_models, cap: 'video_gen' },
+        { data: d.embed_models, cap: 'embedding' },
+        { data: d.rerank_models, cap: 'rerank' },
+      ];
+      for (const { data, cap } of extraCatalogs) {
+        if (!data) continue;
+        for (const [provider, models] of Object.entries(data)) {
+          if (!allModels[provider]) allModels[provider] = [];
+          const tagged = models.map(m => ({ ...m, capabilities: { ...(m.capabilities || {}), [cap]: true } }));
+          allModels[provider] = allModels[provider].concat(tagged);
+        }
+      }
+      // 디스크 denylist 적용
+      const filtered = {};
+      for (const [provider, models] of Object.entries(allModels)) {
         const kept = models.filter(m => {
           const clean = String(m.id || '').replace(/^us\.|^eu\.|^global\./, '');
-          if (_deniedModels.has(clean)) { droppedCount++; return false; }
+          if (_deniedModels.has(clean)) return false;
           return true;
         });
         if (kept.length) filtered[provider] = kept;
@@ -813,11 +856,13 @@ async function loadModelsFromServer(retryCount) {
       Object.keys(MODEL_CATALOG).forEach(k => delete MODEL_CATALOG[k]);
       Object.assign(MODEL_CATALOG, filtered);
       rebuildModelList();
-      if (ALL_MODELS.length > 0) state.selectedModel = ALL_MODELS[0];
+      // 채팅 가능 모델을 기본 선택
+      const chatModels = ALL_MODELS.filter(m => m.capabilities && m.capabilities.chat);
+      if (chatModels.length > 0) state.selectedModel = chatModels[0];
+      else if (ALL_MODELS.length > 0) state.selectedModel = ALL_MODELS[0];
       renderModelList('');
       document.getElementById('model-dropdown-btn').textContent = (state.selectedModel?.name || '모델 선택') + ' ▾';
-      const suffix = droppedCount > 0 ? ` (denylist ${droppedCount}개 제외)` : '';
-      document.getElementById('topbar-model-count').textContent = `${ALL_MODELS.length}개 모델${suffix}`;
+      document.getElementById('topbar-model-count').textContent = `${ALL_MODELS.length}개 모델`;
       state.authenticated = true;
     }
   } catch (e) {
@@ -1072,25 +1117,29 @@ async function sendMessage() {
   sendBtn.textContent = '취소';
   sendBtn.style.background = 'var(--color-error)';
 
-  if(state.mode==='parallel') await runParallel(content);
-  else {
-    // 스마트 모델 추천: 메시지 분석 후 더 적합한 모델/모드 제안
-    if (typeof getModelRecommendation === 'function') {
-      const rec = getModelRecommendation(content, state.selectedModel?.id || '');
-      if (rec) {
-        const choice = await showRecommendationCard(rec);
-        if (choice === 'accept') {
-          applyRecommendation(rec);
-          if (rec.recommend === 'parallel') {
-            await runParallel(content);
-            sendBtn.textContent = '전송';
-            sendBtn.style.background = 'var(--color-accent)';
-            return;
-          }
+  // 모드와 무관하게 추천 검사 — 병렬 모드에서도 더 적합한 전략(파이프라인/이미지 생성 등) 제안
+  let recHandled = false;
+  if (typeof getModelRecommendation === 'function') {
+    const rec = getModelRecommendation(content, state.selectedModel?.id || '');
+    if (rec) {
+      const choice = await showRecommendationCard(rec);
+      if (choice === 'accept') {
+        const applied = applyRecommendation(rec);
+        if (applied && applied.type === 'parallel') {
+          await runParallel(content);
+          recHandled = true;
+        } else if (applied && applied.type === 'pipeline') {
+          await runPipeline(content, applied.stages);
+          recHandled = true;
         }
+        // single 전환은 아래 기본 흐름에서 처리됨
       }
     }
-    await runSingle(content);
+  }
+
+  if (!recHandled) {
+    if (state.mode === 'parallel') await runParallel(content);
+    else await runSingle(content);
   }
 
   sendBtn.textContent = '전송';
@@ -1276,6 +1325,57 @@ function isSimpleQuery(prompt) {
 async function runSingle(prompt) {
   // 모든 호출을 에이전트 모드로 통일 — 도구 사용 가능
   await runAgentWorkflow(prompt);
+}
+
+// ===== 파이프라인 실행 — 여러 모델이 단계별로 순차 작업 =====
+async function runPipeline(prompt, stages) {
+  if (!Array.isArray(stages) || !stages.length) return runSingle(prompt);
+  state.isStreaming = true;
+  const originalModel = state.selectedModel;
+  let aggregateOutput = '';
+
+  state.messages.push({
+    role: 'system',
+    content: `**파이프라인 실행 시작** (${stages.length}단계)\n` +
+      stages.map((s, i) => `${i + 1}. ${s.label} → ${s.model.name}`).join('\n'),
+  });
+  renderMessages();
+
+  for (let i = 0; i < stages.length; i++) {
+    const s = stages[i];
+    const target = ALL_MODELS.find(m => m.id === s.model.id) || s.model;
+    state.selectedModel = target;
+    const btn = document.getElementById('model-dropdown-btn');
+    if (btn) btn.textContent = (target.name || target.id) + ' ▾';
+    addLiveLog('system', `[${i + 1}/${stages.length}] ${s.label}: ${target.name || target.id}`);
+
+    const stagePrompt = i === 0
+      ? prompt
+      : `${prompt}\n\n--- 이전 단계 결과 ---\n${aggregateOutput}\n\n--- 현재 단계 (${s.label}) ---\n위 결과를 바탕으로 ${s.label} 작업을 진행해주세요.`;
+
+    state.messages.push({ role: 'system', content: `▶ **단계 ${i + 1}: ${s.label}** (${target.name || target.id})` });
+    renderMessages();
+
+    const beforeIdx = state.messages.length;
+    try {
+      await runAgentWorkflow(stagePrompt);
+    } catch (e) {
+      addLiveLog('error', `파이프라인 단계 ${i + 1} 실패`, e?.message || String(e));
+      break;
+    }
+    const newMsgs = state.messages.slice(beforeIdx);
+    const lastAssistant = [...newMsgs].reverse().find(m => m.role === 'assistant');
+    aggregateOutput = lastAssistant?.content || '';
+  }
+
+  if (originalModel) {
+    state.selectedModel = originalModel;
+    const btn = document.getElementById('model-dropdown-btn');
+    if (btn) btn.textContent = (originalModel.name || originalModel.id) + ' ▾';
+  }
+  state.messages.push({ role: 'system', content: `**파이프라인 완료**` });
+  renderMessages();
+  state.isStreaming = false;
 }
 
 // 간단한 질문 — 워크플로우 없이 바로 응답
@@ -1610,8 +1710,6 @@ async function runParallel(prompt) {
   state.isStreaming = true;
   state._streamStartTime = Date.now();
   state._abortController = new AbortController();
-  // 병렬 호출은 타임아웃 없음 (서버 heartbeat로 연결 유지, 사용자가 수동 취소 가능)
-  addLiveLog('request', `병렬 호출: ${_expandedSlots.length}개 모델`);
 
   // 스케일 반영: 각 슬롯의 scale만큼 복제하여 실제 호출 목록 생성
   const _expandedSlots = [];
@@ -1626,6 +1724,8 @@ async function runParallel(prompt) {
       });
     }
   });
+
+  addLiveLog('request', `병렬 호출: ${_expandedSlots.length}개 모델`);
 
   state.parallelResults.clear();
   _expandedSlots.forEach(slot => state.parallelResults.set(slot.slotId, { status:'pending', content:'', modelName: slot.model.name + (slot._scaleIdx > 0 ? ` #${slot._scaleIdx+1}` : '') }));

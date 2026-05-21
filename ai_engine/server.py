@@ -1345,23 +1345,91 @@ async def list_models(request: Request):
         catalog = {}
         seen_model_keys = set()  # 리전/컨텍스트 변형 중복 제거
 
-        skip_output = ["VIDEO", "EMBEDDING"]  # IMAGE 별도 카탈로그
+        skip_output = []  # IMAGE/VIDEO/EMBEDDING 별도 카탈로그로 분리
         image_catalog = {}
         seen_image_keys = set()
+        video_catalog = {}
+        seen_video_keys = set()
+        embed_catalog = {}
+        seen_embed_keys = set()
+        rerank_catalog = {}
+        seen_rerank_keys = set()
         for m in resp.get("modelSummaries", []):
             modes = m.get("outputModalities", [])
             if m.get("modelLifecycle", {}).get("status") in ["EOL"]:
                 continue
             input_modes = m.get("inputModalities", [])
 
+            _mid_raw = m["modelId"]
+            _no_region = _mid_raw
+            for _pfx in ("us.", "eu.", "global."):
+                if _no_region.startswith(_pfx):
+                    _no_region = _no_region[len(_pfx):]
+                    break
+
+            # === Embedding models ===
+            if "EMBEDDING" in modes or "embed" in _no_region.lower():
+                if _no_region in seen_embed_keys:
+                    continue
+                seen_embed_keys.add(_no_region)
+                inference_types = m.get("inferenceTypesSupported", [])
+                if inference_types and "ON_DEMAND" not in inference_types and "INFERENCE_PROFILE" not in inference_types:
+                    continue
+                callable_id = _mid_raw
+                if callable_profile_ids is not None and "ON_DEMAND" not in inference_types:
+                    for pid in callable_profile_ids:
+                        if pid.endswith(_mid_raw) or pid.endswith(f"{_mid_raw}:0") or _mid_raw in pid:
+                            callable_id = pid
+                            break
+                _prov = m.get("providerName", "Unknown")
+                if _prov not in embed_catalog:
+                    embed_catalog[_prov] = []
+                embed_catalog[_prov].append({"id": callable_id, "name": m.get("modelName", _mid_raw)})
+                continue
+
+            # === Rerank models ===
+            if "rerank" in _no_region.lower():
+                if _no_region in seen_rerank_keys:
+                    continue
+                seen_rerank_keys.add(_no_region)
+                inference_types = m.get("inferenceTypesSupported", [])
+                if inference_types and "ON_DEMAND" not in inference_types and "INFERENCE_PROFILE" not in inference_types:
+                    continue
+                callable_id = _mid_raw
+                if callable_profile_ids is not None and "ON_DEMAND" not in inference_types:
+                    for pid in callable_profile_ids:
+                        if pid.endswith(_mid_raw) or pid.endswith(f"{_mid_raw}:0") or _mid_raw in pid:
+                            callable_id = pid
+                            break
+                _prov = m.get("providerName", "Unknown")
+                if _prov not in rerank_catalog:
+                    rerank_catalog[_prov] = []
+                rerank_catalog[_prov].append({"id": callable_id, "name": m.get("modelName", _mid_raw)})
+                continue
+
+            # === Video generation models ===
+            if "VIDEO" in modes:
+                if _no_region in seen_video_keys:
+                    continue
+                seen_video_keys.add(_no_region)
+                inference_types = m.get("inferenceTypesSupported", [])
+                if inference_types and "ON_DEMAND" not in inference_types and "INFERENCE_PROFILE" not in inference_types:
+                    continue
+                callable_id = _mid_raw
+                if callable_profile_ids is not None and "ON_DEMAND" not in inference_types:
+                    for pid in callable_profile_ids:
+                        if pid.endswith(_mid_raw) or pid.endswith(f"{_mid_raw}:0") or _mid_raw in pid:
+                            callable_id = pid
+                            break
+                _prov = m.get("providerName", "Unknown")
+                if _prov not in video_catalog:
+                    video_catalog[_prov] = []
+                video_catalog[_prov].append({"id": callable_id, "name": m.get("modelName", _mid_raw)})
+                continue
+
             # === Image generation/edit models ===
             if "IMAGE" in modes:
                 _mid = m["modelId"]
-                _no_region = _mid
-                for _pfx in ("us.", "eu.", "global."):
-                    if _no_region.startswith(_pfx):
-                        _no_region = _no_region[len(_pfx):]
-                        break
                 _parts = _no_region.split(":")
                 _img_base = _parts[0] + ":" + _parts[1] if len(_parts) >= 2 else _no_region
                 if _img_base in seen_image_keys:
@@ -1384,7 +1452,7 @@ async def list_models(request: Request):
                 continue
 
             # === Text models ===
-            if any(s in str(modes) for s in skip_output):
+            if "TEXT" not in input_modes:
                 continue
             if "TEXT" not in input_modes:
                 continue
@@ -1432,8 +1500,14 @@ async def list_models(request: Request):
         return JSONResponse(content={
             "models": catalog,
             "image_models": image_catalog,
+            "video_models": video_catalog,
+            "embed_models": embed_catalog,
+            "rerank_models": rerank_catalog,
             "count": sum(len(v) for v in catalog.values()),
             "image_count": sum(len(v) for v in image_catalog.values()),
+            "video_count": sum(len(v) for v in video_catalog.values()),
+            "embed_count": sum(len(v) for v in embed_catalog.values()),
+            "rerank_count": sum(len(v) for v in rerank_catalog.values()),
         })
     except Exception as e:
         return JSONResponse(content={"models": {}, "error": str(e)})
