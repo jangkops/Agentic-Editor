@@ -11,10 +11,13 @@ from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 app = FastAPI(title="AI Editor Engine", version=__version__)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+# Startup banner — 서버가 새 코드로 실행 중인지 사용자가 즉시 확인 가능
+print(f"[AI Editor Engine] v{__version__} loaded — deterministic merger + forced fallback active")
 
 # ===== Agent Tool Definitions =====
 AGENT_TOOLS = {
@@ -4057,6 +4060,31 @@ async def _orchestrator_run_agent_inner(
             "generate_image", "generate_pdf", "generate_pptx",
             "generate_xlsx", "generate_docx", "edit_image", "write_file"
         )
+        # description에 파일 형식 키워드가 있으면 wanted_files=True
+        # (Directory Analyzer 같은 generic role도 fallback 진입 가능)
+        desc_lower = (description or "").lower() + " " + (title or "").lower()
+        if not wanted_files:
+            file_keywords = ("pdf", "pptx", "xlsx", "docx", "png", "jpg", "이미지",
+                             "엑셀", "워드", "파워포인트", "문서", "보고서",
+                             "프레젠테이션", "스프레드시트", "흐름도", "다이어그램",
+                             "차트", "그래프", "구조", "분석", "report")
+            if any(kw in desc_lower for kw in file_keywords):
+                wanted_files = True
+                # primary_tool 추론 — title/description에서 형식 감지
+                if not primary_tool:
+                    if "pdf" in desc_lower:
+                        primary_tool = "generate_pdf"
+                    elif "pptx" in desc_lower or "프레젠테이션" in desc_lower or "슬라이드" in desc_lower:
+                        primary_tool = "generate_pptx"
+                    elif "xlsx" in desc_lower or "엑셀" in desc_lower or "스프레드시트" in desc_lower:
+                        primary_tool = "generate_xlsx"
+                    elif "docx" in desc_lower or "워드" in desc_lower:
+                        primary_tool = "generate_docx"
+                    elif "이미지" in desc_lower or "png" in desc_lower or "jpg" in desc_lower:
+                        primary_tool = "generate_image"
+                    else:
+                        primary_tool = "generate_pdf"  # 기본 — 분석/보고서는 PDF
+                    print(f"[Orchestrator] {task_id} primary_tool 자동 감지 → {primary_tool}")
 
         # 할루시네이션 차단 + 강제 생성:
         # 파일 생성을 요구받았는데 실제 디스크에 검증된 파일이 0개면 →
@@ -4178,6 +4206,82 @@ async def _orchestrator_run_agent_inner(
                 "summary": str(e), "tools": tool_log, "verifiedFiles": []}
 
 
+def _deterministic_failure_report(user_prompt: str, agent_results: list) -> str:
+    """모든 에이전트가 도구 호출 0회로 실패했을 때의 정직한 보고서.
+
+    LLM 없이 직접 생성 → KeyError 같은 가짜 오류 등장 불가.
+    """
+    rows = []
+    for r in agent_results:
+        tid = r.get("taskId", "?")
+        role = r.get("role", "Worker")
+        rows.append(f"| {tid} | {role} | 실패 | 없음 | 0 |")
+    table = "\n".join(rows)
+    return f"""## 최종 통합 결과
+
+| 에이전트 | 역할 | 상태 | 생성된 파일 (디스크 검증됨) | 도구 사용 횟수 |
+|---------|------|------|--------------------------|--------------|
+{table}
+
+### 생성된 파일 목록 (verifiedFiles 기반 — 실제 존재)
+
+⚠️ 디스크에 검증된 파일이 0개입니다. 어떤 파일도 실제로 생성되지 않았습니다.
+
+### 세부 사항
+
+모든 에이전트가 도구를 한 번도 호출하지 않았습니다. 다음 원인 중 하나가 가능성 높습니다:
+
+- 워커 모델이 toolConfig를 무시하고 텍스트로만 응답함
+- 게이트웨이가 toolConfig를 워커 모델로 전달하지 못함
+- 강제 fallback 경로에서 디스크 데이터 수집이 실패함
+
+### 권장 조치
+
+1. **서버 재시작** — 코드 변경이 반영되지 않았을 수 있습니다.
+2. **다른 모델로 재시도** — Claude Sonnet 4.6 / Opus 4.7 권장.
+3. **`.generated/` 폴더 확인** — 강제 fallback이 부분 성공했을 수 있습니다.
+"""
+
+
+def _deterministic_success_report(user_prompt: str, agent_results: list, verified_files: list) -> str:
+    """모든 에이전트 성공 + 검증된 파일 있을 때의 결정론적 보고서."""
+    agent_rows = []
+    for r in agent_results:
+        tid = r.get("taskId", "?")
+        role = r.get("role", "Worker")
+        files_for_agent = [vf for vf in verified_files if vf.get("agentId") == tid]
+        files_str = ", ".join(f"`{vf['path']}`" for vf in files_for_agent) or "없음"
+        tool_count = len(r.get("tools", []))
+        agent_rows.append(f"| {tid} | {role} | ✓ 완료 | {files_str} | {tool_count} |")
+
+    file_lines = []
+    for vf in verified_files:
+        path = vf.get("path", "?")
+        size = vf.get("size", 0)
+        model = vf.get("model", "")
+        agent = vf.get("agentRole", "")
+        size_kb = f"{size / 1024:.1f} KB" if size >= 1024 else f"{size} B"
+        meta = f" — {agent}" if agent else ""
+        if model:
+            meta += f" ({model})"
+        file_lines.append(f"- `{path}` ({size_kb}){meta}")
+
+    return f"""## 최종 통합 결과
+
+| 에이전트 | 역할 | 상태 | 생성된 파일 (디스크 검증됨) | 도구 사용 횟수 |
+|---------|------|------|--------------------------|--------------|
+{chr(10).join(agent_rows)}
+
+### 생성된 파일 목록 (verifiedFiles 기반 — 실제 존재)
+
+{chr(10).join(file_lines)}
+
+### 세부 사항
+
+총 {len(agent_results)}개 에이전트가 모두 작업을 완료했고, 디스크에 {len(verified_files)}개 파일이 검증되었습니다.
+"""
+
+
 async def _orchestrator_merge(gw, stream_model, user_prompt, agent_results: list, base_system_prompt: str) -> str:
     """Merger 호출 — 최종 보고서 생성. verifiedFiles 기반으로 거짓 완료 주장 차단."""
     # 실제로 디스크에 검증된 파일들만 추출
@@ -4193,6 +4297,21 @@ async def _orchestrator_merge(gw, stream_model, user_prompt, agent_results: list
                     "tool": vf.get("tool", "?"),
                     "model": vf.get("model", ""),
                 })
+
+    # === 결정론적 short-circuit ===
+    # 모든 에이전트가 실패 + 도구 호출 0회면 LLM 호출 없이 정직한 보고서 직접 생성.
+    # LLM이 가짜 KeyError 등을 만들어내는 것을 원천 차단.
+    all_failed = all(r.get("status") != "done" for r in agent_results) if agent_results else True
+    no_tools = all(len(r.get("tools", [])) == 0 for r in agent_results) if agent_results else True
+    no_files = len(all_verified_files) == 0
+    if all_failed and no_tools and no_files and agent_results:
+        return _deterministic_failure_report(user_prompt, agent_results)
+
+    # === 모든 에이전트 성공 + 검증된 파일 있음 ===
+    # LLM 없이 결정론적 성공 보고서 — Merger 할루시네이션 위험 제거.
+    all_done = all(r.get("status") == "done" for r in agent_results) if agent_results else False
+    if all_done and all_verified_files and agent_results:
+        return _deterministic_success_report(user_prompt, agent_results, all_verified_files)
 
     summary_input = {
         "userRequest": user_prompt[:2000],
