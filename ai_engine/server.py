@@ -2266,6 +2266,9 @@ async def _orchestrator_run_agent(
 
     await emit_queue.put({"type": "agent_start", "taskId": task_id, "role": role, "title": title, "targetFiles": target_files})
 
+    stream_failed = False
+    stream_error_msg = ""
+
     try:
         for turn in range(max_turns):
             text_parts = []
@@ -2305,7 +2308,9 @@ async def _orchestrator_run_agent(
                     elif etype == "error":
                         await emit_queue.put({"type": "agent_error", "taskId": task_id, "error": evt.get("message", "")})
             except Exception as e:
-                await emit_queue.put({"type": "agent_error", "taskId": task_id, "error": str(e)})
+                stream_failed = True
+                stream_error_msg = str(e)
+                await emit_queue.put({"type": "agent_error", "taskId": task_id, "error": stream_error_msg})
                 break
 
             content_blocks = []
@@ -2338,6 +2343,10 @@ async def _orchestrator_run_agent(
             messages.append({"role": "user", "content": tool_results})
 
         final_text = "".join(final_text_parts).strip()
+        if stream_failed:
+            # SSE 실패 — agent_error 이미 emit됨, error 결과로 반환
+            return {"taskId": task_id, "role": role, "title": title, "status": "error",
+                    "summary": stream_error_msg or "스트리밍 실패", "tools": tool_log}
         await emit_queue.put({"type": "agent_done", "taskId": task_id, "summary": final_text[-1200:], "toolCount": len(tool_log)})
         return {"taskId": task_id, "role": role, "title": title, "status": "done", "summary": final_text, "tools": tool_log}
     except Exception as e:
@@ -2415,6 +2424,7 @@ async def run_agent_orchestrated(request: Request):
     project_path = body.get("projectPath", "")
     open_file = body.get("openFile", "")
     open_file_content = body.get("openFileContent", "")
+    is_remote = bool(body.get("isRemote", False)) or (_BRIDGE_URL and _bridge_is_remote() if _BRIDGE_URL else False)
 
     gw = _get_gw(aws_profile, bedrock_user)
 
@@ -2461,7 +2471,34 @@ async def run_agent_orchestrated(request: Request):
                 )
                 for st in subtasks
             ]
-            agent_results = await asyncio.gather(*tasks, return_exceptions=False)
+            try:
+                raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+            except Exception as e:
+                print(f"[Orchestrator] gather 예외: {e}")
+                raw_results = []
+
+            # 예외를 결과 dict로 정규화 (모든 subtask가 반드시 결과 가짐)
+            agent_results = []
+            for st, r in zip(subtasks, raw_results):
+                tid = st.get("id", "?")
+                if isinstance(r, Exception):
+                    err_msg = f"{type(r).__name__}: {r}"
+                    print(f"[Orchestrator] agent {tid} 예외: {err_msg}")
+                    await emit_queue.put({"type": "agent_error", "taskId": tid, "error": err_msg})
+                    agent_results.append({
+                        "taskId": tid, "role": st.get("role", "Worker"),
+                        "title": st.get("title", ""), "status": "error",
+                        "summary": err_msg, "tools": [],
+                    })
+                elif isinstance(r, dict):
+                    agent_results.append(r)
+                else:
+                    # 알 수 없는 반환 — 빈 결과 정규화
+                    agent_results.append({
+                        "taskId": tid, "role": st.get("role", "Worker"),
+                        "title": st.get("title", ""), "status": "error",
+                        "summary": "에이전트가 결과를 반환하지 않음", "tools": [],
+                    })
 
             # 3) Merger
             report = await _orchestrator_merge(gw, merger_id, user_prompt, agent_results, base_sys)

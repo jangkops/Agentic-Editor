@@ -954,11 +954,41 @@ function renderParallelSlotList() {
   const list = document.getElementById('model-checklist'); list.innerHTML = '';
   if (!state.parallelSlots.length) { list.innerHTML = '<div style="padding:12px;text-align:center;color:var(--color-text-muted);font-size:12px">모델을 검색하여 추가</div>'; }
   state.parallelSlots.forEach(slot => {
-    const r = state.parallelResults.get(slot.slotId);
-    const stText = r ? ({done:'완료',running:'실행 중',error:'실패',pending:'대기'}[r.status]||'') : '';
-    const stColor = r ? ({done:'var(--color-success)',running:'var(--color-accent)',error:'var(--color-error)'}[r.status]||'') : '';
+    // 스케일 카운트 N개일 때 결과는 slotId, slotId-0, slotId-1 ... 형태로 저장됨
+    // 모든 매칭된 결과를 집계해서 상태 결정
+    const scale = slot.scale || 1;
+    const matchedIds = scale > 1
+      ? Array.from({ length: scale }, (_, i) => `${slot.slotId}-${i}`)
+      : [slot.slotId];
+    const results = matchedIds.map(id => state.parallelResults.get(id)).filter(Boolean);
+
+    let stText = '', stColor = '';
+    if (results.length === 0) {
+      stText = ''; stColor = '';
+    } else {
+      const allDone = results.every(r => r.status === 'done');
+      const anyError = results.some(r => r.status === 'error');
+      const anyRunning = results.some(r => r.status === 'running');
+      const anyPending = results.some(r => r.status === 'pending');
+      const doneCount = results.filter(r => r.status === 'done').length;
+
+      if (allDone) {
+        stText = scale > 1 ? `완료 (${doneCount}/${scale})` : '완료';
+        stColor = 'var(--color-success)';
+      } else if (anyRunning) {
+        stText = scale > 1 ? `실행 중 (${doneCount}/${scale})` : '실행 중';
+        stColor = 'var(--color-accent)';
+      } else if (anyPending) {
+        stText = '대기'; stColor = 'var(--color-text-muted)';
+      } else if (anyError) {
+        const errCount = results.filter(r => r.status === 'error').length;
+        stText = scale > 1 ? `${doneCount}완료/${errCount}실패` : '실패';
+        stColor = doneCount > 0 ? 'var(--color-warning)' : 'var(--color-error)';
+      }
+    }
+
     const item = document.createElement('div'); item.className = 'model-check-item';
-    item.innerHTML = `<span class="dot" style="background:${stColor||'var(--color-accent)'}"></span><span style="flex:1">${slot.model.name}</span><span class="status" style="color:${stColor}">${stText}</span>${!state.isStreaming ? `<span class="sk-action sk-action-del sk-action-icon" data-rm="${slot.slotId}" title="제거"><svg class="sk-icon" width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2 2L8 8M8 2L2 8"/></svg></span>` : ''}`;
+    item.innerHTML = `<span class="dot" style="background:${stColor||'var(--color-accent)'}"></span><span style="flex:1">${slot.model.name}${scale > 1 ? ` <span style="font-size:10px;color:var(--color-text-muted)">×${scale}</span>` : ''}</span><span class="status" style="color:${stColor}">${stText}</span>${!state.isStreaming ? `<span class="sk-action sk-action-del sk-action-icon" data-rm="${slot.slotId}" title="제거"><svg class="sk-icon" width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2 2L8 8M8 2L2 8"/></svg></span>` : ''}`;
     const rmBtn = item.querySelector('[data-rm]');
     if (rmBtn) rmBtn.onclick = () => removeParallelSlot(slot.slotId);
     list.appendChild(item);
@@ -1474,6 +1504,19 @@ async function runOrchestrated(prompt) {
             addLiveLog('error', `[${ev.taskId}] 오류: ${ev.error || ''}`);
           } else if (ev.type === 'merge') {
             mergeReport = ev.report || ev.text || '';
+            // 서버가 results를 함께 보낸 경우 — agentStates가 비어있으면 채워넣음
+            if (Array.isArray(ev.results) && agentStates.size === 0) {
+              for (const r of ev.results) {
+                if (r && r.taskId) {
+                  agentStates.set(r.taskId, {
+                    role: r.role || 'Worker',
+                    title: r.title || '',
+                    status: r.status === 'done' ? 'done' : 'error',
+                    toolCount: Array.isArray(r.tools) ? r.tools.length : 0,
+                  });
+                }
+              }
+            }
             // 최종 통합 보고서를 assistant 메시지로
             state.messages.push({ role: 'assistant', content: mergeReport });
             renderMessages();
@@ -1492,6 +1535,36 @@ async function runOrchestrated(prompt) {
     const elapsed = Math.floor((Date.now() - (state._streamStartTime || Date.now())) / 1000);
     // thinking placeholder 제거
     state.messages = state.messages.filter(m => !m._thinking);
+
+    // 완전 실패 — 에이전트가 하나도 시작 안 됨 (Planner 실패 또는 서버 NameError 등)
+    if (agentStates.size === 0) {
+      state.messages.push({
+        role: 'system',
+        content: '오케스트레이션 실패 — 에이전트가 시작되지 않았습니다. 서버 로그를 확인하거나 다시 시도해주세요.',
+      });
+      state.messages.push({
+        role: 'system',
+        _isRecommendCard: true,
+        _recommendData: {
+          title: '에이전트 시작 실패',
+          reason: 'Planner가 작업을 분해하지 못했거나 서버 측 오류가 발생했습니다. 다시 시도하거나 단순 모델 호출로 전환할 수 있습니다.',
+          actions: [
+            { key: 'retry-orchestrate', label: '오케스트레이션 재시도', primary: true },
+            { key: 'switch-single', label: '단일 모델로 전환' },
+          ],
+          hasHallucination: false,
+          originalPrompt: prompt,
+          doneResults: [],
+        },
+        content: '[추천] 재시도 옵션',
+      });
+      renderMessages();
+      state.isStreaming = false;
+      _releaseUserPin && _releaseUserPin();
+      saveConversation();
+      return;
+    }
+
     state.messages.push({
       role: 'system',
       content: `오케스트레이션 완료 — ${doneCount}개 성공, ${errCount}개 실패` +
@@ -2210,6 +2283,22 @@ function _renderRecommendCardMessage(msg) {
     if (input) {
       input.placeholder = '이어서 무엇을 도와드릴까요?';
       input.focus();
+    }
+  });
+
+  // 오케스트레이션 재시도 — 동일 프롬프트로 재실행
+  card.querySelector('[data-action="retry-orchestrate"]')?.addEventListener('click', () => {
+    cleanup();
+    runOrchestrated(data.originalPrompt);
+  });
+
+  // 단일 모델로 전환 — 일반 채팅 흐름으로 fallback
+  card.querySelector('[data-action="switch-single"]')?.addEventListener('click', () => {
+    cleanup();
+    if (typeof runSingle === 'function') {
+      runSingle(data.originalPrompt);
+    } else {
+      addLiveLog('error', '단일 모델 흐름을 찾을 수 없습니다.');
     }
   });
 
