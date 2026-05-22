@@ -2319,6 +2319,97 @@ function hideParallelResults() {
   document.getElementById('editor-area').style.display = '';
 }
 
+// 병렬 카드 확대 모달 — FLIP 애니메이션 (원본 위치 ↔ 화면 중앙)
+function _showParallelCardModal(r, originCard) {
+  // 기존 모달 제거
+  document.querySelector('.parallel-card-modal-overlay')?.remove();
+
+  // 1) 원본 카드 위치/크기 측정 (FLIP의 First)
+  const originRect = originCard.getBoundingClientRect();
+
+  // 2) 오버레이 + 모달 생성
+  const overlay = document.createElement('div');
+  overlay.className = 'parallel-card-modal-overlay';
+  const badge = { done:'badge-done', running:'badge-running', error:'badge-error', pending:'badge-pending' }[r.status] || 'badge-pending';
+  const label = { done:'완료', running:'실행 중', error:'실패', pending:'대기' }[r.status] || '';
+  overlay.innerHTML = `
+    <div class="parallel-card-modal" role="dialog" aria-modal="true">
+      <div class="parallel-card-modal-header">
+        <span class="model-name" style="font-weight:700;font-size:14px;color:var(--color-text-primary)">● ${esc(r.modelName || '모델')}</span>
+        <span class="badge ${badge}" style="margin-left:8px;font-size:11px;padding:3px 10px;border-radius:12px;color:#fff">${label}</span>
+        ${r.elapsed ? `<span style="font-size:11px;color:var(--color-text-muted);margin-left:8px">${fmtElapsed(r.elapsed)}</span>` : ''}
+        <button class="parallel-card-modal-close" title="축소" type="button">축소</button>
+      </div>
+      <div class="parallel-card-modal-body">${r.status === 'done' ? fmtMd(r.content || '') : esc(r.content || '')}</div>
+      <div class="parallel-card-modal-footer">
+        ${r.status === 'done' ? '<button class="msg-action-btn modal-copy-btn" type="button" title="복사" style="width:30px;height:30px">' + SVG_COPY + '</button>' : '<span></span>'}
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  const modal = overlay.querySelector('.parallel-card-modal');
+
+  // 3) 모달 최종 위치/크기 측정 (FLIP의 Last)
+  const finalRect = modal.getBoundingClientRect();
+
+  // 4) 원본 위치/크기로 transform 적용 (Invert)
+  const dx = originRect.left - finalRect.left;
+  const dy = originRect.top - finalRect.top;
+  const sx = originRect.width / finalRect.width;
+  const sy = originRect.height / finalRect.height;
+  modal.style.transformOrigin = 'top left';
+  modal.style.transform = `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`;
+  modal.style.opacity = '0.5';
+  // 오버레이 배경도 페이드인
+  overlay.style.backgroundColor = 'rgba(0,0,0,0)';
+
+  // 5) 다음 프레임에 원래 위치/크기로 transition (Play)
+  requestAnimationFrame(() => {
+    modal.style.transition = 'transform 320ms cubic-bezier(0.4, 0, 0.2, 1), opacity 200ms ease-out';
+    modal.style.transform = 'translate(0, 0) scale(1, 1)';
+    modal.style.opacity = '1';
+    overlay.style.transition = 'background-color 250ms ease-out';
+    overlay.style.backgroundColor = 'rgba(0,0,0,0.6)';
+  });
+
+  // 닫기 (FLIP 역방향: 모달 → 원본 카드 위치로 축소)
+  const close = () => {
+    // 현재 원본 카드 위치 재측정 (스크롤 변경 대응)
+    const currentOriginRect = originCard.getBoundingClientRect();
+    const currentModalRect = modal.getBoundingClientRect();
+    const cdx = currentOriginRect.left - currentModalRect.left;
+    const cdy = currentOriginRect.top - currentModalRect.top;
+    const csx = currentOriginRect.width / currentModalRect.width;
+    const csy = currentOriginRect.height / currentModalRect.height;
+
+    modal.style.transition = 'transform 280ms cubic-bezier(0.4, 0, 1, 1), opacity 180ms ease-in';
+    modal.style.transform = `translate(${cdx}px, ${cdy}px) scale(${csx}, ${csy})`;
+    modal.style.opacity = '0.4';
+    overlay.style.transition = 'background-color 200ms ease-in';
+    overlay.style.backgroundColor = 'rgba(0,0,0,0)';
+
+    setTimeout(() => overlay.remove(), 300);
+    document.removeEventListener('keydown', onKey);
+  };
+
+  // 닫기 트리거
+  modal.querySelector('.parallel-card-modal-close').addEventListener('click', close);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+
+  // 복사 버튼
+  const copyBtn = modal.querySelector('.modal-copy-btn');
+  if (copyBtn) {
+    copyBtn.addEventListener('click', () => {
+      navigator.clipboard.writeText(r.content || '').then(() => {
+        copyBtn.innerHTML = SVG_CHECK;
+        setTimeout(() => { copyBtn.innerHTML = SVG_COPY; }, 1200);
+      }).catch(() => {});
+    });
+  }
+}
+
 // 결과 그리드 — 실행 중/완료/에러 실시간 표시 + 확장/축소
 function renderParallelResultGrid() {
   const grid = document.getElementById('parallel-grid'), countEl = document.getElementById('parallel-count');
@@ -2361,52 +2452,7 @@ function renderParallelResultGrid() {
       </div>`;
 
     card.querySelector('.card-toggle').addEventListener('click', () => {
-      const body = card.querySelector('.model-card-body');
-      const isExpanding = !card.classList.contains('expanded');
-      const fullContent = r.status === 'done' ? fmtMd(r.content || '') : esc(r.content || '');
-      const compactContent = r.status === 'error' && (r.content || '').length > 80
-        ? r.content.substring(0, 80) + '...' : (r.content || '');
-
-      if (isExpanding) {
-        // 확장: 본체에 전체 내용 주입 → 현재 높이에서 전체 높이로 부드럽게 확장
-        const startHeight = body.offsetHeight;
-        body.innerHTML = fullContent;
-        body.style.maxHeight = startHeight + 'px';
-        // 다음 프레임에 목표 높이로 transition
-        requestAnimationFrame(() => {
-          card.classList.add('expanded');
-          const targetHeight = body.scrollHeight;
-          body.style.maxHeight = targetHeight + 'px';
-        });
-        // transition 완료 후 maxHeight 해제 (스크롤 가능하게)
-        const onEnd = () => {
-          if (card.classList.contains('expanded')) {
-            body.style.maxHeight = 'none';
-          }
-          body.removeEventListener('transitionend', onEnd);
-        };
-        body.addEventListener('transitionend', onEnd);
-      } else {
-        // 축소: 현재 전체 높이 → 180px로 부드럽게 축소
-        const currentHeight = body.scrollHeight;
-        body.style.maxHeight = currentHeight + 'px';
-        // 강제 reflow
-        void body.offsetHeight;
-        // 축소 시작
-        requestAnimationFrame(() => {
-          card.classList.remove('expanded');
-          body.style.maxHeight = '180px';
-        });
-        // transition 완료 후 텍스트 축약
-        const onEnd = () => {
-          if (!card.classList.contains('expanded')) {
-            body.innerHTML = (r.status === 'done' ? fmtMd(compactContent) : esc(compactContent));
-          }
-          body.removeEventListener('transitionend', onEnd);
-        };
-        body.addEventListener('transitionend', onEnd);
-      }
-      card.querySelector('.card-toggle').textContent = isExpanding ? '축소' : '확장';
+      _showParallelCardModal(r, card);
     });
 
     // 복사 버튼

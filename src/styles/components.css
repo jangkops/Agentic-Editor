@@ -21,13 +21,6 @@
 .model-card-body{
   padding:8px 10px;font-size:12px;color:var(--color-text-primary);
   max-height:180px;overflow-y:auto;white-space:pre-wrap;line-height:1.6;flex:1;
-  transition: max-height 280ms cubic-bezier(0.4, 0, 0.2, 1);
-}
-/* 확장 상태 — JS가 transitionend 후 max-height: none으로 직접 설정.
-   여기 클래스 룰은 fallback (JS 비활성 시) */
-.model-card.expanded .model-card-body{
-  /* JS가 inline style로 'none'을 직접 설정하므로 여기는 큰 값으로 안전 fallback */
-  max-height: 9999px;
 }
 
 /* ===== Chat Messages ===== */
@@ -896,3 +889,57 @@
   background:var(--color-bg-hover);color:var(--color-text-primary);
 }
 .tmc-action-btn[title="삭제"]:hover{color:var(--color-error);}
+
+/* ===== Parallel Card Expand Modal (FLIP 애니메이션) ===== */
+.parallel-card-modal-overlay{
+  position:fixed;inset:0;
+  background:rgba(0,0,0,0.6);
+  display:flex;align-items:center;justify-content:center;
+  z-index:1100;backdrop-filter:blur(3px);
+}
+.parallel-card-modal{
+  width:80%;max-width:960px;max-height:80vh;
+  background:var(--color-bg-elevated,#252526);
+  border:1px solid var(--color-border);
+  border-radius:8px;
+  display:flex;flex-direction:column;overflow:hidden;
+  box-shadow:0 20px 60px rgba(0,0,0,0.5);
+  will-change:transform, opacity;
+}
+.parallel-card-modal-header{
+  display:flex;align-items:center;gap:8px;
+  padding:12px 16px;
+  border-bottom:1px solid var(--color-border);
+  flex-shrink:0;
+}
+.parallel-card-modal-close{
+  margin-left:auto;
+  background:transparent;border:1px solid var(--color-border);
+  color:var(--color-text-secondary);
+  font-size:11px;padding:4px 12px;border-radius:4px;
+  cursor:pointer;transition:all 150ms;font-weight:500;
+}
+.parallel-card-modal-close:hover{
+  background:var(--color-bg-hover);color:var(--color-text-primary);
+  border-color:var(--color-text-muted);
+}
+.parallel-card-modal-body{
+  flex:1;overflow-y:auto;
+  padding:18px 22px;
+  font-size:13px;color:var(--color-text-primary);
+  line-height:1.7;white-space:pre-wrap;word-break:break-word;
+}
+.parallel-card-modal-body pre{
+  background:var(--color-bg-primary);padding:10px 12px;
+  border-radius:4px;overflow-x:auto;font-size:12px;margin:6px 0;
+}
+.parallel-card-modal-body code{
+  background:var(--color-bg-primary);padding:1px 5px;
+  border-radius:3px;font-size:12px;
+}
+.parallel-card-modal-footer{
+  display:flex;justify-content:flex-end;gap:6px;
+  padding:10px 18px;
+  border-top:1px solid var(--color-border);
+  flex-shrink:0;
+}
