@@ -193,6 +193,65 @@ AGENT_TOOLS = {
                         }
                     }
                 }
+            },
+            {
+                "toolSpec": {
+                    "name": "generate_xlsx",
+                    "description": "Generate an Excel workbook (XLSX) using openpyxl. Each sheet has headers (first row, bold) and rows of data. Saves to .generated/.",
+                    "inputSchema": {
+                        "json": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string", "description": "File title (used in slug + first-sheet header). e.g., 'sales-report'"},
+                                "sheets": {
+                                    "type": "array",
+                                    "description": "List of sheets",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "name": {"type": "string", "description": "Sheet name (max 31 chars)"},
+                                            "headers": {"type": "array", "items": {"type": "string"}, "description": "Header row (bold, accent fill)"},
+                                            "rows": {
+                                                "type": "array",
+                                                "description": "Data rows — array of arrays. Cells can be string/number/bool.",
+                                                "items": {"type": "array"}
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                            "required": ["title", "sheets"]
+                        }
+                    }
+                }
+            },
+            {
+                "toolSpec": {
+                    "name": "generate_docx",
+                    "description": "Generate a Word document (DOCX) using python-docx. Sections support headings (h1/h2/h3) and body paragraphs. Saves to .generated/.",
+                    "inputSchema": {
+                        "json": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string", "description": "Document title (cover heading)"},
+                                "sections": {
+                                    "type": "array",
+                                    "description": "List of sections",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "heading": {"type": "string"},
+                                            "level": {"type": "integer", "description": "Heading level 1-3 (default 2)"},
+                                            "body": {"type": "string", "description": "Section body. Newlines split into paragraphs."},
+                                            "bullets": {"type": "array", "items": {"type": "string"}, "description": "Optional bullet list"}
+                                        }
+                                    }
+                                }
+                            },
+                            "required": ["title", "sections"]
+                        }
+                    }
+                }
             }]
 }
 
@@ -694,6 +753,160 @@ async def _tool_generate_pptx(tool_input: dict, project_path: str, aws_profile: 
         return json.dumps({"error": "pptx-generation-failed", "detail": str(e)[:200]})
 
 
+async def _tool_generate_xlsx(tool_input: dict, project_path: str) -> str:
+    """Generate an Excel workbook (.xlsx) using openpyxl."""
+    title = (tool_input.get("title") or "").strip()
+    sheets_data = tool_input.get("sheets")
+
+    if not title:
+        return json.dumps({"error": "title is required"})
+    if not sheets_data or not isinstance(sheets_data, list):
+        return json.dumps({"error": "sheets is required"})
+
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        return json.dumps({"error": "missing-dep", "lib": "openpyxl", "hint": "pip install openpyxl"})
+
+    import time as _t, re as _re
+    _local_root = project_path if (project_path and os.path.isdir(project_path)) else os.getcwd()
+    gen_dir = os.path.join(_local_root, ".generated")
+    os.makedirs(gen_dir, exist_ok=True)
+    slug = _re.sub(r"[^a-z0-9]+", "-", title.lower())[:30].strip("-") or "workbook"
+    ts = str(int(_t.time() * 1000))
+    filename = f"{slug}-{ts}.xlsx"
+    output_path = os.path.join(gen_dir, filename)
+    relative_path = f".generated/{filename}"
+
+    try:
+        wb = Workbook()
+        wb.remove(wb.active)  # remove default empty sheet
+        header_font = Font(bold=True, color="FFFFFFFF")
+        header_fill = PatternFill(start_color="FF007ACC", end_color="FF007ACC", fill_type="solid")
+        header_align = Alignment(horizontal="center", vertical="center")
+        thin = Side(border_style="thin", color="FFCCCCCC")
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+        for i, sd in enumerate(sheets_data):
+            if not isinstance(sd, dict):
+                sd = {"name": f"Sheet{i+1}", "headers": [], "rows": []}
+            sheet_name = (sd.get("name") or f"Sheet{i+1}")[:31]
+            ws = wb.create_sheet(title=sheet_name)
+            headers = sd.get("headers") or []
+            rows = sd.get("rows") or []
+            # Headers
+            for c, h in enumerate(headers, start=1):
+                cell = ws.cell(row=1, column=c, value=str(h))
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = header_align
+                cell.border = border
+            # Data rows
+            for r, row in enumerate(rows, start=2):
+                if not isinstance(row, list):
+                    row = [row]
+                for c, val in enumerate(row, start=1):
+                    cell = ws.cell(row=r, column=c, value=val)
+                    cell.border = border
+            # Auto column widths (cap at 60 chars)
+            for c in range(1, max(1, len(headers)) + 1):
+                col_letter = get_column_letter(c)
+                max_len = len(str(headers[c-1])) if c <= len(headers) else 8
+                for row in rows:
+                    if isinstance(row, list) and c <= len(row):
+                        max_len = max(max_len, len(str(row[c-1])))
+                ws.column_dimensions[col_letter].width = min(max_len + 2, 60)
+
+        if not wb.sheetnames:
+            # Empty input — create a placeholder sheet so the file is valid
+            ws = wb.create_sheet(title="Sheet1")
+            ws.cell(row=1, column=1, value=title)
+
+        wb.save(output_path)
+        size_bytes = os.path.getsize(output_path)
+        return json.dumps({
+            "path": relative_path,
+            "model": "openpyxl",
+            "sheetCount": len(sheets_data),
+            "sizeBytes": size_bytes,
+        })
+    except Exception as e:
+        return json.dumps({"error": "xlsx-generation-failed", "detail": str(e)[:200]})
+
+
+async def _tool_generate_docx(tool_input: dict, project_path: str) -> str:
+    """Generate a Word document (.docx) using python-docx."""
+    title = (tool_input.get("title") or "").strip()
+    sections = tool_input.get("sections")
+
+    if not title:
+        return json.dumps({"error": "title is required"})
+    if not sections or not isinstance(sections, list):
+        return json.dumps({"error": "sections is required"})
+
+    try:
+        from docx import Document
+        from docx.shared import Pt
+    except ImportError:
+        return json.dumps({"error": "missing-dep", "lib": "python-docx", "hint": "pip install python-docx"})
+
+    import time as _t, re as _re
+    _local_root = project_path if (project_path and os.path.isdir(project_path)) else os.getcwd()
+    gen_dir = os.path.join(_local_root, ".generated")
+    os.makedirs(gen_dir, exist_ok=True)
+    slug = _re.sub(r"[^a-z0-9]+", "-", title.lower())[:30].strip("-") or "doc"
+    ts = str(int(_t.time() * 1000))
+    filename = f"{slug}-{ts}.docx"
+    output_path = os.path.join(gen_dir, filename)
+    relative_path = f".generated/{filename}"
+
+    try:
+        doc = Document()
+        # Default font tweak — readable size
+        try:
+            style = doc.styles["Normal"]
+            style.font.size = Pt(11)
+        except Exception:
+            pass
+
+        doc.add_heading(title, level=0)
+
+        for sec in sections:
+            if not isinstance(sec, dict):
+                doc.add_paragraph(str(sec))
+                continue
+            heading = sec.get("heading", "")
+            level = int(sec.get("level") or 2)
+            level = max(1, min(level, 3))
+            body = sec.get("body", "")
+            bullets = sec.get("bullets") or []
+
+            if heading:
+                doc.add_heading(heading, level=level)
+            if body:
+                for para in str(body).split("\n"):
+                    if para.strip():
+                        doc.add_paragraph(para)
+            for b in bullets:
+                doc.add_paragraph(str(b), style="List Bullet")
+
+        doc.save(output_path)
+        size_bytes = os.path.getsize(output_path)
+        # python-docx exposes paragraphs via doc.paragraphs
+        para_count = len(doc.paragraphs)
+        return json.dumps({
+            "path": relative_path,
+            "model": "python-docx",
+            "sectionCount": len(sections),
+            "paragraphCount": para_count,
+            "sizeBytes": size_bytes,
+        })
+    except Exception as e:
+        return json.dumps({"error": "docx-generation-failed", "detail": str(e)[:200]})
+
+
 async def _tool_edit_image(tool_input: dict, project_path: str, aws_profile: str = '', bedrock_user: str = '') -> str:  # [patched-credentials]
     """Edit an image using inpaint or outpaint."""
     import time as _t, base64
@@ -987,7 +1200,7 @@ def _execute_tool(tool_name: str, tool_input: dict, project_path: str = "", aws_
         # bridge returned None = unavailable, fall through to local
 
     # Async media generation tools
-    if tool_name in ("generate_image", "generate_pdf", "generate_pptx", "edit_image"):
+    if tool_name in ("generate_image", "generate_pdf", "generate_pptx", "generate_xlsx", "generate_docx", "edit_image"):
         try:
             import asyncio as _asyncio
             if tool_name == "generate_image":
@@ -996,6 +1209,10 @@ def _execute_tool(tool_name: str, tool_input: dict, project_path: str = "", aws_
                 return _asyncio.run(_tool_generate_pdf(tool_input, project_path))
             if tool_name == "generate_pptx":
                 return _asyncio.run(_tool_generate_pptx(tool_input, project_path, aws_profile=aws_profile, bedrock_user=bedrock_user))
+            if tool_name == "generate_xlsx":
+                return _asyncio.run(_tool_generate_xlsx(tool_input, project_path))
+            if tool_name == "generate_docx":
+                return _asyncio.run(_tool_generate_docx(tool_input, project_path))
             if tool_name == "edit_image":
                 return _asyncio.run(_tool_edit_image(tool_input, project_path, aws_profile=aws_profile, bedrock_user=bedrock_user))
         except Exception as e:
@@ -2271,19 +2488,23 @@ ORCHESTRATOR_PLANNER_PROMPT = """당신은 멀티-에이전트 시스템의 플�
 2. 각 subtask는 하나의 에이전트가 도구(read_file, write_file, list_directory, run_command, search_files, generate_image, generate_pdf, generate_pptx, generate_xlsx, generate_docx)를 사용해 독립적으로 완료할 수 있어야 합니다.
 3. subtask 개수는 요청 내용에 맞게 결정하되, 최대 {max_agents}개를 넘지 마세요.
 4. 사용자가 "수정 1~4" 처럼 명시한 번호/단계가 있으면 그대로 따르세요.
-5. **파일 생성 요청의 경우**: 각 파일 형식(PDF/XLSX/PPTX/DOCX/이미지)마다 **별도 subtask로 분리**하세요. 예: "PDF 1개 + XLSX 1개 + DOCX 1개" 요청 → 3개 subtask.
-6. 각 subtask의 description에는 **반드시 도구를 사용해 실제 파일을 생성/저장**하라고 명시하세요. "텍스트로 출력"이 아니라 "write_file 도구로 .generated/ 폴더에 저장".
-7. target_files에는 결과물 파일의 절대/상대 경로를 명시하세요 (예: ".generated/analysis.pdf").
-8. **primary_tool 필드**: 각 subtask의 핵심 도구 1개를 명시하세요. 가능한 값:
-   - "generate_image" : PNG/JPG 이미지 생성 (Stability/Titan 자동 호출)
-   - "generate_pdf"   : PDF 문서 생성 (reportlab)
-   - "generate_pptx"  : 파워포인트 생성 (python-pptx)
-   - "generate_xlsx"  : 엑셀 생성 (openpyxl)
-   - "generate_docx"  : 워드 생성 (python-docx)
-   - "edit_image"     : 이미지 inpaint/outpaint
-   - "write_file"     : 일반 텍스트/코드/마크다운 파일
-   - "run_command"    : 셸 명령 실행
-   - "code"           : 기존 코드 분석/리팩토링 (read_file → write_file 조합)
+5. **파일 생성 요청의 경우 — 절대 규칙**:
+   - 사용자가 명시한 **모든 파일 형식마다 별도 subtask**를 만드세요.
+   - "PDF, PPTX, DOCX, XLSX 만들어줘" → 정확히 4개 subtask (PDF 1개 + PPTX 1개 + DOCX 1개 + XLSX 1개)
+   - 형식을 임의로 통합/축소/누락하면 안 됩니다 (PNG/SVG로 대체 금지).
+   - 형식별 매핑은 아래 6번 primary_tool과 정확히 1:1로 일치해야 합니다.
+6. **primary_tool ↔ 파일 형식 매핑 (엄격)**:
+   - PDF (.pdf)   → primary_tool: "generate_pdf"
+   - PPTX (.pptx) → primary_tool: "generate_pptx"
+   - XLSX (.xlsx) → primary_tool: "generate_xlsx"
+   - DOCX (.docx) → primary_tool: "generate_docx"
+   - PNG/JPG (.png/.jpg) → primary_tool: "generate_image"
+   - 이미지 편집 → primary_tool: "edit_image"
+   - 코드/마크다운/텍스트 (.md/.py/.js/.txt) → primary_tool: "write_file"
+   - 셸 명령 → primary_tool: "run_command"
+   - 코드 분석/리팩토링 → primary_tool: "code"
+7. 각 subtask의 description에는 **반드시 도구를 사용해 실제 파일을 생성/저장**하라고 명시하세요. "텍스트로 출력"이 아니라 "<primary_tool> 도구로 .generated/ 폴더에 저장".
+8. target_files에는 결과물 파일의 절대/상대 경로를 명시하세요. **확장자는 primary_tool과 일치해야 함** (예: primary_tool=generate_xlsx → ".generated/...xlsx").
 
 반드시 아래 JSON 형식으로만 응답하세요 (마크다운 코드블록 없이):
 {{
@@ -2326,26 +2547,37 @@ ORCHESTRATOR_AGENT_PROMPT = """당신은 멀티-에이전트 시스템의 전문
      · 로고/아이콘 → Stable Image Core (빠름)
      · 비즈니스 자료 → Amazon Nova Canvas
      **프롬프트는 영어로 작성하면 모델 자동 선택 정확도가 향상됩니다.**
-   - generate_pdf: PDF 생성 (.generated/에 자동 저장, reportlab 사용)
-   - generate_pptx: PPTX 생성 (.generated/에 자동 저장, python-pptx 사용)
+   - generate_pdf:  PDF 생성 (reportlab)
+   - generate_pptx: PPTX 생성 (python-pptx)
+   - generate_xlsx: XLSX 엑셀 생성 (openpyxl) — sheets[{name, headers, rows}] 형태로 호출
+   - generate_docx: DOCX 워드 생성 (python-docx) — sections[{heading, body, bullets}] 형태로 호출
+   - edit_image:    이미지 inpaint/outpaint
 
-2. **위 [핵심 도구]가 명시되어 있다면 가장 먼저 그 도구부터 호출하세요**. 텍스트 설명은 도구 호출 후에 추가하세요.
+2. **파일 형식과 도구는 정확히 일치해야 합니다 (절대 규칙)**:
+   - .pdf  → generate_pdf  (절대 generate_image 금지)
+   - .pptx → generate_pptx (절대 generate_image 금지)
+   - .xlsx → generate_xlsx (절대 generate_image 금지)
+   - .docx → generate_docx (절대 generate_image 금지)
+   - .png/.jpg → generate_image
+   사용자가 "PDF + PPTX + XLSX + DOCX 만들어줘"라고 했으면 위 4개 도구를 각각 호출하세요. PNG/SVG로 대체하면 작업 실패입니다.
 
-3. **이미지 생성 작업의 경우**: 사용자가 어떤 채팅 모델(Claude 등)을 선택했더라도, 실제 이미지는 generate_image 도구가 시스템 내부에서 Stability/Amazon 이미지 모델을 자동 호출해서 생성합니다. Claude로 이미지를 직접 그리려고 하지 마세요 — generate_image 도구를 호출하면 됩니다.
+3. **위 [핵심 도구]가 명시되어 있다면 가장 먼저 그 도구부터 호출하세요**. 텍스트 설명은 도구 호출 후에 추가하세요.
 
-4. **파일 생성 작업의 표준 절차**:
+4. **이미지 생성 작업의 경우**: 사용자가 어떤 채팅 모델(Claude 등)을 선택했더라도, 실제 이미지는 generate_image 도구가 시스템 내부에서 Stability/Amazon 이미지 모델을 자동 호출해서 생성합니다. Claude로 이미지를 직접 그리려고 하지 마세요 — generate_image 도구를 호출하면 됩니다.
+
+5. **파일 생성 작업의 표준 절차**:
    a. 필요시 list_directory/read_file로 컨텍스트 수집
    b. 적절한 generate_* 또는 write_file 도구로 실제 파일 생성
    c. 생성된 파일 경로를 응답에 포함
    d. **반드시 .generated/ 폴더에 저장** (없으면 run_command로 mkdir)
 
-5. **대상 파일 외의 파일은 수정하지 마세요**.
+6. **대상 파일 외의 파일은 수정하지 마세요**.
 
-6. **다른 에이전트의 작업 영역을 침범하지 마세요**.
+7. **다른 에이전트의 작업 영역을 침범하지 마세요**.
 
-7. 작업이 끝나면 "[완료] <생성된 파일 경로 + 한 줄 요약>" 형태로 마무리하세요.
+8. 작업이 끝나면 "[완료] <생성된 파일 경로 + 한 줄 요약>" 형태로 마무리하세요.
 
-8. 도구 호출 없이 텍스트만 출력하면 작업이 실패한 것으로 간주됩니다. 반드시 도구를 사용해 실제 결과물을 만들어내세요.
+9. 도구 호출 없이 텍스트만 출력하면 작업이 실패한 것으로 간주됩니다. 반드시 도구를 사용해 실제 결과물을 만들어내세요.
 """
 
 ORCHESTRATOR_MERGER_PROMPT = """당신은 멀티-에이전트 결과를 통합하는 리뷰어입니다.
