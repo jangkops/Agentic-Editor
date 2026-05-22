@@ -2674,8 +2674,8 @@ ORCHESTRATOR_AGENT_PROMPT = """당신은 멀티-에이전트 시스템의 전문
      **프롬프트는 영어로 작성하면 모델 자동 선택 정확도가 향상됩니다.**
    - generate_pdf:  PDF 생성 (reportlab)
    - generate_pptx: PPTX 생성 (python-pptx)
-   - generate_xlsx: XLSX 엑셀 생성 (openpyxl) — sheets[{name, headers, rows}] 형태로 호출
-   - generate_docx: DOCX 워드 생성 (python-docx) — sections[{heading, body, bullets}] 형태로 호출
+   - generate_xlsx: XLSX 엑셀 생성 (openpyxl) — sheets[{{name, headers, rows}}] 형태로 호출
+   - generate_docx: DOCX 워드 생성 (python-docx) — sections[{{heading, body, bullets}}] 형태로 호출
    - edit_image:    이미지 inpaint/outpaint
 
 2. **파일 형식과 도구는 정확히 일치해야 합니다 (절대 규칙)**:
@@ -3820,6 +3820,85 @@ async def _orchestrator_run_agent_inner(
     MAX_TOOL_NUDGES = 2
 
     await emit_queue.put({"type": "agent_start", "taskId": task_id, "role": role, "title": title, "targetFiles": target_files})
+
+    # === 결정론적 단축 경로 (NEW) ===
+    # primary_tool이 명확한 파일 생성 도구면 Worker LLM 호출 없이 바로 enrich+generate.
+    # 이러면 Worker가 도구를 안 부르는 모든 케이스를 우회한다.
+    # 게이트웨이는 enrichment 단계에서 1회 경유 → 비용/사용량 측정 유지.
+    pt_lower = (subtask.get("primary_tool") or "").lower()
+    direct_tools = {"generate_pdf", "generate_pptx", "generate_xlsx",
+                    "generate_docx", "generate_image", "edit_image", "write_file"}
+    if pt_lower in direct_tools:
+        print(f"[Orchestrator] {task_id} 결정론적 단축 경로 — Worker LLM 우회 (primary_tool={pt_lower})")
+        try:
+            # 1) 게이트웨이로 Claude가 콘텐츠 작성 (게이트웨이 경유 보장)
+            enriched_text = await _enrich_content_via_gateway(
+                gw=gw,
+                model_id=stream_model,
+                primary_tool=pt_lower,
+                title=title,
+                description=description,
+                final_text="",
+                project_path=project_path,
+            )
+            # 2) enrichment 부족하면 디스크 데이터 보강
+            if not enriched_text or len(enriched_text) < 200:
+                real = _gather_real_context(description, project_path) \
+                    or _gather_real_context_forced(project_path, title)
+                if real:
+                    enriched_text = real
+            # 3) 결정론적 도구로 파일 생성
+            forced = await _force_generate_from_text(
+                primary_tool=pt_lower,
+                target_files=target_files,
+                title=title,
+                description=description,
+                final_text=enriched_text or description or title,
+                project_path=project_path,
+                aws_profile=aws_profile,
+                bedrock_user=bedrock_user,
+            )
+            for fpath, finfo in forced:
+                verified_files.append(finfo)
+                tool_log.append({
+                    "name": "direct:" + finfo.get("tool", "?"),
+                    "input": {"shortcut": True, "primary_tool": pt_lower},
+                    "output": fpath,
+                })
+                # meta sidecar
+                try:
+                    _meta = {
+                        "tool": finfo.get("tool", pt_lower),
+                        "model": finfo.get("model", "system_direct"),
+                        "chatModel": stream_model,
+                        "agentId": task_id,
+                        "agentRole": role,
+                        "agentTitle": title,
+                        "createdAt": datetime.utcnow().isoformat() + "Z",
+                        "promptHint": (description or "")[:200],
+                        "shortcut": True,
+                    }
+                    with open(finfo["absPath"] + ".meta.json", "w", encoding="utf-8") as _mf:
+                        json.dump(_meta, _mf, ensure_ascii=False, indent=2)
+                except Exception:
+                    pass
+            if verified_files:
+                final_text = (enriched_text or "")[:1500]
+                await emit_queue.put({
+                    "type": "agent_done", "taskId": task_id,
+                    "summary": f"단축 경로로 {len(verified_files)}개 파일 생성됨",
+                    "toolCount": len(tool_log),
+                    "verifiedFiles": [vf["path"] for vf in verified_files],
+                })
+                return {
+                    "taskId": task_id, "role": role, "title": title,
+                    "status": "done",
+                    "summary": f"[결정론적 생성] {pt_lower} 도구로 파일 생성 완료\n\n{final_text}",
+                    "tools": tool_log, "verifiedFiles": verified_files,
+                }
+            print(f"[Orchestrator] {task_id} 단축 경로 실패 — Worker LLM 경로로 진행")
+        except Exception as _short_err:
+            print(f"[Orchestrator] {task_id} 단축 경로 예외: {_short_err}, Worker LLM으로 진행")
 
     stream_failed = False
     stream_error_msg = ""
