@@ -1277,16 +1277,31 @@ function _apiBody(extra) {
   //  - 병렬 합본 (hiddenInChat + isParallel): 800자로 축소 — 토큰 폭발 방지 핵심
   //  - 합의/일반 assistant: 4000자
   //  - 오류 메시지 제외
+  // [할루시네이션 방지] assistant 응답에서 거짓 완료 주장은 history에 넣기 전 정리
+  const _sanitizeAssistant = (txt) => {
+    if (!txt) return txt;
+    let t = txt;
+    // 가짜 .generated/ 경로의 마크다운 이미지 → 명시적 표시
+    t = t.replace(/!\[[^\]]*\]\(\.generated\/[^)]+\)/g, '[과거 응답: 실제 파일 미생성]');
+    // 표 안의 "✅ 완료" 같은 거짓 셀
+    t = t.replace(/\|[^\n|]*?(✅|완료|완성|생성됨|created|done)[^\n|]*?\|/g, '| (실제 미생성) |');
+    // "이전 작업이 완료됨" 같은 표현
+    t = t.replace(/(이전|위)\s*작업[^.]{0,30}(이미|모두)\s*완료/g, '(이전 응답에서 완료 주장이 있었으나 실제 파일은 생성되지 않았음)');
+    // 가짜 ✅/🎉 완료
+    t = t.replace(/(✅|🎉)\s*[^\n.]{0,30}(생성|저장|작성)\s*(완료|되었|됨)/g, '*(실제 미생성)*');
+    return t;
+  };
   const _truncateMsg = (m) => {
     const c = m.content || '';
     if (m.role === 'user') return c.substring(0, 6000);
     if (m.isParallel && m.hiddenInChat) {
-      // 병렬 합본은 첫 N모델 이름만 남긴 초압축 요약으로
-      const head = c.substring(0, 400);
+      // 병렬 합본은 첫 N모델 이름만 남긴 초압축 요약으로 + sanitize
+      const head = _sanitizeAssistant(c.substring(0, 400));
       return head + (c.length > 400 ? `\n\n…[병렬 합본 축약됨: ${m.parallelCount || '?'}개 모델, 원본 ${c.length}자]` : '');
     }
-    if (m.isConsensus) return c.substring(0, 4000);
-    return c.substring(0, 4000);
+    // assistant 응답은 sanitize 후 자르기
+    if (m.isConsensus) return _sanitizeAssistant(c).substring(0, 4000);
+    return _sanitizeAssistant(c).substring(0, 4000);
   };
   const history = (state.messages || [])
     .filter(m =>

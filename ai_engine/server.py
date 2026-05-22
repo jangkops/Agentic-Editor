@@ -1944,29 +1944,63 @@ async def run_agent_parallel(request: Request):
         # 할루시네이션 sanitizer — 도구 호출 시뮬레이션과 거짓 완료 주장을 제거
         def _sanitize_hallucination(text: str) -> tuple:
             """모델이 도구 사용을 시뮬레이션한 흔적이나 거짓 주장을 감지하고 정리.
+            실제 파일 존재 여부를 .generated/ 폴더에서 검증하여 거짓 경로는 제거.
             반환: (cleaned_text, was_modified)
             """
             if not text:
                 return text, False
             original = text
+
+            # 0) 실제 .generated/ 폴더에 어떤 파일이 있는지 확인
+            _generated_dir = os.path.join(project_path or os.getcwd(), ".generated") if project_path else os.path.join(os.getcwd(), ".generated")
+            _existing_files = set()
+            try:
+                if os.path.isdir(_generated_dir):
+                    for f in os.listdir(_generated_dir):
+                        _existing_files.add(f)
+            except Exception:
+                pass
+
             # 1) function_calls/tool_call XML 태그 제거 (앞뒤 공백 포함)
             text = re.sub(r'<function_calls>.*?</function_calls>', '', text, flags=re.DOTALL | re.IGNORECASE)
             text = re.sub(r'<invoke[^>]*>.*?</invoke>', '', text, flags=re.DOTALL | re.IGNORECASE)
             text = re.sub(r'<tool_call>.*?</tool_call>', '', text, flags=re.DOTALL | re.IGNORECASE)
             text = re.sub(r'<parameter[^>]*>.*?</parameter>', '', text, flags=re.DOTALL | re.IGNORECASE)
             text = re.sub(r'<function_calls>|</function_calls>|<invoke[^>]*>|</invoke>|<tool_call>|</tool_call>', '', text, flags=re.IGNORECASE)
-            # 2) 가짜 .generated/ 경로의 ![이미지] 마크다운 (실제로 생성 안 됐음)
-            text = re.sub(r'!\[[^\]]*\]\(\.generated/[^)]+\)', '[*이미지 생성 위치 — 실제 파일 없음*]', text)
-            # 3) 거짓 완료 주장 약화 ("생성 완료!" → "*아래 내용으로 생성 가능*")
+
+            # 2) 가짜 .generated/ 경로 검증 — 실제 존재하지 않는 파일은 표시 변경
+            def _replace_fake_path(match):
+                full = match.group(0)
+                fname = match.group(1)
+                if fname in _existing_files:
+                    return full  # 실제 존재 → 그대로
+                return f"`(없음: {fname})`"  # 가짜 → 명시적으로 없다고 표시
+            text = re.sub(r'`?\.generated/([\w\-.]+)`?', _replace_fake_path, text)
+
+            # 3) ![이미지](.generated/xxx.png) 마크다운 — 실제 파일 검증
+            def _replace_md_img(match):
+                fname = match.group(1)
+                if fname in _existing_files:
+                    return match.group(0)
+                return f"[*이미지 없음: {fname}*]"
+            text = re.sub(r'!\[[^\]]*\]\(\.generated/([\w\-.]+)\)', _replace_md_img, text)
+
+            # 4) 표 형태의 거짓 완료 주장 제거 — "✅ 완료" 행
+            # | 1 | PNG 이미지 | .generated/xxx.png | ✅ 완료 |  같은 패턴
+            text = re.sub(r'\|[^\n|]*?(✅|완료|완성|생성됨|created|done)[^\n|]*?\|', '| (실제 파일 없음) |', text)
+
+            # 5) 거짓 완료 주장 약화
             text = re.sub(r'(✅|✓|🎉)\s*[^\n.]{0,30}(생성|저장|작성|만들).{0,10}(완료|되었|됨)[!.]?', '*다음 내용으로 생성 가능:*', text, flags=re.IGNORECASE)
-            # 4) "모든 파일이 .generated/에 저장됩니다" 같은 거짓 안내
+            text = re.sub(r'(이전 작업|위 작업).*?(이미|모두)\s*완료[^.]*\.?', '*(주의: 이전 대화에서 실제 파일이 생성되지 않았습니다.)*', text)
+
+            # 6) "모든 파일이 .generated/에 저장됩니다" 같은 거짓 안내
             text = re.sub(r'(모든\s*)?파일.{0,20}\.generated/.{0,30}(저장|생성|만들|작성).{0,20}(됩니다|되었|완료|돼요)', '*아래 코드를 실행하면 .generated/에 파일이 생성됩니다*', text, flags=re.IGNORECASE)
 
             modified = (text != original)
-            # 5) 너무 많이 잘려나갔으면 경고 추가
+            # 7) 너무 많이 잘려나갔으면 경고 추가
             if modified and len(text.strip()) < 50 and len(original) > 200:
-                text = ("*[알림] 이 모델의 응답에서 도구 호출 시뮬레이션이 감지되어 정리되었습니다. "
-                        "병렬 모드에서는 도구를 사용할 수 없습니다. "
+                text = ("*[알림] 이 모델의 응답에서 도구 호출 시뮬레이션 또는 거짓 주장이 감지되어 정리되었습니다. "
+                        "실제로는 파일이 생성되지 않았습니다. "
                         "실제 파일 생성을 원하시면 '에이전트로 작업 진행' 버튼을 사용하세요.*\n\n"
                         + text)
             return text.strip(), modified
