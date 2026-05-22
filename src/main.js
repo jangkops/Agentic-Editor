@@ -1402,6 +1402,8 @@ async function runOrchestrated(prompt) {
     role: 'system',
     content: '멀티-에이전트 오케스트레이션 시작 — Planner가 작업을 분해하고 N개 에이전트가 도구로 실행합니다.',
   });
+  // 공통 thinking placeholder
+  state.messages.push({ role:'assistant', content:'', _thinking: true, _thinkingLabel: '에이전트 작업 진행 중' });
   renderMessages();
 
   // 가용 모델 중 가장 강한 worker 선택 (sonnet > opus > haiku 우선)
@@ -1433,7 +1435,8 @@ async function runOrchestrated(prompt) {
     let buf = '';
 
     while (true) {
-      const { done, value } = await _readWithIdleTimeout(reader);
+      // 오케스트레이션은 Planner→N Workers→Merger로 시간이 오래 걸림 → idle timeout 600초
+      const { done, value } = await _readWithIdleTimeout(reader, 600000);
       if (done) break;
       buf += dec.decode(value, { stream: true });
       const events = buf.split('\n\n'); buf = events.pop() || '';
@@ -1487,6 +1490,8 @@ async function runOrchestrated(prompt) {
     const errCount = [...agentStates.values()].filter(a => a.status === 'error').length;
     const noToolCount = [...agentStates.values()].filter(a => a.status === 'done' && a.toolCount === 0).length;
     const elapsed = Math.floor((Date.now() - (state._streamStartTime || Date.now())) / 1000);
+    // thinking placeholder 제거
+    state.messages = state.messages.filter(m => !m._thinking);
     state.messages.push({
       role: 'system',
       content: `오케스트레이션 완료 — ${doneCount}개 성공, ${errCount}개 실패` +
@@ -1533,6 +1538,7 @@ async function runOrchestrated(prompt) {
     renderMessages();
   } catch (e) {
     const errMsg = e.name === 'AbortError' ? '사용자가 취소했습니다.' : e.message;
+    state.messages = state.messages.filter(m => !m._thinking);
     state.messages.push({ role: 'system', content: `오케스트레이션 오류: ${errMsg}` });
     addLiveLog('error', `오케스트레이션 실패: ${errMsg}`);
     renderMessages();
@@ -1956,6 +1962,8 @@ async function runParallel(prompt) {
   renderParallelSlotList();
   const totalCalls = _expandedSlots.length;
   state.messages.push({ role:'system', content:`${totalCalls}개 병렬 실행 시작...` });
+  // 공통 thinking placeholder — assistant 빈 메시지로 진행 중 표시
+  state.messages.push({ role:'assistant', content:'', _thinking: true, _thinkingLabel: `${totalCalls}개 모델 호출 중` });
   renderMessages();
 
   // 서버 측 병렬 호출 — 단일 SSE 연결로 모든 모델 결과 수신
@@ -2023,6 +2031,8 @@ async function runParallel(prompt) {
         });
       }
     }
+    // thinking placeholder 제거
+    state.messages = state.messages.filter(m => !m._thinking);
     // 재시도 가능한 system 메시지로 표시 (renderMessages에서 버튼 렌더)
     state.messages.push({
       role: 'system',
@@ -2041,6 +2051,8 @@ async function runParallel(prompt) {
   const done = [...state.parallelResults.values()].filter(r => r.status === 'done').length;
   const err = [...state.parallelResults.values()].filter(r => r.status === 'error').length;
   const parallelElapsed = Math.floor((Date.now() - (state._streamStartTime || Date.now())) / 1000);
+  // thinking placeholder 제거
+  state.messages = state.messages.filter(m => !m._thinking);
   state.messages.push({ role:'system', content:`병렬 완료: ${done}개 성공, ${err}개 실패 (${fmtElapsed(parallelElapsed)}) — 가운데 패널에서 결과 확인` });
 
   // === 병렬 결과를 assistant 메시지로 sessionMessages에 저장 (다음 턴 맥락 유지) ===
@@ -2732,7 +2744,7 @@ function renderParallelResultGrid() {
     card.dataset.slotId = sid;
     card.innerHTML = `
       <div class="model-card-header">
-        <span class="model-name" style="color:${nameColor}">● ${r.modelName || '모델'}</span>
+        <span class="model-name" style="color:${nameColor}">${r.modelName || '모델'}</span>
         ${r.elapsed ? `<span style="font-size:10px;color:var(--color-text-muted)">${fmtElapsed(r.elapsed)}</span>` : ''}
         <span class="badge ${badge}">${label}</span>
       </div>
@@ -3150,11 +3162,12 @@ function renderMessages(){
             }
           }
           c.appendChild(d);
-        } else if(!msg.workflow && state.isStreaming) {
+        } else if(msg._thinking || (!msg.workflow && state.isStreaming)) {
           const d=document.createElement('div');d.className=`chat-msg assistant ${FI}`;
           const elapsed = Math.floor((Date.now() - (state._streamStartTime || Date.now())) / 1000);
           const timeText = elapsed >= 3600 ? `${Math.floor(elapsed/3600)}h ${Math.floor((elapsed%3600)/60)}m` : elapsed >= 60 ? `${Math.floor(elapsed/60)}m ${elapsed%60}s` : `${elapsed}s`;
-          d.innerHTML=`<div class="msg-content thinking-indicator"><span class="thinking-dots"><span></span><span></span><span></span></span> thinking ${timeText}</div>`;
+          const label = msg._thinkingLabel || 'thinking';
+          d.innerHTML=`<div class="msg-content thinking-indicator"><span class="thinking-dots"><span></span><span></span><span></span></span> ${esc(label)} ${timeText}</div>`;
           c.appendChild(d);
         }
       }

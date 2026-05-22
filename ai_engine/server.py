@@ -2470,15 +2470,28 @@ async def run_agent_orchestrated(request: Request):
 
         pipe_task = asyncio.create_task(pipeline())
 
+        # Heartbeat — 30초마다 클라이언트 idle timeout 방지
+        last_send = asyncio.get_event_loop().time()
         try:
             while True:
-                evt = await emit_queue.get()
-                if evt.get("type") == "__END__":
-                    break
-                yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
+                try:
+                    evt = await asyncio.wait_for(emit_queue.get(), timeout=20)
+                    if evt.get("type") == "__END__":
+                        break
+                    yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
+                    last_send = asyncio.get_event_loop().time()
+                except asyncio.TimeoutError:
+                    # 20초 동안 이벤트 없음 → heartbeat
+                    yield f"data: {json.dumps({'heartbeat': True, 'ts': int(asyncio.get_event_loop().time())})}\n\n"
+                    last_send = asyncio.get_event_loop().time()
+                    # pipeline이 끝났는지 확인
+                    if pipe_task.done():
+                        break
         finally:
             if not pipe_task.done():
                 pipe_task.cancel()
+                try: await pipe_task
+                except Exception: pass
             yield "data: [DONE]\n\n"
 
     return StreamingResponse(orchestrated_stream(), media_type="text/event-stream")
