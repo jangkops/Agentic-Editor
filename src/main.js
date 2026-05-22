@@ -2967,10 +2967,30 @@ function renderMessages(){
       if (msg._retryable && !state.isStreaming) {
         const retryBar = document.createElement('div');
         retryBar.style.cssText = 'margin-top:8px;display:flex;gap:6px;justify-content:center';
+        // 부분 재시도 (실패한 슬롯만) — 병렬 모드 전용
+        if (msg._retryType === 'parallel' && msg._retryPrompt) {
+          const failedCount = [...state.parallelResults.values()].filter(r => r.status === 'error').length;
+          if (failedCount > 0) {
+            const partialBtn = document.createElement('button');
+            partialBtn.className = 'sm-btn';
+            partialBtn.style.cssText = 'background:var(--color-accent);color:#fff;border:none;padding:5px 12px;border-radius:5px;font-size:11px;cursor:pointer';
+            partialBtn.textContent = `실패한 ${failedCount}개만 재시도`;
+            partialBtn.title = '성공한 응답은 보존, 실패한 슬롯만 다시 호출';
+            partialBtn.addEventListener('click', () => {
+              if (typeof retryFailedParallel === 'function') {
+                retryFailedParallel(msg._retryPrompt);
+              } else {
+                runParallel(msg._retryPrompt);
+              }
+            });
+            retryBar.appendChild(partialBtn);
+          }
+        }
+        // 전체 재시도
         const retryBtn = document.createElement('button');
         retryBtn.className = 'sm-btn';
-        retryBtn.style.cssText = 'background:var(--color-accent);color:#fff;border:none;padding:5px 12px;border-radius:5px;font-size:11px;cursor:pointer';
-        retryBtn.textContent = '재시도';
+        retryBtn.style.cssText = 'background:transparent;color:var(--color-text-secondary);border:1px solid var(--color-border);padding:5px 12px;border-radius:5px;font-size:11px;cursor:pointer';
+        retryBtn.textContent = '전체 재시도';
         retryBtn.addEventListener('click', () => {
           if (msg._retryType === 'parallel' && msg._retryPrompt) {
             runParallel(msg._retryPrompt);
