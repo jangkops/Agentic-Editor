@@ -2886,9 +2886,112 @@ async def _orchestrator_plan(gw, stream_model, user_prompt: str, system_prompt: 
     }
 
 
+def _gather_real_context(description: str, project_path: str) -> str:
+    """description에서 단서를 찾아 실제 파일 시스템 데이터를 수집.
+
+    LLM이 추측해서 만든 가짜 폴더 구조 대신 실제 디스크 데이터로 콘텐츠 보강.
+    "폴더 구조", "디렉토리 흐름도", "파일 목록" 등의 키워드 감지.
+
+    Returns:
+        실제 데이터 마크다운 텍스트. 관련 없는 작업이면 빈 문자열.
+    """
+    if not project_path or not os.path.isdir(project_path):
+        return ""
+    desc_lower = (description or "").lower()
+    # 폴더 구조 관련 키워드 감지
+    folder_keywords = (
+        "폴더 구조", "디렉토리 구조", "폴더 트리", "디렉토리 트리",
+        "폴더 깊이", "뎁스", "depth", "흐름도", "계층",
+        "folder structure", "directory structure", "tree",
+        "프로젝트 구조", "project structure",
+    )
+    if not any(kw in desc_lower for kw in folder_keywords):
+        return ""
+
+    try:
+        # 실제 폴더 트리 작성 — 최대 4 depth, hidden/build 폴더 제외
+        IGNORE_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv",
+                       ".pytest_cache", ".hypothesis", "dist", "build",
+                       ".rag_cache", "coverage", ".generated", ".cache"}
+        IGNORE_FILES = {".DS_Store"}
+        lines = []
+        max_depth = 4
+        max_entries_per_dir = 30
+        root_name = os.path.basename(project_path.rstrip("/")) or project_path
+
+        # 통계
+        total_dirs = 0
+        total_files = 0
+        ext_count = {}
+
+        def _walk(path: str, prefix: str, depth: int):
+            nonlocal total_dirs, total_files
+            if depth > max_depth:
+                return
+            try:
+                entries = sorted(os.listdir(path))
+            except (PermissionError, OSError):
+                return
+            entries = [e for e in entries if e not in IGNORE_FILES and e not in IGNORE_DIRS]
+            entries = entries[:max_entries_per_dir]
+            for i, e in enumerate(entries):
+                full = os.path.join(path, e)
+                is_last = (i == len(entries) - 1)
+                connector = "└── " if is_last else "├── "
+                if os.path.isdir(full):
+                    total_dirs += 1
+                    lines.append(f"{prefix}{connector}{e}/")
+                    next_prefix = prefix + ("    " if is_last else "│   ")
+                    _walk(full, next_prefix, depth + 1)
+                else:
+                    total_files += 1
+                    ext = os.path.splitext(e)[1].lstrip(".").lower()
+                    if ext:
+                        ext_count[ext] = ext_count.get(ext, 0) + 1
+                    lines.append(f"{prefix}{connector}{e}")
+
+        lines.append(f"{root_name}/")
+        _walk(project_path, "", 1)
+
+        tree_text = "\n".join(lines[:200])  # cap output
+
+        # 통계 표
+        ext_table_rows = sorted(ext_count.items(), key=lambda x: -x[1])[:10]
+        ext_table = "\n".join(f"| .{ext} | {cnt} |" for ext, cnt in ext_table_rows)
+
+        return f"""## 실제 프로젝트 폴더 구조 (디스크 검증)
+
+프로젝트 루트: `{project_path}`
+
+### 디렉토리 트리
+
+```
+{tree_text}
+```
+
+### 통계
+
+| 항목 | 값 |
+|------|-----|
+| 총 디렉토리 | {total_dirs} |
+| 총 파일 | {total_files} |
+| 최대 깊이 | {max_depth} |
+
+### 파일 형식별 분포
+
+| 확장자 | 파일 수 |
+|--------|---------|
+{ext_table}
+"""
+    except Exception as e:
+        print(f"[RealContext] 폴더 스캔 실패: {e}")
+        return ""
+
+
 async def _enrich_content_via_gateway(
     gw, model_id: str, primary_tool: str, title: str,
     description: str, final_text: str, max_tokens: int = 2000,
+    project_path: str = "",
 ) -> str:
     """게이트웨이 호출로 파일 본문 콘텐츠 보강 — 퀄리티 보장.
 
@@ -2944,9 +3047,14 @@ async def _enrich_content_via_gateway(
 [중요] '생성 완료' 같은 거짓 주장 금지. 실제 콘텐츠만 작성.
 """
 
+    # === 약점 2 개선: 실제 디스크 데이터 주입 ===
+    # 폴더 구조/파일 목록 같은 사실 기반 작업은 LLM이 추측하지 않도록 실제 데이터 첨부.
+    real_context = _gather_real_context(description, project_path)
+
     user_msg_base = f"""작업: {title}
 지시사항: {description}
 
+{f'### 실제 프로젝트 데이터 (디스크에서 직접 수집)\n\n{real_context}\n\n위 실제 데이터를 그대로 인용해서 작성하세요. 추측이나 가공 금지.\n' if real_context else ''}
 이전 응답 일부 (참고):
 {(final_text or '')[:1500]}
 
@@ -3266,6 +3374,9 @@ async def _orchestrator_run_agent_inner(
     tool_log = []
     # 실제 디스크에 존재 확인된 파일들 — 할루시네이션 방지의 핵심
     verified_files = []
+    # Worker가 도구 안 부르고 텍스트만 답할 때 자동 재요청 카운터 (max 2회)
+    tool_nudge_count = 0
+    MAX_TOOL_NUDGES = 2
 
     await emit_queue.put({"type": "agent_start", "taskId": task_id, "role": role, "title": title, "targetFiles": target_files})
 
@@ -3328,6 +3439,43 @@ async def _orchestrator_run_agent_inner(
                 if stop_reason == "max_tokens" and text_parts and turn < max_turns - 1:
                     print(f"[Orchestrator] max_tokens 도달 — 이어서 생성 (task={task_id}, turn={turn+1})")
                     messages.append({"role": "user", "content": [{"text": "계속 이어서 작성해주세요."}]})
+                    continue
+                # === 약점 1 개선: 도구 호출 0회 자동 nudge ===
+                # 작업이 도구를 필요로 하는데 Worker가 텍스트만 답함 → 도구 호출 재요청.
+                # forced fallback에 의존하지 않고 정상 경로로 성공 확률 향상.
+                pt = (subtask.get("primary_tool") or "").lower()
+                target_files = subtask.get("target_files", [])
+                wants_tools = bool(target_files) or pt in (
+                    "generate_image", "generate_pdf", "generate_pptx",
+                    "generate_xlsx", "generate_docx", "edit_image",
+                    "write_file", "code", "run_command",
+                )
+                if wants_tools and tool_nudge_count < MAX_TOOL_NUDGES and turn < max_turns - 1:
+                    tool_nudge_count += 1
+                    nudge_msg = (
+                        f"위 응답에서 도구 호출을 하지 않았습니다.\n"
+                        f"이 작업은 반드시 도구로 실제 파일을 만들어야 합니다.\n"
+                        f"primary_tool={pt or '(자동선택)'} 도구를 즉시 호출해서 "
+                        f".generated/ 폴더에 파일을 생성해주세요.\n"
+                        f"텍스트 응답만으로는 작업이 실패한 것으로 간주됩니다."
+                    )
+                    if pt == "generate_pdf":
+                        nudge_msg += '\n예시: generate_pdf({"title": "...", "sections": [{"heading": "...", "body": "..."}]})'
+                    elif pt == "generate_pptx":
+                        nudge_msg += '\n예시: generate_pptx({"title": "...", "slides": [{"title": "...", "bullets": ["..."]}]})'
+                    elif pt == "generate_xlsx":
+                        nudge_msg += '\n예시: generate_xlsx({"title": "...", "sheets": [{"name": "Data", "headers": ["A", "B"], "rows": [["x", "y"]]}]})'
+                    elif pt == "generate_docx":
+                        nudge_msg += '\n예시: generate_docx({"title": "...", "sections": [{"heading": "...", "body": "...", "bullets": ["..."]}]})'
+                    elif pt == "generate_image":
+                        nudge_msg += '\n예시: generate_image({"prompt": "...", "size": "1024x1024"})'
+                    messages.append({"role": "user", "content": [{"text": nudge_msg}]})
+                    print(f"[Orchestrator] {task_id} 도구 nudge {tool_nudge_count}/{MAX_TOOL_NUDGES} (primary_tool={pt})")
+                    await emit_queue.put({
+                        "type": "agent_tool", "taskId": task_id,
+                        "tool": "tool_nudge", "status": "running",
+                        "input": {"attempt": tool_nudge_count, "primary_tool": pt},
+                    })
                     continue
                 break
 
@@ -3449,6 +3597,7 @@ async def _orchestrator_run_agent_inner(
                     title=title,
                     description=description,
                     final_text=final_text,
+                    project_path=project_path,
                 )
                 # (2) 보강된 본문으로 결정적 도구 디스패처 호출 → 실제 파일 생성
                 _forced = await _force_generate_from_text(
@@ -3581,10 +3730,49 @@ async def _orchestrator_merge(gw, stream_model, user_prompt, agent_results: list
         )
         if result.get("decision") == "ALLOW":
             output = result.get("output", {}).get("message", {}).get("content", [])
-            return "\n".join(c.get("text", "") for c in output if "text" in c).strip()
+            text = "\n".join(c.get("text", "") for c in output if "text" in c).strip()
+            # === 약점 3 개선: Merger 응답 sanitize ===
+            # 입력에 없는 가짜 오류명(KeyError, TypeError 등)을 만들어내면 제거.
+            return _sanitize_merger_report(text, agent_results)
         return f"(Merger 실패: {result.get('error') or result.get('decision')})"
     except Exception as e:
         return f"(Merger 예외: {e})"
+
+
+def _sanitize_merger_report(text: str, agent_results: list) -> str:
+    """Merger 응답에서 입력에 없는 가짜 예외명/스택트레이스 제거.
+
+    LLM이 'KeyError', 'TypeError', 'ValidationException' 같은 그럴듯한 오류 메시지를
+    만들어내는 경우가 있음. 실제 입력(agent.summary)에 그 단어가 없으면 일반화된
+    문구로 치환한다.
+    """
+    if not text:
+        return text
+
+    # 실제 agent summary에 등장한 예외명들 수집 (이건 OK — 진짜 정보)
+    real_errors = set()
+    for r in (agent_results or []):
+        s = (r.get("summary") or "").lower()
+        for kw in ("keyerror", "typeerror", "valueerror", "attributeerror",
+                   "validationexception", "accessdeniedexception",
+                   "filenotfound", "permissiondenied"):
+            if kw in s:
+                real_errors.add(kw)
+
+    # 입력에 없는 fake 예외명 패턴
+    fake_patterns = [
+        (r"KeyError:\s*['\"][^'\"]*['\"]", "keyerror"),
+        (r"TypeError:\s*['\"][^'\"]*['\"]", "typeerror"),
+        (r"ValueError:\s*['\"][^'\"]*['\"]", "valueerror"),
+        (r"ValidationException[^.\n]*", "validationexception"),
+        (r"AttributeError:\s*['\"][^'\"]*['\"]", "attributeerror"),
+    ]
+    sanitized = text
+    for pattern, kw in fake_patterns:
+        if kw not in real_errors:
+            sanitized = re.sub(pattern, "도구 호출 없이 텍스트만 출력함", sanitized)
+
+    return sanitized
 
 
 @app.post("/api/agents/run-orchestrated")
