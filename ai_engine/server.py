@@ -309,18 +309,99 @@ def _format_bridge_result(tool_name, br):
 
 # ===== Media Generation Tools =====
 
-# Image generation model fallback chain
+# Image generation model preference chain — ordered by general quality/recency
 IMAGE_MODELS = [
-    "stability.stable-image-ultra-v1:1",
-    "stability.sd3-5-large-v1:0",
-    "stability.stable-image-core-v1:1",
-    "amazon.nova-canvas-v1:0",
-    "amazon.titan-image-generator-v2:0",
+    "stability.stable-image-ultra-v1:1",   # 최고 품질 (사진/리얼리즘)
+    "stability.sd3-5-large-v1:0",          # 범용 고품질 (SD 3.5 Large)
+    "stability.stable-image-core-v1:1",    # 고속/저비용
+    "amazon.nova-canvas-v1:0",             # AWS 네이티브 (안정성)
+    "amazon.titan-image-generator-v2:0",   # 보수적 fallback
 ]
 IMAGE_EDIT_MODELS = [
     "amazon.titan-image-generator-v2:0",
     "amazon.nova-canvas-v1:0",
 ]
+
+
+def _select_image_models(prompt: str, hint: str = "") -> list:
+    """프롬프트 분석으로 이미지 모델 우선순위 결정.
+
+    사용자가 "claude로 그려줘" 라고 해도 이 함수가 실제 이미지 생성 모델을
+    프롬프트 키워드 기반으로 다시 선정합니다. 반환 리스트는 fallback 순서.
+
+    Args:
+        prompt: 이미지 생성 프롬프트
+        hint: optional style/category hint (e.g., "photo", "diagram")
+
+    Returns:
+        list of model ids in preference order — first one is "best fit",
+        나머지는 첫 번째 실패 시 fallback.
+    """
+    p = (prompt or "").lower()
+    h = (hint or "").lower()
+    text = p + " " + h
+
+    # Photographic / 사진 / 리얼리즘 → Stability Ultra (최고 사진 품질)
+    photo_kw = ("photo", "photograph", "realistic", "사진", "리얼리즘", "리얼한",
+                "human", "portrait", "초상", "얼굴", "people", "사람",
+                "cinematic", "영화", "studio", "현실적")
+    # 다이어그램 / 차트 / UI / 스크린샷 → SD 3.5 Large (텍스트 렌더링 강함)
+    diagram_kw = ("diagram", "chart", "flowchart", "architecture", "아키텍처",
+                  "ui", "wireframe", "screenshot", "scheme", "schematic",
+                  "다이어그램", "차트", "플로우차트", "구조도", "도식", "와이어프레임")
+    # 일러스트 / 애니메이션 → Stability Ultra (스타일 다양)
+    art_kw = ("illustration", "anime", "cartoon", "manga", "vector", "애니",
+              "일러스트", "만화", "벡터", "그림체", "디지털 아트")
+    # 로고 / 아이콘 / 단순 그래픽 → Stable Image Core (빠르고 저렴)
+    logo_kw = ("logo", "icon", "emblem", "favicon", "아이콘", "로고",
+               "심볼", "엠블럼", "minimal", "심플")
+    # 기업 / 회의 / 비즈니스 자료 → Nova Canvas (AWS, 안전)
+    biz_kw = ("business", "corporate", "presentation", "slide",
+              "기업", "회사", "비즈니스", "회의", "보고서")
+
+    def has_any(words):
+        return any(w in text for w in words)
+
+    # 우선순위 계산
+    if has_any(diagram_kw):
+        # 다이어그램 — SD 3.5 Large가 텍스트 렌더링이 가장 우수
+        return [
+            "stability.sd3-5-large-v1:0",
+            "stability.stable-image-ultra-v1:1",
+            "amazon.titan-image-generator-v2:0",
+            "amazon.nova-canvas-v1:0",
+        ]
+    if has_any(photo_kw):
+        # 사진 — Ultra가 최고 사진 품질
+        return [
+            "stability.stable-image-ultra-v1:1",
+            "stability.sd3-5-large-v1:0",
+            "amazon.nova-canvas-v1:0",
+            "amazon.titan-image-generator-v2:0",
+        ]
+    if has_any(logo_kw):
+        # 로고 — Core가 빠르고 단순한 그래픽에 적합
+        return [
+            "stability.stable-image-core-v1:1",
+            "stability.sd3-5-large-v1:0",
+            "amazon.titan-image-generator-v2:0",
+        ]
+    if has_any(art_kw):
+        # 일러스트 — Ultra의 스타일 다양성
+        return [
+            "stability.stable-image-ultra-v1:1",
+            "stability.sd3-5-large-v1:0",
+            "amazon.nova-canvas-v1:0",
+        ]
+    if has_any(biz_kw):
+        # 비즈니스 자료 — Nova Canvas (안전, 보수적)
+        return [
+            "amazon.nova-canvas-v1:0",
+            "stability.sd3-5-large-v1:0",
+            "stability.stable-image-ultra-v1:1",
+        ]
+    # 기본 — 일반 fallback chain
+    return list(IMAGE_MODELS)
 
 
 async def _tool_generate_image(tool_input: dict, project_path: str, aws_profile: str = '', bedrock_user: str = '') -> str:  # [patched-credentials]
@@ -362,8 +443,11 @@ async def _tool_generate_image(tool_input: dict, project_path: str, aws_profile:
     bedrock_user = bedrock_user or os.environ.get("BEDROCK_USER", "")
     gw = _get_gw(aws_profile, bedrock_user)
 
+    # 프롬프트 분석으로 이미지 모델 우선순위 동적 결정
+    selected_models = _select_image_models(prompt, hint=style)
+
     last_error = ""
-    for model_id in IMAGE_MODELS:
+    for model_id in selected_models:
         try:
             if model_id.startswith("stability."):
                 body = {
@@ -1874,18 +1958,29 @@ async def run_agent_with_tools(request: Request):
                     if tool_name in ("generate_image", "generate_pdf", "generate_pptx", "generate_xlsx", "generate_docx", "edit_image", "write_file"):
                         try:
                             _meta_paths = []
+                            _actual_model = ""
                             try:
                                 _parsed = json.loads(tool_output) if isinstance(tool_output, str) else None
                             except (json.JSONDecodeError, TypeError):
                                 _parsed = None
                             if isinstance(_parsed, dict) and "path" in _parsed and "error" not in _parsed:
                                 _meta_paths.append(_parsed["path"])
+                                _actual_model = _parsed.get("model") or ""
                             elif isinstance(_parsed, dict) and isinstance(_parsed.get("images"), list):
                                 for _it in _parsed["images"]:
                                     if isinstance(_it, dict) and "path" in _it:
                                         _meta_paths.append(_it["path"])
+                                        if not _actual_model and _it.get("model"):
+                                            _actual_model = _it["model"]
                             if tool_name == "write_file" and "path" in tool_input:
                                 _meta_paths.append(tool_input["path"])
+                            _tool_default_model = {
+                                "generate_pdf":  "reportlab (Python)",
+                                "generate_pptx": "python-pptx",
+                                "generate_xlsx": "openpyxl",
+                                "generate_docx": "python-docx",
+                                "write_file":    "filesystem",
+                            }
                             for _rel in _meta_paths:
                                 _abs = _rel if os.path.isabs(_rel) else os.path.join(
                                     project_path if (project_path and os.path.isdir(project_path)) else os.getcwd(),
@@ -1893,9 +1988,11 @@ async def run_agent_with_tools(request: Request):
                                 )
                                 if not os.path.isfile(_abs):
                                     continue
+                                _model_label = _actual_model or _tool_default_model.get(tool_name) or stream_model
                                 _meta_obj = {
                                     "tool": tool_name,
-                                    "model": stream_model,
+                                    "model": _model_label,
+                                    "chatModel": stream_model,
                                     "agentId": "single",
                                     "agentRole": "Agent",
                                     "agentTitle": prompt[:80],
@@ -2222,25 +2319,33 @@ ORCHESTRATOR_AGENT_PROMPT = """당신은 멀티-에이전트 시스템의 전문
    - search_files: 코드/문서 검색
    - run_command: 셸 명령 실행 (Python 스크립트 등)
    - write_file: 텍스트/코드 파일 작성
-   - generate_image: 이미지 생성 (PNG, .generated/에 자동 저장)
-   - generate_pdf: PDF 생성 (.generated/에 자동 저장)
-   - generate_pptx: PPTX 생성 (.generated/에 자동 저장)
+   - generate_image: 이미지 생성 — 시스템이 프롬프트를 분석해 최적 모델을 자동 선택
+     · 사진/리얼리즘 → Stability Stable Image Ultra
+     · 다이어그램/차트/UI → Stability SD 3.5 Large (텍스트 렌더링 우수)
+     · 일러스트/아트 → Stability Ultra
+     · 로고/아이콘 → Stable Image Core (빠름)
+     · 비즈니스 자료 → Amazon Nova Canvas
+     **프롬프트는 영어로 작성하면 모델 자동 선택 정확도가 향상됩니다.**
+   - generate_pdf: PDF 생성 (.generated/에 자동 저장, reportlab 사용)
+   - generate_pptx: PPTX 생성 (.generated/에 자동 저장, python-pptx 사용)
 
 2. **위 [핵심 도구]가 명시되어 있다면 가장 먼저 그 도구부터 호출하세요**. 텍스트 설명은 도구 호출 후에 추가하세요.
 
-3. **파일 생성 작업의 표준 절차**:
+3. **이미지 생성 작업의 경우**: 사용자가 어떤 채팅 모델(Claude 등)을 선택했더라도, 실제 이미지는 generate_image 도구가 시스템 내부에서 Stability/Amazon 이미지 모델을 자동 호출해서 생성합니다. Claude로 이미지를 직접 그리려고 하지 마세요 — generate_image 도구를 호출하면 됩니다.
+
+4. **파일 생성 작업의 표준 절차**:
    a. 필요시 list_directory/read_file로 컨텍스트 수집
    b. 적절한 generate_* 또는 write_file 도구로 실제 파일 생성
    c. 생성된 파일 경로를 응답에 포함
    d. **반드시 .generated/ 폴더에 저장** (없으면 run_command로 mkdir)
 
-4. **대상 파일 외의 파일은 수정하지 마세요**.
+5. **대상 파일 외의 파일은 수정하지 마세요**.
 
-5. **다른 에이전트의 작업 영역을 침범하지 마세요**.
+6. **다른 에이전트의 작업 영역을 침범하지 마세요**.
 
-6. 작업이 끝나면 "[완료] <생성된 파일 경로 + 한 줄 요약>" 형태로 마무리하세요.
+7. 작업이 끝나면 "[완료] <생성된 파일 경로 + 한 줄 요약>" 형태로 마무리하세요.
 
-7. 도구 호출 없이 텍스트만 출력하면 작업이 실패한 것으로 간주됩니다. 반드시 도구를 사용해 실제 결과물을 만들어내세요.
+8. 도구 호출 없이 텍스트만 출력하면 작업이 실패한 것으로 간주됩니다. 반드시 도구를 사용해 실제 결과물을 만들어내세요.
 """
 
 ORCHESTRATOR_MERGER_PROMPT = """당신은 멀티-에이전트 결과를 통합하는 리뷰어입니다.
@@ -2438,19 +2543,31 @@ async def _orchestrator_run_agent_inner(
                 if tname in ("generate_image", "generate_pdf", "generate_pptx", "generate_xlsx", "generate_docx", "edit_image", "write_file"):
                     try:
                         _meta_paths = []
+                        _actual_model = ""  # 실제 생성에 사용된 모델 (도구 응답에서 추출)
                         try:
                             _parsed = json.loads(tout) if isinstance(tout, str) else None
                         except (json.JSONDecodeError, TypeError):
                             _parsed = None
                         if isinstance(_parsed, dict) and "path" in _parsed and "error" not in _parsed:
                             _meta_paths.append(_parsed["path"])
+                            _actual_model = _parsed.get("model") or ""
                         elif isinstance(_parsed, dict) and isinstance(_parsed.get("images"), list):
                             for _it in _parsed["images"]:
                                 if isinstance(_it, dict) and "path" in _it:
                                     _meta_paths.append(_it["path"])
+                                    if not _actual_model and _it.get("model"):
+                                        _actual_model = _it["model"]
                         # write_file: tool_input["path"]
                         if tname == "write_file" and "path" in tinput:
                             _meta_paths.append(tinput["path"])
+                        # 도구 카테고리별 기본 모델명 (도구 응답에 model이 없을 때)
+                        _tool_default_model = {
+                            "generate_pdf":  "reportlab (Python)",
+                            "generate_pptx": "python-pptx",
+                            "generate_xlsx": "openpyxl",
+                            "generate_docx": "python-docx",
+                            "write_file":    "filesystem",
+                        }
                         for _rel in _meta_paths:
                             _abs = _rel if os.path.isabs(_rel) else os.path.join(
                                 project_path if (project_path and os.path.isdir(project_path)) else os.getcwd(),
@@ -2458,9 +2575,12 @@ async def _orchestrator_run_agent_inner(
                             )
                             if not os.path.isfile(_abs):
                                 continue
+                            # 실제 사용 모델 = (이미지 생성 모델) 또는 (도구별 기본) 또는 (chat 모델)
+                            _model_label = _actual_model or _tool_default_model.get(tname) or stream_model
                             _meta_obj = {
                                 "tool": tname,
-                                "model": stream_model,
+                                "model": _model_label,           # 실제 작업 수행 모델/엔진
+                                "chatModel": stream_model,       # 도구 호출을 결정한 chat 모델
                                 "agentId": task_id,
                                 "agentRole": role,
                                 "agentTitle": title,

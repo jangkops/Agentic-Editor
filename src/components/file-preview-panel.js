@@ -208,19 +208,32 @@ class FilePreviewPanel extends HTMLElement {
     if (!modelId) return '';
     const id = String(modelId).replace(/^us\.|^eu\.|^global\./, '');
     const lower = id.toLowerCase();
+    // Anthropic
     if (lower.includes('claude-opus-4-7'))   return 'Opus 4.7';
     if (lower.includes('claude-opus-4'))     return 'Opus 4';
     if (lower.includes('claude-sonnet-4-6')) return 'Sonnet 4.6';
     if (lower.includes('claude-sonnet-4'))   return 'Sonnet 4';
     if (lower.includes('claude-haiku'))      return 'Haiku';
+    // Amazon
+    if (lower.includes('nova-canvas'))       return 'Nova Canvas';
     if (lower.includes('nova-pro'))          return 'Nova Pro';
     if (lower.includes('nova-lite'))         return 'Nova Lite';
-    if (lower.includes('stability'))         return 'Stability';
-    if (lower.includes('titan-image'))       return 'Titan Image';
-    if (lower.includes('nova-canvas'))       return 'Nova Canvas';
-    if (lower.includes('pixtral'))           return 'Pixtral';
-    if (lower.includes('mistral'))           return 'Mistral';
-    if (lower.includes('llama'))             return 'Llama';
+    if (lower.includes('titan-image'))       return 'Titan Image v2';
+    // Stability
+    if (lower.includes('stable-image-ultra')) return 'SD Ultra';
+    if (lower.includes('sd3-5-large') || lower.includes('sd3.5-large')) return 'SD 3.5 Large';
+    if (lower.includes('stable-image-core'))  return 'SD Core';
+    if (lower.includes('stability'))          return 'Stability';
+    // Local/library generators
+    if (lower.includes('reportlab'))   return 'reportlab';
+    if (lower.includes('python-pptx')) return 'python-pptx';
+    if (lower.includes('python-docx')) return 'python-docx';
+    if (lower.includes('openpyxl'))    return 'openpyxl';
+    if (lower.includes('filesystem'))  return 'fs';
+    // Misc
+    if (lower.includes('pixtral'))     return 'Pixtral';
+    if (lower.includes('mistral'))     return 'Mistral';
+    if (lower.includes('llama'))       return 'Llama';
     // Fallback: take last hyphen-segment of the model name
     const parts = id.split('.').pop().split('-');
     return parts.slice(0, 3).join('-');
@@ -318,6 +331,18 @@ class FilePreviewPanel extends HTMLElement {
           letter-spacing: 0.2px;
           font-family: var(--font-mono, monospace);
         }
+        .fpp-badge-gen {
+          background: rgba(78,201,176,0.14);
+          border-color: rgba(78,201,176,0.4);
+          color: var(--color-success, #4ec9b0);
+        }
+        .fpp-badge-chat {
+          background: rgba(0,122,204,0.10);
+          border-color: rgba(0,122,204,0.3);
+          color: var(--color-accent, #007acc);
+          font-weight: 500;
+          opacity: 0.85;
+        }
         .fpp-actions {
           display: flex;
           gap: 4px;
@@ -365,17 +390,24 @@ class FilePreviewPanel extends HTMLElement {
     }
     list.innerHTML = this._items.map((item, idx) => {
       const meta = this._metaFor(item);
-      const modelLabel = meta && meta.model ? this._shortModelName(meta.model) : '';
-      const modelBadge = modelLabel
-        ? `<span class="fpp-model-badge" title="${this._escape(meta?.model || '')}${meta?.agentRole ? ' · ' + this._escape(meta.agentRole) : ''}">${this._escape(modelLabel)}</span>`
-        : '';
+      const genModel = meta && meta.model ? this._shortModelName(meta.model) : '';
+      const chatModel = meta && meta.chatModel ? this._shortModelName(meta.chatModel) : '';
+      // 실제 생성 모델(이미지 모델 등)과 결정 모델(chat 모델)이 다르면 둘 다 표시
+      let modelBadges = '';
+      if (genModel) {
+        const tip = `생성 엔진: ${this._escape(meta?.model || '')}${meta?.agentRole ? ' · ' + this._escape(meta.agentRole) : ''}`;
+        modelBadges += `<span class="fpp-model-badge fpp-badge-gen" title="${tip}">${this._escape(genModel)}</span>`;
+      }
+      if (chatModel && chatModel !== genModel) {
+        modelBadges += `<span class="fpp-model-badge fpp-badge-chat" title="결정 모델: ${this._escape(meta?.chatModel || '')}">via ${this._escape(chatModel)}</span>`;
+      }
       return `
       <div class="fpp-item" data-idx="${idx}" data-path="${this._escape(item.path || item.name)}" data-name="${this._escape(item.name)}">
         <div class="fpp-icon">${this._iconFor(item.name)}</div>
         <div class="fpp-info">
           <div class="fpp-name" title="${this._escape(item.name)}">${this._escape(item.name)}</div>
           <div class="fpp-meta-row">
-            ${modelBadge}
+            ${modelBadges}
             <span>${this._formatTime(item.mtime)}</span>
             <span>·</span>
             <span>${this._formatSize(item.size)}</span>
