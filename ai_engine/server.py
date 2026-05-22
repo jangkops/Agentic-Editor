@@ -2621,7 +2621,14 @@ ORCHESTRATOR_PLANNER_PROMPT = """당신은 멀티-에이전트 시스템의 플�
 7. 각 subtask의 description에는 **반드시 도구를 사용해 실제 파일을 생성/저장**하라고 명시하세요. "텍스트로 출력"이 아니라 "<primary_tool> 도구로 .generated/ 폴더에 저장".
 8. target_files에는 결과물 파일의 절대/상대 경로를 명시하세요. **확장자는 primary_tool과 일치해야 함** (예: primary_tool=generate_xlsx → ".generated/...xlsx").
 
-반드시 아래 JSON 형식으로만 응답하세요 (마크다운 코드블록 없이):
+[출력 규칙 — 매우 중요]
+- 응답은 **순수 JSON 객체 1개만**. 그 외 어떤 텍스트도 추가 금지.
+- 마크다운 코드블록(```json, ```) 사용 금지.
+- "여기 JSON입니다:" 같은 설명문 금지.
+- 응답 첫 글자는 `{{`, 마지막 글자는 `}}`이어야 함.
+- 여러 JSON 객체 출력 금지 — 정확히 1개만.
+
+JSON 형식:
 {{
   "subtasks": [
     {{
@@ -2735,28 +2742,148 @@ ORCHESTRATOR_MERGER_PROMPT = """당신은 멀티-에이전트 결과를 통합�
 """
 
 
+def _extract_first_json_object(text: str) -> dict:
+    """LLM 응답에서 첫 번째 valid JSON 객체를 안전하게 추출.
+
+    처리하는 케이스:
+    1. 마크다운 코드블록 (```json ... ``` 또는 ``` ... ```)
+    2. 응답 앞뒤의 자유 텍스트 ("여기 JSON입니다:" 등)
+    3. 여러 JSON 객체가 줄바꿈으로 나란히 있는 경우
+    4. 중첩 중괄호가 있는 큰 JSON 객체
+    5. 문자열 안에 있는 중괄호 (escape 처리)
+    6. 'subtasks' 키가 있는 객체 우선 선택
+
+    Returns:
+        파싱된 dict. 실패 시 빈 dict {} 반환.
+    """
+    if not text:
+        return {}
+
+    # Step 1: 마크다운 코드블록 제거
+    # ```json\n{...}\n``` 또는 ```\n{...}\n``` 패턴
+    code_block_match = re.search(r"```(?:json)?\s*\n?([\s\S]*?)\n?```", text)
+    if code_block_match:
+        text = code_block_match.group(1).strip()
+
+    # Step 2: 모든 top-level JSON 객체 추출 (brace counting + string-aware)
+    candidates = []
+    n = len(text)
+    i = 0
+    while i < n:
+        if text[i] == "{":
+            # JSON 객체 시작 — 매칭되는 } 찾기
+            depth = 0
+            in_string = False
+            escape = False
+            start = i
+            j = i
+            while j < n:
+                ch = text[j]
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif in_string:
+                    if ch == '"':
+                        in_string = False
+                elif ch == '"':
+                    in_string = True
+                elif ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        # 완전한 JSON 객체 후보
+                        candidate = text[start:j + 1]
+                        try:
+                            parsed = json.loads(candidate)
+                            if isinstance(parsed, dict):
+                                candidates.append(parsed)
+                        except json.JSONDecodeError:
+                            pass
+                        i = j + 1
+                        break
+                j += 1
+            else:
+                # 닫는 } 못 찾음 — break
+                break
+        else:
+            i += 1
+
+    if not candidates:
+        return {}
+
+    # Step 3: 'subtasks' 키가 있는 객체 우선
+    for c in candidates:
+        if "subtasks" in c and isinstance(c["subtasks"], list):
+            return c
+    # 없으면 첫 번째 객체
+    return candidates[0]
+
+
 async def _orchestrator_plan(gw, stream_model, user_prompt: str, system_prompt: str, max_agents: int) -> dict:
-    """Planner 호출 — subtask 분해."""
+    """Planner 호출 — subtask 분해. 응답 JSON 파싱 실패에 대한 자동 재시도 포함."""
     plan_sys = ORCHESTRATOR_PLANNER_PROMPT.format(max_agents=max_agents)
     if system_prompt:
         plan_sys = system_prompt + "\n\n" + plan_sys
-    messages = [{"role": "user", "content": [{"text": user_prompt}]}]
-    result = await asyncio.wait_for(
-        gw.converse(model_id=stream_model, messages=messages, system_prompt=plan_sys),
-        timeout=120,
-    )
-    if result.get("decision") != "ALLOW":
-        raise RuntimeError(f"Planner 실패: {result.get('error') or result.get('decision')}")
-    output = result.get("output", {}).get("message", {}).get("content", [])
-    text = "\n".join(c.get("text", "") for c in output if "text" in c).strip()
-    # JSON 추출
-    m = re.search(r"\{[\s\S]*\}", text)
-    if not m:
-        raise RuntimeError(f"Planner 응답에서 JSON을 찾을 수 없음: {text[:300]}")
-    plan = json.loads(m.group(0))
-    if not isinstance(plan.get("subtasks"), list) or not plan["subtasks"]:
-        raise RuntimeError("Planner가 subtasks를 생성하지 않았습니다.")
-    return plan
+
+    last_text = ""
+    last_err = ""
+
+    for attempt in range(3):
+        # 첫 시도 외엔 추가 지시문으로 강화
+        if attempt == 0:
+            messages = [{"role": "user", "content": [{"text": user_prompt}]}]
+        else:
+            retry_instruction = (
+                f"이전 응답에서 JSON을 파싱할 수 없었습니다 ({last_err[:120]}).\n"
+                f"이번에는 반드시 다음 규칙을 지켜 주세요:\n"
+                f"1. 마크다운 코드블록(```) 사용 금지\n"
+                f"2. JSON 앞뒤에 어떤 텍스트도 추가 금지\n"
+                f"3. 단 하나의 JSON 객체만 출력\n"
+                f"4. {{\"subtasks\": [...]}} 형태\n\n"
+                f"원본 요청: {user_prompt}"
+            )
+            messages = [{"role": "user", "content": [{"text": retry_instruction}]}]
+
+        try:
+            result = await asyncio.wait_for(
+                gw.converse(model_id=stream_model, messages=messages, system_prompt=plan_sys),
+                timeout=120,
+            )
+        except Exception as e:
+            last_err = f"converse 예외: {e}"
+            continue
+
+        if result.get("decision") != "ALLOW":
+            last_err = str(result.get("error") or result.get("decision"))
+            continue
+
+        output = result.get("output", {}).get("message", {}).get("content", [])
+        text = "\n".join(c.get("text", "") for c in output if "text" in c).strip()
+        last_text = text
+
+        # 안전한 JSON 추출
+        plan = _extract_first_json_object(text)
+        if plan and isinstance(plan.get("subtasks"), list) and plan["subtasks"]:
+            print(f"[Planner] {attempt+1}회 시도 성공 — {len(plan['subtasks'])}개 subtask")
+            return plan
+
+        last_err = "subtasks 키가 없거나 비어있음" if plan else "JSON 객체 찾을 수 없음"
+        print(f"[Planner] {attempt+1}회 시도 실패 — {last_err}, 응답 일부: {text[:200]}")
+
+    # 3회 모두 실패 — 사용자 요청을 1개 subtask로 wrap (절대 실패하지 않음)
+    print(f"[Planner] 3회 시도 모두 실패. 단일 subtask fallback. last_text={last_text[:300]}")
+    return {
+        "subtasks": [{
+            "id": "A",
+            "role": "General Worker",
+            "title": "사용자 요청 수행",
+            "description": user_prompt[:500],
+            "primary_tool": "",
+            "target_files": [],
+        }],
+    }
 
 
 async def _enrich_content_via_gateway(
