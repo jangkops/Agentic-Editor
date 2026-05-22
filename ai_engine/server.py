@@ -2726,6 +2726,12 @@ ORCHESTRATOR_MERGER_PROMPT = """당신은 멀티-에이전트 결과를 통합�
 - verifiedFileCount=0인 에이전트는 무조건 "실패"로 표시.
 - summary에 "✅", "완료", "생성됨"이 있어도 verifiedFiles에 없으면 그 주장은 무시하고 실패로 분류.
 - 거짓 파일 경로(verifiedFiles에 없는 경로)는 절대 보고서에 포함하지 마세요.
+
+**오류 추정 절대 금지**:
+- 입력 데이터에 명시되지 않은 오류 메시지를 만들어내지 마세요.
+- 'KeyError', 'TypeError', 'ValidationException' 같은 구체적 예외 이름은 입력 summary에 그대로 적혀있을 때만 인용하세요.
+- summary에 오류가 안 적혀 있으면 "도구를 호출하지 않음" 또는 "원인 불명"으로만 기재하세요.
+- 절대 그럴듯해 보이는 가짜 KeyError나 스택트레이스를 작성하지 마세요.
 """
 
 
@@ -2895,9 +2901,15 @@ async def _force_generate_from_text(
             "generate_docx": "docx",
             "generate_image": "png",
             "write_file": "md",
+            # 코드 분석/리팩토링도 결과물을 마크다운 보고서로 저장 — 빈손 종료 방지
+            "code": "md",
+            "run_command": "md",
         }
         if pt in tool_to_ext:
             needed_exts.append(tool_to_ext[pt])
+        else:
+            # 알 수 없는 primary_tool — 일단 마크다운으로라도 저장
+            needed_exts.append("md")
 
     if not needed_exts:
         return []
@@ -3418,9 +3430,14 @@ async def _orchestrator_merge(gw, stream_model, user_prompt, agent_results: list
         "agents": [
             {
                 "taskId": r["taskId"], "role": r["role"], "title": r["title"],
-                "status": r["status"], "summary": (r.get("summary") or "")[:1500],
+                "status": r["status"],
+                "summary": (r.get("summary") or "")[:1500],
                 "toolCount": len(r.get("tools", [])),
                 "verifiedFileCount": len(r.get("verifiedFiles") or []),
+                # 실제 도구 호출 명단 — Merger가 가짜 오류 만들어내지 않도록
+                "toolsCalled": [t.get("name", "?") for t in (r.get("tools") or [])][:10],
+                # 도구 호출 0회면 분명히 표시 — Merger가 추측 금지
+                "noToolsCalled": (len(r.get("tools", [])) == 0),
             }
             for r in agent_results
         ],

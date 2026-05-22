@@ -1511,8 +1511,20 @@ async function runOrchestrated(prompt) {
     content: '멀티-에이전트 오케스트레이션 시작 — Planner가 작업을 분해하고 N개 에이전트가 도구로 실행합니다.',
   });
   // 공통 thinking placeholder
-  state.messages.push({ role:'assistant', content:'', _thinking: true, _thinkingLabel: '에이전트 작업 진행 중' });
+  state.messages.push({ role:'assistant', content:'', _thinking: true, _thinkingLabel: '오케스트레이터 실행 중' });
   renderMessages();
+
+  // 오케스트레이터 진행 중 thinking 카운터 자동 갱신 (서버 이벤트 없어도 초가 멈추지 않음)
+  const _orchTickTimer = setInterval(() => {
+    if (!state.isStreaming) { clearInterval(_orchTickTimer); return; }
+    const ind = document.querySelector('.thinking-indicator');
+    if (!ind) return;
+    const elapsed = Math.floor((Date.now() - (state._streamStartTime || Date.now())) / 1000);
+    const timeText = elapsed >= 3600 ? `${Math.floor(elapsed/3600)}h ${Math.floor((elapsed%3600)/60)}m` : elapsed >= 60 ? `${Math.floor(elapsed/60)}m ${elapsed%60}s` : `${elapsed}s`;
+    const thinkMsg = state.messages.find(m => m._thinking);
+    const label = (thinkMsg && thinkMsg._thinkingLabel) || '오케스트레이터 실행 중';
+    ind.innerHTML = `<span class="thinking-dots"><span></span><span></span><span></span></span> ${esc(label)} ${timeText}`;
+  }, 1000);
 
   // 가용 모델 중 가장 강한 worker 선택 (sonnet > opus > haiku 우선)
   const allChat = (typeof ALL_MODELS !== 'undefined') ? ALL_MODELS.filter(m => m.capabilities && m.capabilities.chat) : [];
@@ -1590,7 +1602,7 @@ async function runOrchestrated(prompt) {
             if (thinkMsg) {
               const running = [...agentStates.values()].filter(a => a.status === 'running').length;
               const done = [...agentStates.values()].filter(a => a.status === 'done').length;
-              thinkMsg._thinkingLabel = `에이전트 작업 진행 중 (${done}/${agentStates.size} 완료, ${running} 실행)`;
+              thinkMsg._thinkingLabel = `오케스트레이터 실행 중 (${done}/${agentStates.size} 완료, ${running} 실행)`;
             }
           } else if (ev.type === 'agent_tool') {
             addLiveLog('tool', `[${ev.taskId}] ${ev.tool} ${ev.status}`, ev.input ? JSON.stringify(ev.input).substring(0, 100) : '');
@@ -1605,7 +1617,7 @@ async function runOrchestrated(prompt) {
             if (thinkMsg) {
               const running = [...agentStates.values()].filter(a => a.status === 'running').length;
               const done = [...agentStates.values()].filter(a => a.status === 'done').length;
-              thinkMsg._thinkingLabel = `에이전트 작업 진행 중 (${done}/${agentStates.size} 완료, ${running} 실행)`;
+              thinkMsg._thinkingLabel = `오케스트레이터 실행 중 (${done}/${agentStates.size} 완료, ${running} 실행)`;
             }
           } else if (ev.type === 'agent_error') {
             const a = agentStates.get(ev.taskId);
@@ -1615,7 +1627,7 @@ async function runOrchestrated(prompt) {
             if (thinkMsg) {
               const running = [...agentStates.values()].filter(a => a.status === 'running').length;
               const errs = [...agentStates.values()].filter(a => a.status === 'error').length;
-              thinkMsg._thinkingLabel = `에이전트 작업 진행 중 (${errs}개 오류, ${running} 실행)`;
+              thinkMsg._thinkingLabel = `오케스트레이터 실행 중 (${errs}개 오류, ${running} 실행)`;
             }
           } else if (ev.type === 'merge') {
             mergeReport = ev.report || ev.text || '';
@@ -2325,22 +2337,22 @@ function _showPostParallelRecommendation(originalPrompt) {
   // 의도별 액션 구성
   let title, reason, actions = [];
   if (isFileTask) {
-    title = hasHallucination ? '주의: 실제 파일은 생성되지 않았습니다' : '실제 파일 생성하기';
+    title = hasHallucination ? '주의 — 실제 파일이 생성되지 않았습니다' : '병렬 결과 후속 액션 — 실제 파일 만들기';
     reason = hasHallucination
-      ? `${hallucinatingCount}개 모델이 파일 생성 완료를 주장했지만, 병렬 모드에서는 도구가 제공되지 않아 실제 파일은 만들어지지 않았습니다. 실제로 파일을 만들려면 에이전트 모드를 사용하세요.`
-      : `병렬 모드는 텍스트 응답만 가능하여 실제 파일이 생성되지 않았습니다. ${doneResults.length}개 모델 응답을 종합해 에이전트가 실제 파일을 생성할 수 있습니다.`;
-    actions.push({ key: 'orchestrate', label: '에이전트로 실제 파일 생성', primary: true });
+      ? `${hallucinatingCount}개 모델이 파일 생성 완료를 주장했지만, 병렬 모드에서는 도구가 제공되지 않아 실제 파일은 만들어지지 않았습니다. 오케스트레이터로 실제 파일을 생성하세요.`
+      : `병렬 모드는 텍스트 응답만 가능합니다. ${doneResults.length}개 모델 응답을 종합해 오케스트레이터가 실제 파일(PDF/XLSX/PPTX/DOCX/이미지)을 생성합니다.`;
+    actions.push({ key: 'orchestrate', label: '오케스트레이터로 파일 생성', primary: true });
     if (doneResults.length >= 2) actions.push({ key: 'consensus', label: '합의 도출' });
   } else if (isCodeTask) {
-    title = '다음 단계';
+    title = '병렬 결과 후속 액션';
     reason = `${doneResults.length}개 모델의 코드 제안을 종합해 실제 파일에 적용하거나 합의를 도출할 수 있습니다.`;
-    actions.push({ key: 'orchestrate', label: '에이전트로 코드 적용', primary: true });
+    actions.push({ key: 'orchestrate', label: '오케스트레이터로 코드 적용', primary: true });
     if (doneResults.length >= 2) actions.push({ key: 'consensus', label: '합의 도출' });
   } else {
-    title = '다음 단계';
-    reason = `${doneResults.length}개 모델의 응답을 비교하거나 다음 작업으로 이어갈 수 있습니다.`;
+    title = '병렬 결과 후속 액션';
+    reason = `${doneResults.length}개 모델의 응답을 비교하거나 후속 작업을 이어갈 수 있습니다.`;
     if (doneResults.length >= 2) actions.push({ key: 'consensus', label: '합의 도출', primary: true });
-    actions.push({ key: 'orchestrate', label: '에이전트로 작업 진행' });
+    actions.push({ key: 'orchestrate', label: '오케스트레이터로 작업' });
   }
 
   // 추천 카드를 system 메시지로 등록 → renderMessages가 안정적으로 표시
@@ -2750,25 +2762,25 @@ function _showPostConsensusRecommendation(consensusText, originalPrompt) {
   // 의도별 액션 구성
   let title, reason, actions = [];
   if (isFileTask) {
-    title = '실제 파일 생성하기';
-    reason = '합의된 내용을 바탕으로 에이전트가 실제 파일을 생성합니다 (PDF/XLSX/DOCX/이미지 등).';
-    actions.push({ key: 'orchestrate', label: '에이전트로 파일 생성', primary: true });
+    title = '합의 결과 후속 액션 — 파일 만들기';
+    reason = '합의된 내용을 바탕으로 오케스트레이터가 실제 파일을 생성합니다 (PDF/XLSX/DOCX/이미지 등).';
+    actions.push({ key: 'orchestrate', label: '오케스트레이터로 파일 생성', primary: true });
     actions.push({ key: 'refine', label: '합의 내용 다듬기' });
   } else if (isCodeTask) {
-    title = '다음 단계';
+    title = '합의 결과 후속 액션';
     reason = '합의된 코드/구조를 바탕으로 실제 파일에 적용하거나 추가 작업을 진행합니다.';
-    actions.push({ key: 'orchestrate', label: '에이전트로 코드 적용', primary: true });
+    actions.push({ key: 'orchestrate', label: '오케스트레이터로 코드 적용', primary: true });
     actions.push({ key: 'refine', label: '합의 내용 개선' });
   } else if (isAnalysisTask) {
-    title = '심화 작업';
+    title = '합의 결과 후속 액션 — 심화';
     reason = '합의된 분석 결과를 바탕으로 후속 작업(보고서 작성, 코드 수정 등)을 이어갈 수 있습니다.';
     actions.push({ key: 'refine', label: '추가 질문/심화 분석', primary: true });
     actions.push({ key: 'orchestrate', label: '결과를 파일로 저장' });
   } else {
-    title = '다음 단계';
+    title = '합의 결과 후속 액션';
     reason = '합의된 답변을 활용해 후속 작업을 진행할 수 있습니다.';
     actions.push({ key: 'refine', label: '이어서 질문하기', primary: true });
-    actions.push({ key: 'orchestrate', label: '에이전트로 작업 진행' });
+    actions.push({ key: 'orchestrate', label: '오케스트레이터로 작업' });
   }
 
   const card = document.createElement('div');
