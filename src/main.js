@@ -1702,6 +1702,26 @@ async function runOrchestrated(prompt) {
         ` (${fmtElapsed(elapsed)})`,
     });
 
+    // .generated 폴더 패널 즉시 새로고침 — fs.watch 이벤트가 누락되는 케이스 대응
+    try {
+      const panel = document.querySelector('file-preview-panel');
+      if (panel) {
+        // project-path가 미설정이면 지금 설정 (사용자가 탭을 안 클릭했을 수도)
+        const cur = panel.getAttribute('project-path') || '';
+        const want = state.folderPath || window.__workstationCwd || '';
+        if (want && cur !== want) {
+          if (window.__workstationCwd && !panel._workstationCwd) {
+            panel._workstationCwd = window.__workstationCwd;
+          }
+          panel.setAttribute('project-path', want);
+        }
+        if (typeof panel._refresh === 'function') {
+          await panel._refresh();
+        }
+      }
+      document.dispatchEvent(new CustomEvent('generated-folder:refresh'));
+    } catch (_e) { /* best-effort */ }
+
     // 후속 추천 카드 — 도구를 사용하지 않은 에이전트가 있으면 재시도 권유
     if (noToolCount > 0 && doneCount > 0) {
       state.messages.push({

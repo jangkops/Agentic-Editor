@@ -710,7 +710,7 @@ async def _tool_generate_pdf(tool_input: dict, project_path: str) -> str:
     _local_root = project_path if (project_path and os.path.isdir(project_path)) else os.getcwd()
     gen_dir = os.path.join(_local_root, ".generated")
     os.makedirs(gen_dir, exist_ok=True)
-    slug = _re.sub(r"[^a-z0-9]+", "-", title.lower())[:30].strip("-") or "doc"
+    slug = _slug_from_title(title) or "doc"
     ts = str(int(_t.time() * 1000))
     filename = f"{slug}-{ts}.pdf"
     output_path = os.path.join(gen_dir, filename)
@@ -774,7 +774,7 @@ async def _tool_generate_pptx(tool_input: dict, project_path: str, aws_profile: 
     _local_root = project_path if (project_path and os.path.isdir(project_path)) else os.getcwd()
     gen_dir = os.path.join(_local_root, ".generated")
     os.makedirs(gen_dir, exist_ok=True)
-    slug = _re.sub(r"[^a-z0-9]+", "-", title.lower())[:30].strip("-") or "deck"
+    slug = _slug_from_title(title) or "deck"
     ts = str(int(_t.time() * 1000))
     filename = f"{slug}-{ts}.pptx"
     output_path = os.path.join(gen_dir, filename)
@@ -865,7 +865,7 @@ async def _tool_generate_xlsx(tool_input: dict, project_path: str) -> str:
     _local_root = project_path if (project_path and os.path.isdir(project_path)) else os.getcwd()
     gen_dir = os.path.join(_local_root, ".generated")
     os.makedirs(gen_dir, exist_ok=True)
-    slug = _re.sub(r"[^a-z0-9]+", "-", title.lower())[:30].strip("-") or "workbook"
+    slug = _slug_from_title(title) or "workbook"
     ts = str(int(_t.time() * 1000))
     filename = f"{slug}-{ts}.xlsx"
     output_path = os.path.join(gen_dir, filename)
@@ -946,7 +946,7 @@ async def _tool_generate_docx(tool_input: dict, project_path: str) -> str:
     _local_root = project_path if (project_path and os.path.isdir(project_path)) else os.getcwd()
     gen_dir = os.path.join(_local_root, ".generated")
     os.makedirs(gen_dir, exist_ok=True)
-    slug = _re.sub(r"[^a-z0-9]+", "-", title.lower())[:30].strip("-") or "doc"
+    slug = _slug_from_title(title) or "doc"
     ts = str(int(_t.time() * 1000))
     filename = f"{slug}-{ts}.docx"
     output_path = os.path.join(gen_dir, filename)
@@ -3737,6 +3737,24 @@ def _extract_md_table(text: str) -> list:
         elif in_table:
             break
     return rows
+
+
+def _slug_from_title(s: str) -> str:
+    """파일명용 슬러그 — 한국어 포함 보존, 특수문자만 제거.
+
+    Korean/영숫자/한글/하이픈/언더스코어만 유지. 공백은 하이픈으로.
+    """
+    import re as _re
+    if not s:
+        return ""
+    s = s.strip()
+    # 영숫자, 한글, 일본어, 중국어, 하이픈, 언더스코어, 공백만 유지
+    cleaned = _re.sub(r"[^\w\s\u3131-\u318E\uAC00-\uD7A3\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF-]+", "", s, flags=_re.UNICODE)
+    # 공백 → 하이픈
+    cleaned = _re.sub(r"\s+", "-", cleaned)
+    # 연속 하이픈 정리
+    cleaned = _re.sub(r"-+", "-", cleaned).strip("-_")
+    return cleaned[:30]
 
 
 def _safe_slug(s: str) -> str:

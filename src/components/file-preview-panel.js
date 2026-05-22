@@ -54,6 +54,9 @@ class FilePreviewPanel extends HTMLElement {
       this._highlightItem(target);
     };
     document.addEventListener('preview-panel:select', this._onSelect);
+    // 외부에서 'generated-folder:refresh' 이벤트로 강제 새로고침 가능 (오케스트레이션 완료 시 등)
+    this._onForceRefresh = () => this._refresh();
+    document.addEventListener('generated-folder:refresh', this._onForceRefresh);
   }
 
   disconnectedCallback() {
@@ -61,6 +64,10 @@ class FilePreviewPanel extends HTMLElement {
     if (this._onSelect) {
       document.removeEventListener('preview-panel:select', this._onSelect);
       this._onSelect = null;
+    }
+    if (this._onForceRefresh) {
+      document.removeEventListener('generated-folder:refresh', this._onForceRefresh);
+      this._onForceRefresh = null;
     }
     if (this._watchedDir && window.electronAPI && typeof window.electronAPI.unwatchDirectory === 'function') {
       try { window.electronAPI.unwatchDirectory(this._watchedDir); } catch {}
