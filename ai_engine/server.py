@@ -2136,6 +2136,16 @@ ORCHESTRATOR_PLANNER_PROMPT = """당신은 멀티-에이전트 시스템의 플�
 5. **파일 생성 요청의 경우**: 각 파일 형식(PDF/XLSX/PPTX/DOCX/이미지)마다 **별도 subtask로 분리**하세요. 예: "PDF 1개 + XLSX 1개 + DOCX 1개" 요청 → 3개 subtask.
 6. 각 subtask의 description에는 **반드시 도구를 사용해 실제 파일을 생성/저장**하라고 명시하세요. "텍스트로 출력"이 아니라 "write_file 도구로 .generated/ 폴더에 저장".
 7. target_files에는 결과물 파일의 절대/상대 경로를 명시하세요 (예: ".generated/analysis.pdf").
+8. **primary_tool 필드**: 각 subtask의 핵심 도구 1개를 명시하세요. 가능한 값:
+   - "generate_image" : PNG/JPG 이미지 생성 (Stability/Titan 자동 호출)
+   - "generate_pdf"   : PDF 문서 생성 (reportlab)
+   - "generate_pptx"  : 파워포인트 생성 (python-pptx)
+   - "generate_xlsx"  : 엑셀 생성 (openpyxl)
+   - "generate_docx"  : 워드 생성 (python-docx)
+   - "edit_image"     : 이미지 inpaint/outpaint
+   - "write_file"     : 일반 텍스트/코드/마크다운 파일
+   - "run_command"    : 셸 명령 실행
+   - "code"           : 기존 코드 분석/리팩토링 (read_file → write_file 조합)
 
 반드시 아래 JSON 형식으로만 응답하세요 (마크다운 코드블록 없이):
 {{
@@ -2145,6 +2155,7 @@ ORCHESTRATOR_PLANNER_PROMPT = """당신은 멀티-에이전트 시스템의 플�
       "role": "역할명 (예: PDF Generator, XLSX Builder, Image Creator, Code Refactorer)",
       "title": "간결한 제목",
       "description": "이 에이전트가 수행해야 할 작업의 상세 지시. 반드시 도구를 사용해 실제 파일을 생성/저장하라고 명시.",
+      "primary_tool": "generate_image|generate_pdf|generate_pptx|generate_xlsx|generate_docx|edit_image|write_file|run_command|code",
       "target_files": [".generated/result.pdf", ...]
     }},
     ...
@@ -2158,6 +2169,7 @@ ORCHESTRATOR_AGENT_PROMPT = """당신은 멀티-에이전트 시스템의 전문
 [작업 ID] {task_id}
 [작업 제목] {title}
 [대상 파일] {target_files}
+[핵심 도구] {primary_tool}
 
 [지시사항]
 {description}
@@ -2173,19 +2185,21 @@ ORCHESTRATOR_AGENT_PROMPT = """당신은 멀티-에이전트 시스템의 전문
    - generate_pdf: PDF 생성 (.generated/에 자동 저장)
    - generate_pptx: PPTX 생성 (.generated/에 자동 저장)
 
-2. **파일 생성 작업의 표준 절차**:
+2. **위 [핵심 도구]가 명시되어 있다면 가장 먼저 그 도구부터 호출하세요**. 텍스트 설명은 도구 호출 후에 추가하세요.
+
+3. **파일 생성 작업의 표준 절차**:
    a. 필요시 list_directory/read_file로 컨텍스트 수집
    b. 적절한 generate_* 또는 write_file 도구로 실제 파일 생성
    c. 생성된 파일 경로를 응답에 포함
    d. **반드시 .generated/ 폴더에 저장** (없으면 run_command로 mkdir)
 
-3. **대상 파일 외의 파일은 수정하지 마세요**.
+4. **대상 파일 외의 파일은 수정하지 마세요**.
 
-4. **다른 에이전트의 작업 영역을 침범하지 마세요**.
+5. **다른 에이전트의 작업 영역을 침범하지 마세요**.
 
-5. 작업이 끝나면 "[완료] <생성된 파일 경로 + 한 줄 요약>" 형태로 마무리하세요.
+6. 작업이 끝나면 "[완료] <생성된 파일 경로 + 한 줄 요약>" 형태로 마무리하세요.
 
-6. 도구 호출 없이 텍스트만 출력하면 작업이 실패한 것으로 간주됩니다. 반드시 도구를 사용해 실제 결과물을 만들어내세요.
+7. 도구 호출 없이 텍스트만 출력하면 작업이 실패한 것으로 간주됩니다. 반드시 도구를 사용해 실제 결과물을 만들어내세요.
 """
 
 ORCHESTRATOR_MERGER_PROMPT = """당신은 멀티-에이전트 결과를 통합하는 리뷰어입니다.
@@ -2244,16 +2258,57 @@ async def _orchestrator_run_agent(
     base_system_prompt: str, emit_queue: asyncio.Queue,
     aws_profile: str = "", bedrock_user: str = "", is_remote: bool = False,
 ):
-    """하나의 하위 에이전트 실행 — 도구 루프 포함."""
+    """하나의 하위 에이전트 실행 — 도구 루프 포함. 무한루프 방지를 위해 hard timeout."""
+    # 환경 변수로 조정 가능 — 기본 5분, 도구 루프 50회 제한과 함께 동작
+    agent_timeout = float(os.environ.get("AE_AGENT_TIMEOUT", "300"))
+    task_id = subtask.get("id", "?")
+    role = subtask.get("role", "Worker")
+    title = subtask.get("title", "")
+
+    async def _run_inner():
+        return await _orchestrator_run_agent_inner(
+            gw, stream_model, subtask, project_path,
+            base_system_prompt, emit_queue,
+            aws_profile=aws_profile, bedrock_user=bedrock_user, is_remote=is_remote,
+        )
+
+    try:
+        return await asyncio.wait_for(_run_inner(), timeout=agent_timeout)
+    except asyncio.TimeoutError:
+        msg = f"에이전트 시간 초과 ({int(agent_timeout)}초)"
+        try:
+            await emit_queue.put({"type": "agent_error", "taskId": task_id, "error": msg})
+        except Exception:
+            pass
+        return {"taskId": task_id, "role": role, "title": title, "status": "error",
+                "summary": msg, "tools": []}
+    except Exception as e:
+        msg = f"{type(e).__name__}: {e}"
+        try:
+            await emit_queue.put({"type": "agent_error", "taskId": task_id, "error": msg})
+        except Exception:
+            pass
+        return {"taskId": task_id, "role": role, "title": title, "status": "error",
+                "summary": msg, "tools": []}
+
+
+async def _orchestrator_run_agent_inner(
+    gw, stream_model: str, subtask: dict, project_path: str,
+    base_system_prompt: str, emit_queue: asyncio.Queue,
+    aws_profile: str = "", bedrock_user: str = "", is_remote: bool = False,
+):
+    """실제 에이전트 실행 본체."""
     task_id = subtask.get("id", "?")
     role = subtask.get("role", "Worker")
     title = subtask.get("title", "")
     description = subtask.get("description", "")
     target_files = subtask.get("target_files", [])
+    primary_tool = subtask.get("primary_tool", "")
 
     sys_prompt = ORCHESTRATOR_AGENT_PROMPT.format(
         role=role, task_id=task_id, title=title,
         target_files=", ".join(target_files) if target_files else "(없음)",
+        primary_tool=primary_tool or "(자동 선택)",
         description=description,
     )
     if base_system_prompt:
@@ -2463,19 +2518,46 @@ async def run_agent_orchestrated(request: Request):
             subtasks = plan["subtasks"][:max_agents]
             await emit_queue.put({"type": "plan", "subtasks": subtasks})
 
-            # 2) Parallel Agents
+            # primary_tool에 따라 worker 모델 선택 — vision/long-context 작업은 더 강한 모델로
+            def _pick_worker(st_dict):
+                pt = (st_dict.get("primary_tool") or "").lower()
+                # 코드 분석/리팩토링 → opus 우선 (있으면)
+                if pt in ("code", "edit_image"):
+                    return planner_id  # opus 시도
+                # 기본: 사용자가 지정한 worker
+                return worker_id
+
+            # 2) Parallel Agents — total timeout으로 무한 대기 방지
             tasks = [
                 asyncio.create_task(
-                    _orchestrator_run_agent(gw, worker_id, st, project_path, base_sys, emit_queue,
+                    _orchestrator_run_agent(gw, _pick_worker(st), st, project_path, base_sys, emit_queue,
                                              aws_profile=aws_profile, bedrock_user=bedrock_user, is_remote=is_remote)
                 )
                 for st in subtasks
             ]
+            # 전체 오케스트레이션 timeout — 환경변수로 조정 (기본 7분)
+            total_timeout = float(os.environ.get("AE_ORCH_TOTAL_TIMEOUT", "420"))
             try:
-                raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+                raw_results = await asyncio.wait_for(
+                    asyncio.gather(*tasks, return_exceptions=True),
+                    timeout=total_timeout,
+                )
+            except asyncio.TimeoutError:
+                print(f"[Orchestrator] 전체 timeout ({total_timeout}s) — 미완료 태스크 취소")
+                # 완료된 태스크 결과만 수집, 미완료는 cancel
+                raw_results = []
+                for t in tasks:
+                    if t.done():
+                        try:
+                            raw_results.append(t.result())
+                        except Exception as ex:
+                            raw_results.append(ex)
+                    else:
+                        t.cancel()
+                        raw_results.append(asyncio.TimeoutError(f"timeout {int(total_timeout)}s"))
             except Exception as e:
                 print(f"[Orchestrator] gather 예외: {e}")
-                raw_results = []
+                raw_results = [Exception(str(e))] * len(subtasks)
 
             # 예외를 결과 dict로 정규화 (모든 subtask가 반드시 결과 가짐)
             agent_results = []

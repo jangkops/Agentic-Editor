@@ -1464,20 +1464,28 @@ async function runOrchestrated(prompt) {
     const dec = new TextDecoder();
     let buf = '';
 
-    while (true) {
-      // 오케스트레이션은 Planner→N Workers→Merger로 시간이 오래 걸림 → idle timeout 600초
-      const { done, value } = await _readWithIdleTimeout(reader, 600000);
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      const events = buf.split('\n\n'); buf = events.pop() || '';
-      for (const event of events) {
-        const trimmed = event.trim();
-        if (!trimmed || !trimmed.startsWith('data: ')) continue;
-        const d = trimmed.slice(6);
-        if (d === '[DONE]') continue;
-        try {
-          const ev = JSON.parse(d);
-          if (ev.heartbeat) continue;
+    // 무한루프 방지를 위한 wall-clock timeout (8분)
+    const HARD_TIMEOUT_MS = 8 * 60 * 1000;
+    const hardTimer = setTimeout(() => {
+      try { state._abortController?.abort(); } catch (_) {}
+      addLiveLog('error', `오케스트레이션 wall-clock timeout (8분) — 강제 중단`);
+    }, HARD_TIMEOUT_MS);
+
+    try {
+      while (true) {
+        // 오케스트레이션은 Planner→N Workers→Merger로 시간이 오래 걸림 → idle timeout 600초
+        const { done, value } = await _readWithIdleTimeout(reader, 600000);
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const events = buf.split('\n\n'); buf = events.pop() || '';
+        for (const event of events) {
+          const trimmed = event.trim();
+          if (!trimmed || !trimmed.startsWith('data: ')) continue;
+          const d = trimmed.slice(6);
+          if (d === '[DONE]') continue;
+          try {
+            const ev = JSON.parse(d);
+            if (ev.heartbeat) continue;
 
           if (ev.type === 'plan') {
             const subtasks = ev.subtasks || [];
@@ -1490,6 +1498,13 @@ async function runOrchestrated(prompt) {
           } else if (ev.type === 'agent_start') {
             agentStates.set(ev.taskId, { role: ev.role, title: ev.title, status: 'running', toolCount: 0 });
             addLiveLog('system', `[${ev.taskId}] ${ev.role} 시작: ${ev.title}`);
+            // 진행 중 라벨 업데이트
+            const thinkMsg = state.messages.find(m => m._thinking);
+            if (thinkMsg) {
+              const running = [...agentStates.values()].filter(a => a.status === 'running').length;
+              const done = [...agentStates.values()].filter(a => a.status === 'done').length;
+              thinkMsg._thinkingLabel = `에이전트 작업 진행 중 (${done}/${agentStates.size} 완료, ${running} 실행)`;
+            }
           } else if (ev.type === 'agent_tool') {
             addLiveLog('tool', `[${ev.taskId}] ${ev.tool} ${ev.status}`, ev.input ? JSON.stringify(ev.input).substring(0, 100) : '');
             const a = agentStates.get(ev.taskId);
@@ -1498,10 +1513,23 @@ async function runOrchestrated(prompt) {
             const a = agentStates.get(ev.taskId);
             if (a) { a.status = 'done'; a.toolCount = ev.toolCount || a.toolCount; }
             addLiveLog('system', `[${ev.taskId}] 완료 — 도구 ${ev.toolCount || 0}회 사용`);
+            // 진행 중 라벨 업데이트
+            const thinkMsg = state.messages.find(m => m._thinking);
+            if (thinkMsg) {
+              const running = [...agentStates.values()].filter(a => a.status === 'running').length;
+              const done = [...agentStates.values()].filter(a => a.status === 'done').length;
+              thinkMsg._thinkingLabel = `에이전트 작업 진행 중 (${done}/${agentStates.size} 완료, ${running} 실행)`;
+            }
           } else if (ev.type === 'agent_error') {
             const a = agentStates.get(ev.taskId);
             if (a) a.status = 'error';
             addLiveLog('error', `[${ev.taskId}] 오류: ${ev.error || ''}`);
+            const thinkMsg = state.messages.find(m => m._thinking);
+            if (thinkMsg) {
+              const running = [...agentStates.values()].filter(a => a.status === 'running').length;
+              const errs = [...agentStates.values()].filter(a => a.status === 'error').length;
+              thinkMsg._thinkingLabel = `에이전트 작업 진행 중 (${errs}개 오류, ${running} 실행)`;
+            }
           } else if (ev.type === 'merge') {
             mergeReport = ev.report || ev.text || '';
             // 서버가 results를 함께 보낸 경우 — agentStates가 비어있으면 채워넣음
@@ -1526,6 +1554,9 @@ async function runOrchestrated(prompt) {
           }
         } catch (_e) { /* parse fail — skip */ }
       }
+      }
+    } finally {
+      clearTimeout(hardTimer);
     }
 
     // 완료 요약
