@@ -2887,39 +2887,120 @@ async def _orchestrator_plan(gw, stream_model, user_prompt: str, system_prompt: 
 
 
 def _gather_real_context(description: str, project_path: str) -> str:
-    """description에서 단서를 찾아 실제 파일 시스템 데이터를 수집.
+    """description에서 작업 유형을 감지하여 실제 데이터를 수집.
 
-    LLM이 추측해서 만든 가짜 폴더 구조 대신 실제 디스크 데이터로 콘텐츠 보강.
-    "폴더 구조", "디렉토리 흐름도", "파일 목록" 등의 키워드 감지.
+    LLM이 추측하지 않도록 소스에서 직접 데이터를 모은다.
+    여러 카테고리의 데이터를 동시에 수집해 합성 가능 (예: "폴더 구조 + README").
+
+    감지 카테고리:
+    1. folder_structure  - 폴더 트리 + 통계
+    2. dependencies      - package.json/requirements.txt/Cargo.toml 등
+    3. git_summary       - 최근 커밋 + 변경 파일
+    4. readme_summary    - README/CHANGELOG 본문
+    5. code_inventory    - 언어별 파일 개수 + 주요 파일 (LOC 상위)
+    6. config_summary    - 주요 설정 파일 (.gitignore, dockerfile 등)
 
     Returns:
-        실제 데이터 마크다운 텍스트. 관련 없는 작업이면 빈 문자열.
+        합성된 마크다운 텍스트. 모든 카테고리 빈 결과면 빈 문자열.
     """
     if not project_path or not os.path.isdir(project_path):
         return ""
     desc_lower = (description or "").lower()
-    # 폴더 구조 관련 키워드 감지
+    sections = []
+
+    # ─── 1. Folder structure ───
     folder_keywords = (
         "폴더 구조", "디렉토리 구조", "폴더 트리", "디렉토리 트리",
         "폴더 깊이", "뎁스", "depth", "흐름도", "계층",
         "folder structure", "directory structure", "tree",
-        "프로젝트 구조", "project structure",
+        "프로젝트 구조", "project structure", "파일 트리",
     )
-    if not any(kw in desc_lower for kw in folder_keywords):
+    if any(kw in desc_lower for kw in folder_keywords):
+        s = _gather_folder_tree(project_path)
+        if s:
+            sections.append(s)
+
+    # ─── 2. Dependencies ───
+    dep_keywords = (
+        "의존성", "의존 라이브러리", "dependency", "dependencies",
+        "package", "requirements", "라이브러리", "외부 라이브러리",
+        "버전", "스택", "기술 스택", "tech stack",
+    )
+    if any(kw in desc_lower for kw in dep_keywords):
+        s = _gather_dependencies(project_path)
+        if s:
+            sections.append(s)
+
+    # ─── 3. Git summary ───
+    git_keywords = (
+        "git", "커밋", "commit", "변경 이력", "히스토리",
+        "최근 변경", "changelog", "변경 사항", "history",
+    )
+    if any(kw in desc_lower for kw in git_keywords):
+        s = _gather_git_summary(project_path)
+        if s:
+            sections.append(s)
+
+    # ─── 4. README/CHANGELOG ───
+    readme_keywords = (
+        "readme", "리드미", "프로젝트 소개", "프로젝트 개요",
+        "프로젝트 설명", "overview", "introduction", "소개",
+        "changelog", "변경 로그", "릴리즈 노트", "release note",
+    )
+    if any(kw in desc_lower for kw in readme_keywords):
+        s = _gather_readme(project_path)
+        if s:
+            sections.append(s)
+
+    # ─── 5. Code inventory ───
+    code_keywords = (
+        "코드 분석", "code analysis", "loc", "라인 수",
+        "코드베이스", "codebase", "주요 파일", "main file",
+        "큰 파일", "largest file", "코드 통계", "코드 통계",
+        "분석", "analyze", "리뷰", "review",
+    )
+    if any(kw in desc_lower for kw in code_keywords):
+        s = _gather_code_inventory(project_path)
+        if s:
+            sections.append(s)
+
+    # ─── 6. Config summary ───
+    config_keywords = (
+        "설정", "config", "configuration", "환경 변수",
+        "dockerfile", "docker", "ci", "github actions",
+        "build config", "빌드 설정", "deploy", "배포",
+    )
+    if any(kw in desc_lower for kw in config_keywords):
+        s = _gather_config_files(project_path)
+        if s:
+            sections.append(s)
+
+    if not sections:
         return ""
 
+    return "\n\n".join(sections)
+
+
+# ─────────── Source-of-truth data gatherers ───────────
+
+# 빌드/캐시 폴더 — 트리 스캔 시 항상 제외
+_IGNORE_DIRS = frozenset({
+    ".git", "node_modules", "__pycache__", ".venv", "venv",
+    ".pytest_cache", ".hypothesis", "dist", "build",
+    ".rag_cache", "coverage", ".generated", ".cache",
+    ".next", ".turbo", "target", "vendor", "out",
+})
+_IGNORE_FILES = frozenset({".DS_Store", ".pyc"})
+
+
+def _gather_folder_tree(project_path: str) -> str:
+    """실제 폴더 트리 + 통계 (최대 4 depth, 디렉토리당 30 항목)."""
     try:
-        # 실제 폴더 트리 작성 — 최대 4 depth, hidden/build 폴더 제외
-        IGNORE_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv",
-                       ".pytest_cache", ".hypothesis", "dist", "build",
-                       ".rag_cache", "coverage", ".generated", ".cache"}
-        IGNORE_FILES = {".DS_Store"}
         lines = []
         max_depth = 4
         max_entries_per_dir = 30
         root_name = os.path.basename(project_path.rstrip("/")) or project_path
 
-        # 통계
         total_dirs = 0
         total_files = 0
         ext_count = {}
@@ -2932,7 +3013,7 @@ def _gather_real_context(description: str, project_path: str) -> str:
                 entries = sorted(os.listdir(path))
             except (PermissionError, OSError):
                 return
-            entries = [e for e in entries if e not in IGNORE_FILES and e not in IGNORE_DIRS]
+            entries = [e for e in entries if e not in _IGNORE_FILES and e not in _IGNORE_DIRS]
             entries = entries[:max_entries_per_dir]
             for i, e in enumerate(entries):
                 full = os.path.join(path, e)
@@ -2953,9 +3034,7 @@ def _gather_real_context(description: str, project_path: str) -> str:
         lines.append(f"{root_name}/")
         _walk(project_path, "", 1)
 
-        tree_text = "\n".join(lines[:200])  # cap output
-
-        # 통계 표
+        tree_text = "\n".join(lines[:200])
         ext_table_rows = sorted(ext_count.items(), key=lambda x: -x[1])[:10]
         ext_table = "\n".join(f"| .{ext} | {cnt} |" for ext, cnt in ext_table_rows)
 
@@ -2981,10 +3060,349 @@ def _gather_real_context(description: str, project_path: str) -> str:
 
 | 확장자 | 파일 수 |
 |--------|---------|
-{ext_table}
-"""
+{ext_table}"""
     except Exception as e:
-        print(f"[RealContext] 폴더 스캔 실패: {e}")
+        print(f"[RealContext/folder] 실패: {e}")
+        return ""
+
+
+def _gather_dependencies(project_path: str) -> str:
+    """의존성 매니페스트 파일들에서 패키지 + 버전 추출."""
+    try:
+        out_blocks = []
+
+        # package.json (npm/yarn)
+        pkg = os.path.join(project_path, "package.json")
+        if os.path.isfile(pkg):
+            try:
+                with open(pkg, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                deps = data.get("dependencies", {})
+                dev_deps = data.get("devDependencies", {})
+                rows = []
+                for name, ver in sorted(deps.items()):
+                    rows.append(f"| {name} | {ver} | runtime |")
+                for name, ver in sorted(dev_deps.items()):
+                    rows.append(f"| {name} | {ver} | dev |")
+                if rows:
+                    out_blocks.append(
+                        "### Node.js (package.json)\n\n"
+                        f"프로젝트명: `{data.get('name', 'N/A')}` · 버전: `{data.get('version', 'N/A')}`\n\n"
+                        "| 패키지 | 버전 | 종류 |\n"
+                        "|--------|------|------|\n"
+                        + "\n".join(rows[:50])
+                    )
+            except (json.JSONDecodeError, OSError) as e:
+                print(f"[RealContext/deps] package.json 파싱 실패: {e}")
+
+        # requirements.txt (pip)
+        req = os.path.join(project_path, "requirements.txt")
+        if os.path.isfile(req):
+            try:
+                with open(req, "r", encoding="utf-8") as f:
+                    lines = [ln.strip() for ln in f if ln.strip() and not ln.strip().startswith("#")]
+                if lines:
+                    rows = "\n".join(f"| {ln} |" for ln in lines[:50])
+                    out_blocks.append(
+                        "### Python (requirements.txt)\n\n"
+                        "| 패키지 |\n"
+                        "|--------|\n"
+                        f"{rows}"
+                    )
+            except OSError as e:
+                print(f"[RealContext/deps] requirements.txt 실패: {e}")
+
+        # ai_engine/requirements.txt (별도 위치)
+        req2 = os.path.join(project_path, "ai_engine", "requirements.txt")
+        if os.path.isfile(req2) and req2 != req:
+            try:
+                with open(req2, "r", encoding="utf-8") as f:
+                    lines = [ln.strip() for ln in f if ln.strip() and not ln.strip().startswith("#")]
+                if lines:
+                    rows = "\n".join(f"| {ln} |" for ln in lines[:50])
+                    out_blocks.append(
+                        "### Python (ai_engine/requirements.txt)\n\n"
+                        "| 패키지 |\n"
+                        "|--------|\n"
+                        f"{rows}"
+                    )
+            except OSError:
+                pass
+
+        # pyproject.toml
+        pyproj = os.path.join(project_path, "pyproject.toml")
+        if os.path.isfile(pyproj):
+            try:
+                with open(pyproj, "r", encoding="utf-8") as f:
+                    content = f.read()[:3000]
+                out_blocks.append(f"### Python (pyproject.toml)\n\n```toml\n{content}\n```")
+            except OSError:
+                pass
+
+        # Cargo.toml (Rust)
+        cargo = os.path.join(project_path, "Cargo.toml")
+        if os.path.isfile(cargo):
+            try:
+                with open(cargo, "r", encoding="utf-8") as f:
+                    content = f.read()[:3000]
+                out_blocks.append(f"### Rust (Cargo.toml)\n\n```toml\n{content}\n```")
+            except OSError:
+                pass
+
+        # go.mod
+        gomod = os.path.join(project_path, "go.mod")
+        if os.path.isfile(gomod):
+            try:
+                with open(gomod, "r", encoding="utf-8") as f:
+                    content = f.read()[:2000]
+                out_blocks.append(f"### Go (go.mod)\n\n```\n{content}\n```")
+            except OSError:
+                pass
+
+        if not out_blocks:
+            return ""
+        return "## 실제 프로젝트 의존성 (manifest 파일에서 직접 추출)\n\n" + "\n\n".join(out_blocks)
+    except Exception as e:
+        print(f"[RealContext/deps] 실패: {e}")
+        return ""
+
+
+def _gather_git_summary(project_path: str) -> str:
+    """git log + git status 요약."""
+    try:
+        if not os.path.isdir(os.path.join(project_path, ".git")):
+            return ""
+        results = []
+
+        # 최근 20개 커밋
+        try:
+            log_out = subprocess.check_output(
+                ["git", "-C", project_path, "log", "--oneline", "-20", "--no-decorate"],
+                stderr=subprocess.DEVNULL, timeout=5,
+            ).decode("utf-8", errors="ignore").strip()
+            if log_out:
+                results.append(f"### 최근 커밋 20개\n\n```\n{log_out}\n```")
+        except (subprocess.SubprocessError, OSError) as e:
+            print(f"[RealContext/git] log 실패: {e}")
+
+        # 현재 브랜치
+        try:
+            branch = subprocess.check_output(
+                ["git", "-C", project_path, "branch", "--show-current"],
+                stderr=subprocess.DEVNULL, timeout=5,
+            ).decode("utf-8", errors="ignore").strip()
+            if branch:
+                results.append(f"### 현재 브랜치\n\n`{branch}`")
+        except (subprocess.SubprocessError, OSError):
+            pass
+
+        # git status (수정/staged 파일)
+        try:
+            status = subprocess.check_output(
+                ["git", "-C", project_path, "status", "--short"],
+                stderr=subprocess.DEVNULL, timeout=5,
+            ).decode("utf-8", errors="ignore").strip()
+            if status:
+                results.append(f"### 미커밋 변경사항\n\n```\n{status[:1500]}\n```")
+        except (subprocess.SubprocessError, OSError):
+            pass
+
+        # 최근 변경 파일 빈도 (1주일)
+        try:
+            files = subprocess.check_output(
+                ["git", "-C", project_path, "log", "--name-only", "--pretty=format:",
+                 "--since=1.week"],
+                stderr=subprocess.DEVNULL, timeout=10,
+            ).decode("utf-8", errors="ignore").strip()
+            if files:
+                from collections import Counter
+                counter = Counter(line for line in files.splitlines() if line.strip())
+                top = counter.most_common(15)
+                rows = "\n".join(f"| {f} | {c} |" for f, c in top)
+                results.append(
+                    "### 최근 1주일 변경 빈도 상위\n\n"
+                    "| 파일 | 변경 횟수 |\n"
+                    "|------|---------|\n"
+                    f"{rows}"
+                )
+        except (subprocess.SubprocessError, OSError):
+            pass
+
+        if not results:
+            return ""
+        return "## 실제 Git 데이터 (저장소에서 직접 추출)\n\n" + "\n\n".join(results)
+    except Exception as e:
+        print(f"[RealContext/git] 실패: {e}")
+        return ""
+
+
+def _gather_readme(project_path: str) -> str:
+    """README/CHANGELOG 본문 추출."""
+    try:
+        out_blocks = []
+        candidates = ["README.md", "README.rst", "README.txt", "README",
+                      "CHANGELOG.md", "CHANGELOG.txt", "CHANGES.md"]
+        for name in candidates:
+            full = os.path.join(project_path, name)
+            if not os.path.isfile(full):
+                # case-insensitive 검색 (한 번만)
+                try:
+                    actual = next(
+                        (e for e in os.listdir(project_path)
+                         if e.lower() == name.lower()),
+                        None,
+                    )
+                    if actual:
+                        full = os.path.join(project_path, actual)
+                    else:
+                        continue
+                except OSError:
+                    continue
+            if os.path.isfile(full):
+                try:
+                    with open(full, "r", encoding="utf-8", errors="ignore") as f:
+                        content = f.read()
+                    # 길이 제한
+                    if len(content) > 4000:
+                        content = content[:4000] + "\n\n... (생략)"
+                    out_blocks.append(f"### {os.path.basename(full)}\n\n{content}")
+                except OSError as e:
+                    print(f"[RealContext/readme] {name} 실패: {e}")
+        if not out_blocks:
+            return ""
+        return "## 실제 README/CHANGELOG (디스크에서 직접 읽음)\n\n" + "\n\n".join(out_blocks)
+    except Exception as e:
+        print(f"[RealContext/readme] 실패: {e}")
+        return ""
+
+
+def _gather_code_inventory(project_path: str) -> str:
+    """언어별 파일 개수 + LOC 상위 10개 파일."""
+    try:
+        # 언어별 카운트
+        lang_count = {}
+        lang_loc = {}
+        # LOC 상위
+        file_loc = []  # [(loc, relpath)]
+
+        ext_to_lang = {
+            "py": "Python", "js": "JavaScript", "jsx": "JavaScript",
+            "ts": "TypeScript", "tsx": "TypeScript", "java": "Java",
+            "go": "Go", "rs": "Rust", "rb": "Ruby", "php": "PHP",
+            "c": "C", "h": "C", "cpp": "C++", "hpp": "C++",
+            "cs": "C#", "swift": "Swift", "kt": "Kotlin",
+            "html": "HTML", "css": "CSS", "scss": "SCSS",
+            "md": "Markdown", "yaml": "YAML", "yml": "YAML",
+            "json": "JSON", "sh": "Shell", "sql": "SQL",
+        }
+
+        for root, dirs, files in os.walk(project_path):
+            # 빌드/캐시 폴더 제외
+            dirs[:] = [d for d in dirs if d not in _IGNORE_DIRS]
+            for f in files:
+                if f in _IGNORE_FILES:
+                    continue
+                ext = os.path.splitext(f)[1].lstrip(".").lower()
+                lang = ext_to_lang.get(ext)
+                if not lang:
+                    continue
+                full = os.path.join(root, f)
+                try:
+                    with open(full, "r", encoding="utf-8", errors="ignore") as fh:
+                        loc = sum(1 for _ in fh)
+                except OSError:
+                    continue
+                lang_count[lang] = lang_count.get(lang, 0) + 1
+                lang_loc[lang] = lang_loc.get(lang, 0) + loc
+                rel = os.path.relpath(full, project_path)
+                file_loc.append((loc, rel))
+
+        if not lang_count:
+            return ""
+
+        lang_rows = "\n".join(
+            f"| {lang} | {lang_count[lang]} | {lang_loc.get(lang, 0):,} |"
+            for lang in sorted(lang_count.keys(), key=lambda l: -lang_count[l])[:15]
+        )
+
+        file_loc.sort(reverse=True)
+        top_rows = "\n".join(f"| {rel} | {loc:,} |" for loc, rel in file_loc[:10])
+
+        return f"""## 실제 코드 인벤토리 (디스크 스캔)
+
+### 언어별 통계
+
+| 언어 | 파일 수 | 총 라인 |
+|------|--------|--------|
+{lang_rows}
+
+### 라인 수 상위 10개 파일
+
+| 파일 | LOC |
+|------|-----|
+{top_rows}"""
+    except Exception as e:
+        print(f"[RealContext/inventory] 실패: {e}")
+        return ""
+
+
+def _gather_config_files(project_path: str) -> str:
+    """주요 설정 파일 목록 + 일부 내용."""
+    try:
+        out_blocks = []
+        config_files = [
+            ".gitignore", "Dockerfile", "docker-compose.yml", "docker-compose.yaml",
+            "Makefile", ".env.example", "tsconfig.json", "vite.config.js",
+            "webpack.config.js", "next.config.js", "tailwind.config.js",
+        ]
+        gh_actions = os.path.join(project_path, ".github", "workflows")
+
+        found = []
+        for name in config_files:
+            full = os.path.join(project_path, name)
+            if os.path.isfile(full):
+                try:
+                    size = os.path.getsize(full)
+                    found.append((name, full, size))
+                except OSError:
+                    pass
+
+        # GitHub Actions
+        if os.path.isdir(gh_actions):
+            try:
+                for f in os.listdir(gh_actions):
+                    full = os.path.join(gh_actions, f)
+                    if os.path.isfile(full):
+                        size = os.path.getsize(full)
+                        found.append((f".github/workflows/{f}", full, size))
+            except OSError:
+                pass
+
+        if not found:
+            return ""
+
+        rows = "\n".join(f"| `{name}` | {size} bytes |" for name, _, size in found[:20])
+        out_blocks.append(
+            "### 발견된 설정 파일\n\n"
+            "| 파일 | 크기 |\n"
+            "|------|-----|\n"
+            f"{rows}"
+        )
+
+        # 핵심 파일은 내용 일부 첨부
+        for name, full, size in found[:3]:
+            if size > 4000:
+                continue  # 너무 큰 파일은 스킵
+            try:
+                with open(full, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()[:1500]
+                out_blocks.append(f"### `{name}` 내용\n\n```\n{content}\n```")
+            except OSError:
+                pass
+
+        return "## 실제 설정 파일 (디스크에서 직접 읽음)\n\n" + "\n\n".join(out_blocks)
+    except Exception as e:
+        print(f"[RealContext/config] 실패: {e}")
         return ""
 
 
