@@ -2193,6 +2193,18 @@ async function runParallel(prompt) {
   state.messages.push({ role:'assistant', content:'', _thinking: true, _thinkingLabel: `${totalCalls}개 모델 호출 중` });
   renderMessages();
 
+  // 병렬 진행 중 thinking 카운터 자동 갱신 (서버 이벤트 없어도 초가 멈추지 않음)
+  const _parTickTimer = setInterval(() => {
+    if (!state.isStreaming) { clearInterval(_parTickTimer); return; }
+    const ind = document.querySelector('.thinking-indicator');
+    if (!ind) return;
+    const elapsed = Math.floor((Date.now() - (state._streamStartTime || Date.now())) / 1000);
+    const timeText = elapsed >= 3600 ? `${Math.floor(elapsed/3600)}h ${Math.floor((elapsed%3600)/60)}m` : elapsed >= 60 ? `${Math.floor(elapsed/60)}m ${elapsed%60}s` : `${elapsed}s`;
+    const thinkMsg = state.messages.find(m => m._thinking);
+    const label = (thinkMsg && thinkMsg._thinkingLabel) || `${totalCalls}개 모델 호출 중`;
+    ind.innerHTML = `<span class="thinking-dots"><span></span><span></span><span></span></span> ${esc(label)} ${timeText}`;
+  }, 1000);
+
   // 서버 측 병렬 호출 — 단일 SSE 연결로 모든 모델 결과 수신
   const models = _expandedSlots.map(slot => {
     let sp = '';
@@ -2240,6 +2252,15 @@ async function runParallel(prompt) {
             renderParallelResultGrid();
             renderParallelSlotList();
             updateConsensus();
+            // 진행 라벨 동적 업데이트 (X/Y 완료, Z 실행)
+            const thinkMsg = state.messages.find(m => m._thinking);
+            if (thinkMsg) {
+              const allResults = [...state.parallelResults.values()];
+              const doneN = allResults.filter(r => r.status === 'done').length;
+              const errN = allResults.filter(r => r.status === 'error').length;
+              const runN = allResults.filter(r => r.status === 'running').length;
+              thinkMsg._thinkingLabel = `${totalCalls}개 모델 호출 중 (${doneN}/${totalCalls} 완료${errN > 0 ? `, ${errN} 실패` : ''}, ${runN} 실행)`;
+            }
           }
         } catch {}
       }
