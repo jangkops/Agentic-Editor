@@ -201,10 +201,43 @@ def build_context(
             parts.append(section)
             used_chars += len(section)
 
-    # 4. 하이브리드 검색 — 관련 코드
-    results = searcher.search(query, top_k=8)
+    # 4. 하이브리드 검색 — 관련 코드 (MMR + score threshold + metadata 필터)
+    # 쿼리 유형으로 검색 전략 자동 선택:
+    # - "다양한 관점/예시/리서치" → MMR (다양성)
+    # - "정확한 답변/특정 함수" → similarity (관련성 우선)
+    is_research_like = any(kw in query.lower() for kw in (
+        "다양한", "예시", "비교", "여러", "list", "examples",
+        "compare", "find all", "show me", "explore",
+    ))
+    is_specific_lookup = any(kw in query.lower() for kw in (
+        "function", "함수", "class", "클래스", "method", "메서드",
+        "어디", "where", "정확히", "exact",
+    ))
+
+    # MMR은 리서치류일 때 활성, specific lookup이면 관련성만
+    use_mmr = is_research_like and not is_specific_lookup
+    mmr_lambda = 0.4 if is_research_like else 0.7  # 리서치는 다양성 더, 그 외는 관련성 더
+    score_threshold = 0.1 if is_specific_lookup else 0.05  # 정확 lookup은 더 엄격
+
+    # 빌드/캐시 폴더 사전 제외 (metadata 필터 — 관련 없는 문서 사전 제거)
+    def _file_filter(file_path: str) -> bool:
+        excluded_substrings = (
+            "/node_modules/", "/.git/", "/__pycache__/", "/.venv/",
+            "/dist/", "/build/", "/coverage/", "/.cache/",
+            "/.generated/", "/.rag_cache/", "/.pytest_cache/",
+        )
+        return not any(ex in file_path for ex in excluded_substrings)
+
+    results = searcher.search(
+        query, top_k=8,
+        score_threshold=score_threshold,
+        use_mmr=use_mmr,
+        mmr_lambda=mmr_lambda,
+        file_filter=_file_filter,
+    )
     if results:
-        parts.append("## 관련 코드 (유사도 순)")
+        retrieval_mode = "MMR(다양성)" if use_mmr else "Similarity(관련성)"
+        parts.append(f"## 관련 코드 ({retrieval_mode}, threshold={score_threshold})")
         for chunk, score in results:
             if used_chars > max_context_chars:
                 break

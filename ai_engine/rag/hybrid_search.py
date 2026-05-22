@@ -5,7 +5,7 @@ alpha = 0.6 (의미 검색 60%, 키워드 40%)
 """
 import math
 import re
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Callable, Optional
 from ai_engine.rag.indexer import Chunk
 
 
@@ -85,43 +85,146 @@ class HybridSearcher:
         self.chunks = chunks
         self.bm25.index(chunks)
 
-    def search(self, query: str, top_k: int = 8) -> List[Tuple[Chunk, float]]:
-        """하이브리드 검색."""
+    def search(self, query: str, top_k: int = 8,
+               score_threshold: float = 0.05,
+               use_mmr: bool = True,
+               mmr_lambda: float = 0.5,
+               file_filter: Optional[Callable[[str], bool]] = None) -> List[Tuple[Chunk, float]]:
+        """하이브리드 검색 + MMR + score threshold + metadata 필터.
+
+        Args:
+            query: 검색어
+            top_k: 최종 반환 개수
+            score_threshold: 이 점수 미만은 제외 (관련성 낮은 결과 제거)
+            use_mmr: True면 Maximal Marginal Relevance로 다양성 확보
+            mmr_lambda: MMR balance — 1.0=정확도만, 0.0=다양성만, 0.5=균형
+            file_filter: chunk.file_path를 받아서 True 반환하면 포함 (metadata 필터)
+        """
         if not self.chunks:
             return []
 
         query_tokens = tokenize(query)
         scores: Dict[int, float] = {}
 
+        # candidate pool — top_k * 4로 늘려 MMR이 다양성을 확보할 여지 제공
+        pool_k = top_k * 4
+
         # 1. BM25 검색
-        bm25_results = self.bm25.search(query_tokens, top_k=top_k * 2)
+        bm25_results = self.bm25.search(query_tokens, top_k=pool_k)
         if bm25_results:
             max_bm25 = max(s for _, s in bm25_results) or 1
             for idx, s in bm25_results:
                 scores[idx] = scores.get(idx, 0) + (1 - self.alpha) * (s / max_bm25)
 
         # 2. 벡터 검색 (임베더가 있을 때만)
+        query_vec = None
         if self.vector_store and self._embedder and self.vector_store.size > 0:
             query_vec = self._embedder.embed(query)
             if query_vec is not None:
                 # 런타임 차원 가드 — 차원 불일치 시 벡터 검색 비활성화
                 cached_dim = self.vector_store.vectors.shape[1] if self.vector_store.vectors is not None else 0
                 if query_vec.shape[0] != cached_dim:
-                    # 차원 불일치 — 벡터 검색 스킵 (BM25만 사용)
                     print(f"[Hybrid] 차원 불일치 감지 (query={query_vec.shape[0]}, cached={cached_dim}) — 벡터 검색 스킵")
+                    query_vec = None
                 else:
-                    vec_results = self.vector_store.search(query_vec, top_k=top_k * 2)
+                    vec_results = self.vector_store.search(query_vec, top_k=pool_k)
                     for meta, s in vec_results:
                         idx = meta.get("chunk_idx", -1)
                         if 0 <= idx < len(self.chunks):
                             scores[idx] = scores.get(idx, 0) + self.alpha * s
         elif not self.vector_store:
-            # 벡터 없으면 BM25만 사용 (alpha 무시)
             scores = {}
             for idx, s in bm25_results:
                 max_bm25 = max(s2 for _, s2 in bm25_results) or 1
                 scores[idx] = s / max_bm25
 
-        # 정렬
+        # 3. metadata filter (예: 특정 파일 경로/확장자 제외)
+        if file_filter is not None:
+            scores = {idx: s for idx, s in scores.items()
+                      if file_filter(self.chunks[idx].file_path)}
+
+        # 4. score threshold — 관련성 낮은 결과 제거
         ranked = sorted(scores.items(), key=lambda x: -x[1])
-        return [(self.chunks[idx], score) for idx, score in ranked[:top_k] if score > 0.05]
+        ranked = [(idx, s) for idx, s in ranked if s >= score_threshold]
+
+        if not ranked:
+            return []
+
+        # 5. MMR로 다양성 확보 (벡터가 있을 때만 작동)
+        if use_mmr and query_vec is not None and self.vector_store and self.vector_store.vectors is not None:
+            selected = self._mmr_select(ranked[:pool_k], query_vec, top_k, mmr_lambda)
+            return [(self.chunks[idx], score) for idx, score in selected]
+
+        return [(self.chunks[idx], score) for idx, score in ranked[:top_k]]
+
+    def _mmr_select(self, ranked: List[Tuple[int, float]], query_vec,
+                    top_k: int, mmr_lambda: float) -> List[Tuple[int, float]]:
+        """Maximal Marginal Relevance — 정확도와 다양성의 균형.
+
+        sim(query, doc_i) - λ * max_j sim(doc_i, doc_j_selected)
+        """
+        import numpy as _np
+        if not ranked:
+            return []
+
+        # candidate vectors
+        cand_indices = [idx for idx, _ in ranked]
+        # chunk_idx → vector store row 매핑이 1:1이 아닐 수 있어
+        # vector_store.metadata에서 chunk_idx로 검색
+        idx_to_vec = {}
+        if self.vector_store and self.vector_store.metadata:
+            for i, m in enumerate(self.vector_store.metadata):
+                cidx = m.get("chunk_idx", -1)
+                if cidx in cand_indices and i < len(self.vector_store.vectors):
+                    idx_to_vec[cidx] = self.vector_store.vectors[i]
+
+        if not idx_to_vec:
+            # MMR 적용 불가 — 정렬 결과 그대로 반환
+            return ranked[:top_k]
+
+        # 정규화
+        def _norm(v):
+            n = _np.linalg.norm(v) + 1e-10
+            return v / n
+
+        q_n = _norm(query_vec)
+        # 후보별 query 유사도
+        cand_query_sim = {}
+        for cidx, v in idx_to_vec.items():
+            cand_query_sim[cidx] = float(_norm(v) @ q_n)
+
+        # MMR 알고리즘
+        selected: List[Tuple[int, float]] = []
+        remaining = list(idx_to_vec.keys())
+        rank_dict = dict(ranked)
+
+        while remaining and len(selected) < top_k:
+            best_idx = None
+            best_mmr = -1e9
+            for cidx in remaining:
+                relevance = cand_query_sim.get(cidx, 0.0)
+                if not selected:
+                    diversity = 0.0
+                else:
+                    sims = []
+                    cand_vec = _norm(idx_to_vec[cidx])
+                    for sidx, _ in selected:
+                        sel_vec = _norm(idx_to_vec[sidx])
+                        sims.append(float(cand_vec @ sel_vec))
+                    diversity = max(sims) if sims else 0.0
+                mmr_score = mmr_lambda * relevance - (1 - mmr_lambda) * diversity
+                if mmr_score > best_mmr:
+                    best_mmr = mmr_score
+                    best_idx = cidx
+            if best_idx is None:
+                break
+            selected.append((best_idx, rank_dict.get(best_idx, 0.0)))
+            remaining.remove(best_idx)
+
+        # 만약 idx_to_vec에 없던 것들이 있으면 끝에 추가 (정렬 순서 유지)
+        for idx, score in ranked:
+            if idx not in idx_to_vec and len(selected) < top_k:
+                selected.append((idx, score))
+
+        return selected
+

@@ -2640,6 +2640,7 @@ JSON 형식:
       "title": "간결한 제목",
       "description": "이 에이전트가 수행해야 할 작업의 상세 지시. 반드시 도구를 사용해 실제 파일을 생성/저장하라고 명시.",
       "primary_tool": "generate_image|generate_pdf|generate_pptx|generate_xlsx|generate_docx|edit_image|write_file|run_command|code",
+      "team": "research|coding|writing|media|analysis (선택, 같은 team 작업끼리 컨텍스트 공유)",
       "target_files": [".generated/result.pdf", ...]
     }},
     ...
@@ -4670,60 +4671,161 @@ async def run_agent_orchestrated(request: Request):
                 picked = _auto_chat_model(pt, worker_model)
                 return picked
 
-            # 2) Parallel Agents — total timeout으로 무한 대기 방지
-            tasks = [
-                asyncio.create_task(
-                    _orchestrator_run_agent(gw, _pick_worker(st), st, project_path, base_sys, emit_queue,
-                                             aws_profile=aws_profile, bedrock_user=bedrock_user, is_remote=is_remote)
-                )
-                for st in subtasks
-            ]
+            # 2) Hierarchical or Parallel Agents
+            # 팀(team) 필드가 2개 이상 다른 값으로 있으면 hierarchical 모드 활성:
+            # - 같은 team끼리 묶어서 순차 실행 (team A → team B)
+            # - 같은 team 안에서는 병렬 실행
+            # - 이전 team의 결과(verifiedFiles + summary)가 다음 team 컨텍스트로 전달
+            # 이 모드는 기존 flat 흐름과 결과 동일 — 단지 정보 흐름 개선만.
+            teams_set = set()
+            for st in subtasks:
+                t = (st.get("team") or "").strip().lower()
+                if t:
+                    teams_set.add(t)
+
+            use_hierarchical = len(teams_set) >= 2
+
             # 전체 오케스트레이션 timeout — 환경변수로 조정 (기본 60분)
             total_timeout = float(os.environ.get("AE_ORCH_TOTAL_TIMEOUT", "3600"))
-            try:
-                raw_results = await asyncio.wait_for(
-                    asyncio.gather(*tasks, return_exceptions=True),
-                    timeout=total_timeout,
-                )
-            except asyncio.TimeoutError:
-                print(f"[Orchestrator] 전체 timeout ({total_timeout}s) — 미완료 태스크 취소")
-                # 완료된 태스크 결과만 수집, 미완료는 cancel
-                raw_results = []
-                for t in tasks:
-                    if t.done():
-                        try:
-                            raw_results.append(t.result())
-                        except Exception as ex:
-                            raw_results.append(ex)
-                    else:
-                        t.cancel()
-                        raw_results.append(asyncio.TimeoutError(f"timeout {int(total_timeout)}s"))
-            except Exception as e:
-                print(f"[Orchestrator] gather 예외: {e}")
-                raw_results = [Exception(str(e))] * len(subtasks)
 
-            # 예외를 결과 dict로 정규화 (모든 subtask가 반드시 결과 가짐)
             agent_results = []
-            for st, r in zip(subtasks, raw_results):
-                tid = st.get("id", "?")
-                if isinstance(r, Exception):
-                    err_msg = f"{type(r).__name__}: {r}"
-                    print(f"[Orchestrator] agent {tid} 예외: {err_msg}")
-                    await emit_queue.put({"type": "agent_error", "taskId": tid, "error": err_msg})
-                    agent_results.append({
-                        "taskId": tid, "role": st.get("role", "Worker"),
-                        "title": st.get("title", ""), "status": "error",
-                        "summary": err_msg, "tools": [],
-                    })
-                elif isinstance(r, dict):
-                    agent_results.append(r)
-                else:
-                    # 알 수 없는 반환 — 빈 결과 정규화
-                    agent_results.append({
-                        "taskId": tid, "role": st.get("role", "Worker"),
-                        "title": st.get("title", ""), "status": "error",
-                        "summary": "에이전트가 결과를 반환하지 않음", "tools": [],
-                    })
+            if use_hierarchical:
+                print(f"[Orchestrator] Hierarchical 모드 — {len(teams_set)}개 팀 ({sorted(teams_set)})")
+                await emit_queue.put({
+                    "type": "hierarchical_info",
+                    "teams": sorted(teams_set),
+                    "totalAgents": len(subtasks),
+                })
+                # 팀 우선순위: research/analysis 먼저, 그 다음 coding/media/writing
+                team_priority = {"research": 1, "analysis": 1, "coding": 2,
+                                 "media": 3, "writing": 4}
+                ordered_teams = sorted(teams_set, key=lambda t: team_priority.get(t, 5))
+                team_summaries = {}  # team → 직전 결과 요약 (다음 team 컨텍스트)
+                remaining_timeout = total_timeout
+
+                for team in ordered_teams:
+                    team_subtasks = [st for st in subtasks
+                                     if (st.get("team") or "").strip().lower() == team]
+                    # 이전 팀 결과를 컨텍스트로 주입
+                    team_base_sys = base_sys
+                    if team_summaries:
+                        prev_ctx = "\n\n".join(
+                            f"## {prev_team} 팀 결과 (참고용)\n{summary[:1500]}"
+                            for prev_team, summary in team_summaries.items()
+                        )
+                        team_base_sys = (base_sys or "") + "\n\n[이전 팀 결과]\n" + prev_ctx
+
+                    team_tasks = [
+                        asyncio.create_task(
+                            _orchestrator_run_agent(gw, _pick_worker(st), st, project_path,
+                                                    team_base_sys, emit_queue,
+                                                    aws_profile=aws_profile, bedrock_user=bedrock_user,
+                                                    is_remote=is_remote)
+                        )
+                        for st in team_subtasks
+                    ]
+                    # 각 팀 timeout — 남은 전체 timeout / 남은 팀 수
+                    team_timeout = max(60, remaining_timeout / max(1, len(ordered_teams) - len(team_summaries)))
+                    team_start = asyncio.get_event_loop().time()
+                    try:
+                        team_raw = await asyncio.wait_for(
+                            asyncio.gather(*team_tasks, return_exceptions=True),
+                            timeout=team_timeout,
+                        )
+                    except asyncio.TimeoutError:
+                        team_raw = []
+                        for t in team_tasks:
+                            if t.done():
+                                try: team_raw.append(t.result())
+                                except Exception as ex: team_raw.append(ex)
+                            else:
+                                t.cancel()
+                                team_raw.append(asyncio.TimeoutError(f"team {team} timeout"))
+                    except Exception as e:
+                        team_raw = [Exception(str(e))] * len(team_subtasks)
+                    elapsed = asyncio.get_event_loop().time() - team_start
+                    remaining_timeout = max(60, remaining_timeout - elapsed)
+
+                    # 팀 결과 정규화 + summary 수집
+                    summary_parts = []
+                    for st, r in zip(team_subtasks, team_raw):
+                        tid = st.get("id", "?")
+                        if isinstance(r, Exception):
+                            err_msg = f"{type(r).__name__}: {r}"
+                            await emit_queue.put({"type": "agent_error", "taskId": tid, "error": err_msg})
+                            agent_results.append({
+                                "taskId": tid, "role": st.get("role", "Worker"),
+                                "title": st.get("title", ""), "status": "error",
+                                "summary": err_msg, "tools": [], "verifiedFiles": [],
+                                "team": team,
+                            })
+                        elif isinstance(r, dict):
+                            r["team"] = team
+                            agent_results.append(r)
+                            if r.get("status") == "done":
+                                summary_parts.append(
+                                    f"- [{tid}] {st.get('title', '')}: "
+                                    f"{(r.get('summary') or '')[:300]}"
+                                )
+                        else:
+                            agent_results.append({
+                                "taskId": tid, "role": st.get("role", "Worker"),
+                                "title": st.get("title", ""), "status": "error",
+                                "summary": "에이전트가 결과를 반환하지 않음",
+                                "tools": [], "verifiedFiles": [], "team": team,
+                            })
+                    if summary_parts:
+                        team_summaries[team] = "\n".join(summary_parts)
+            else:
+                # === Flat parallel — 기존 동작 ===
+                tasks = [
+                    asyncio.create_task(
+                        _orchestrator_run_agent(gw, _pick_worker(st), st, project_path,
+                                                base_sys, emit_queue,
+                                                aws_profile=aws_profile, bedrock_user=bedrock_user,
+                                                is_remote=is_remote)
+                    )
+                    for st in subtasks
+                ]
+                try:
+                    raw_results = await asyncio.wait_for(
+                        asyncio.gather(*tasks, return_exceptions=True),
+                        timeout=total_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    print(f"[Orchestrator] 전체 timeout ({total_timeout}s) — 미완료 태스크 취소")
+                    raw_results = []
+                    for t in tasks:
+                        if t.done():
+                            try: raw_results.append(t.result())
+                            except Exception as ex: raw_results.append(ex)
+                        else:
+                            t.cancel()
+                            raw_results.append(asyncio.TimeoutError(f"timeout {int(total_timeout)}s"))
+                except Exception as e:
+                    print(f"[Orchestrator] gather 예외: {e}")
+                    raw_results = [Exception(str(e))] * len(subtasks)
+
+                # 예외를 결과 dict로 정규화
+                for st, r in zip(subtasks, raw_results):
+                    tid = st.get("id", "?")
+                    if isinstance(r, Exception):
+                        err_msg = f"{type(r).__name__}: {r}"
+                        await emit_queue.put({"type": "agent_error", "taskId": tid, "error": err_msg})
+                        agent_results.append({
+                            "taskId": tid, "role": st.get("role", "Worker"),
+                            "title": st.get("title", ""), "status": "error",
+                            "summary": err_msg, "tools": [], "verifiedFiles": [],
+                        })
+                    elif isinstance(r, dict):
+                        agent_results.append(r)
+                    else:
+                        agent_results.append({
+                            "taskId": tid, "role": st.get("role", "Worker"),
+                            "title": st.get("title", ""), "status": "error",
+                            "summary": "에이전트가 결과를 반환하지 않음",
+                            "tools": [], "verifiedFiles": [],
+                        })
 
             # 3) Merger
             report = await _orchestrator_merge(gw, merger_id, user_prompt, agent_results, base_sys)

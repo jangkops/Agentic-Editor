@@ -3582,6 +3582,38 @@ const SVG_CHECK = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" s
 const SVG_TERMINAL = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>';
 
 // 복사 + 실행 버튼 지원
+// === Annotation Queue: 응답 피드백 디스크 저장 ===
+async function _saveFeedback(rating, text, reason) {
+  try {
+    const fb = {
+      rating,                                     // 'positive' | 'negative'
+      text: (text || '').substring(0, 5000),
+      reason: (reason || '').substring(0, 500),
+      model: state.selectedModel?.id || '',
+      mode: state.mode || '',
+      timestamp: Date.now(),
+      iso: new Date().toISOString(),
+      sessionId: chatSessions[activeSessionIdx]?.id || '',
+    };
+    if (window.electronAPI?.getUserDataPath && window.electronAPI?.writeFile) {
+      const udp = await window.electronAPI.getUserDataPath();
+      // 일별 JSONL 파일에 append (Annotation Queue)
+      const date = new Date().toISOString().slice(0, 10);
+      const path = `${udp}/feedback/${date}.jsonl`;
+      // 기존 내용 읽고 append
+      let existing = '';
+      try {
+        existing = await window.electronAPI.readFile(path) || '';
+      } catch { existing = ''; }
+      const line = JSON.stringify(fb) + '\n';
+      await window.electronAPI.writeFile(path, existing + line);
+      addLiveLog('system', `피드백 저장 — ${rating} (${path})`);
+    }
+  } catch (e) {
+    console.warn('[Feedback] 저장 실패:', e);
+  }
+}
+
 function addCopySupport(el, text) {
   const mc = el.querySelector('.msg-content') || el.querySelector('[style*="border-left"]') || el;
   // 버튼 컨테이너
@@ -3606,6 +3638,37 @@ function addCopySupport(el, text) {
     });
   });
   bar.appendChild(copyBtn);
+
+  // === Annotation Queue / 피드백 루프 ===
+  // 👍/👎 버튼 — 응답 품질 평가, 디스크에 저장하여 다음 평가/개선에 활용
+  const upBtn = document.createElement('button');
+  upBtn.className = 'msg-action-btn';
+  upBtn.innerHTML = '↑';
+  upBtn.title = '도움됨';
+  upBtn.style.cssText = 'font-weight:bold;font-size:13px';
+  upBtn.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    _saveFeedback('positive', text, '');
+    upBtn.style.color = 'var(--color-success, #4ec9b0)';
+    upBtn.disabled = true;
+  });
+  bar.appendChild(upBtn);
+
+  const downBtn = document.createElement('button');
+  downBtn.className = 'msg-action-btn';
+  downBtn.innerHTML = '↓';
+  downBtn.title = '도움 안 됨';
+  downBtn.style.cssText = 'font-weight:bold;font-size:13px';
+  downBtn.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    const reason = prompt('어떤 점이 부족했나요? (선택사항, 향후 개선에 활용)');
+    if (reason !== null) {
+      _saveFeedback('negative', text, reason || '');
+      downBtn.style.color = 'var(--color-error, #f44747)';
+      downBtn.disabled = true;
+    }
+  });
+  bar.appendChild(downBtn);
 
   // 실행 가능한 명령어가 있을 때만 Run Command 버튼 추가
   const codeMatch = text.match(/```(?:bash|sh|shell|zsh|cmd|powershell)\n([\s\S]*?)```/);
