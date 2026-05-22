@@ -1472,7 +1472,16 @@ async function runOrchestrated(prompt) {
             const ev = JSON.parse(d);
             if (ev.heartbeat) continue;
 
-          if (ev.type === 'plan') {
+          if (ev.type === 'model_routing') {
+            // 사용자가 선택한 모델이 도구 호출 미지원이라 자동 변경됨
+            const original = (ev.original || '').replace(/^us\.|^eu\.|^global\./, '');
+            const routed = (ev.routedTo || '').replace(/^us\.|^eu\.|^global\./, '');
+            state.messages.push({
+              role: 'system',
+              content: `모델 자동 라우팅 — ${original} → ${routed} (${ev.reason || '도구 호출 안정성'})`,
+            });
+            renderMessages();
+          } else if (ev.type === 'plan') {
             const subtasks = ev.subtasks || [];
             state.messages.push({
               role: 'system',
@@ -1854,6 +1863,17 @@ async function runAgentWorkflow(prompt) {
         if (d === '[DONE]') continue;
         try {
           const p = JSON.parse(d);
+          if (p.model_routing) {
+            // 자동 모델 라우팅 알림
+            const original = (p.original || '').replace(/^us\.|^eu\.|^global\./, '');
+            const routed = (p.routedTo || '').replace(/^us\.|^eu\.|^global\./, '');
+            state.messages.push({
+              role: 'system',
+              content: `모델 자동 라우팅 — ${original} → ${routed} (${p.reason || '도구 호출 안정성'})`,
+            });
+            renderMessages();
+            continue;
+          }
           if (p.error) {
             // 모델 관련 에러 분류 — denylist 영구 제거 금지
             const isMaxTokensError = /maximum tokens.*exceeds.*model limit|max tokens.*invalid/i.test(p.error);

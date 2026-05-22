@@ -2000,7 +2000,11 @@ async def run_agent_stream(request: Request):
 
 @app.post("/api/agents/run-agent")
 async def run_agent_with_tools(request: Request):
-    """에이전트 모드 — 도구 실행 루프 포함. 모델이 tool_use로 응답하면 실행 후 재호출."""
+    """에이전트 모드 — 도구 실행 루프 포함. 모델이 tool_use로 응답하면 실행 후 재호출.
+
+    사용자가 도구 호출 미지원 모델(Llama/DeepSeek/Cohere 등)을 선택해도
+    프롬프트가 도구 사용을 필요로 하면 Claude Sonnet으로 자동 라우팅한다.
+    """
     body = await request.json()
     prompt = body.get("prompt", "")
     model = body.get("model", "anthropic.claude-sonnet-4-6")
@@ -2010,6 +2014,23 @@ async def run_agent_with_tools(request: Request):
     project_path = body.get("projectPath", "")
     open_file = body.get("openFile", "")
     open_file_content = body.get("openFileContent", "")
+
+    # ── 자동 모델 라우팅 ──
+    # 사용자가 도구 호출 미지원/불안정 모델(Llama/DeepSeek/Cohere/Nova-Lite 등)을 선택했으면
+    # Claude Sonnet으로 자동 대체 — 어떤 모델을 골라도 도구 호출이 동작하도록 보장.
+    def _is_tool_capable(mid: str) -> bool:
+        if not mid:
+            return False
+        m = mid.lower()
+        if "claude" in m: return True
+        if "mistral-large" in m or "pixtral" in m: return True
+        if "nova-pro" in m: return True
+        return False
+
+    if not _is_tool_capable(model):
+        original = model
+        model = "anthropic.claude-sonnet-4-6-20250929-v1:0"
+        print(f"[Agent] 도구 호출 미지원 모델 감지 — {original} → {model} 자동 대체")
 
     gw = _get_gw(aws_profile, bedrock_user)
     stream_model = _resolve_callable_model_id(model, aws_profile, bedrock_user)
@@ -2035,6 +2056,13 @@ async def run_agent_with_tools(request: Request):
         """에이전트 루프 — 최상위 try/finally 로 어떤 예외에도 [DONE] 송출 보장.
         ERR_INCOMPLETE_CHUNKED_ENCODING 방지 핵심."""
         done_sent = False
+        # 자동 라우팅 알림 — body의 model과 stream_model이 다르면 사용자 알림
+        _orig = body.get("model", "")
+        if _orig and _orig.lower() not in (stream_model or "").lower():
+            try:
+                yield f"data: {json.dumps({'model_routing': True, 'original': _orig, 'routedTo': stream_model, 'reason': '도구 호출 안정성을 위해 Claude로 자동 라우팅됨'}, ensure_ascii=False)}\n\n"
+            except Exception:
+                pass
         try:
             # ── 메시지 구성 (실패해도 스트림은 이미 시작된 상태) ──
             try:
@@ -3261,6 +3289,97 @@ async def run_agent_orchestrated(request: Request):
     worker_id = _with_prefix(worker_model)
     merger_id = _with_prefix(merger_model)
 
+    # ── Known Claude model IDs (latest gen first) ──
+    # 게이트웨이가 활성화한 모델만 호출 가능. 우선순위 순으로 시도.
+    _KNOWN_OPUS = [
+        "anthropic.claude-opus-4-7-20251015-v1:0",
+        "anthropic.claude-opus-4-20250514-v1:0",
+        "anthropic.claude-3-opus-20240229-v1:0",
+    ]
+    _KNOWN_SONNET = [
+        "anthropic.claude-sonnet-4-6-20250929-v1:0",
+        "anthropic.claude-sonnet-4-20250514-v1:0",
+        "anthropic.claude-3-5-sonnet-20241022-v2:0",
+    ]
+    _KNOWN_HAIKU = [
+        "anthropic.claude-haiku-4-5-20251001-v1:0",
+        "anthropic.claude-3-5-haiku-20241022-v1:0",
+    ]
+
+    def _find_model_by_keywords(keywords):
+        """keywords 리스트 중 첫 번째 매칭되는 모델의 호출 가능 ID 반환."""
+        # 먼저 사용자 선택 worker_model이 키워드와 일치하면 그것 사용
+        for kw in keywords:
+            if kw.lower() in (worker_model or "").lower():
+                return worker_model
+        # 알려진 모델 후보를 순회
+        for kw in keywords:
+            for known in _KNOWN_OPUS + _KNOWN_SONNET + _KNOWN_HAIKU:
+                if kw.lower() in known.lower():
+                    return known
+        return None
+
+    # ── 자동 모델 라우팅 헬퍼 ──
+    # 사용자가 어떤 모델을 선택했든, 작업 특성에 따라 최적 chat 모델로 강제 라우팅.
+    # 도구 호출이 안정적인 Claude 패밀리를 우선하고, 그 외는 Claude로 대체.
+    def _auto_chat_model(primary_tool: str, fallback: str) -> str:
+        """primary_tool에 따라 최적 chat 모델 ID 반환."""
+        pt = (primary_tool or "").lower()
+        opus = _find_model_by_keywords(["claude-opus-4-7", "claude-opus-4"]) \
+            or _find_model_by_keywords(["claude-opus"])
+        sonnet = _find_model_by_keywords(["claude-sonnet-4-6", "claude-sonnet-4"]) \
+            or _find_model_by_keywords(["claude-sonnet"])
+        haiku = _find_model_by_keywords(["claude-haiku-4-5", "claude-haiku-4"]) \
+            or _find_model_by_keywords(["claude-haiku"])
+        # 작업별 매핑
+        if pt in ("code", "edit_image"):
+            # 복잡한 추론 → Opus (없으면 Sonnet)
+            picked = opus or sonnet or fallback
+        elif pt in ("generate_pdf", "generate_pptx", "generate_xlsx", "generate_docx",
+                    "generate_image", "write_file", "run_command"):
+            # 도구 호출 안정성 → Sonnet (없으면 Haiku, fallback)
+            picked = sonnet or haiku or fallback
+        else:
+            picked = fallback
+        return _with_prefix(picked)
+
+    # 사용자가 비-Claude(예: Llama/DeepSeek) 채팅 모델을 선택해도 도구 호출 가능한 Claude로 라우팅.
+    # 이렇게 해야 "PDF 만들어줘" 같은 도구 호출 작업이 실패하지 않음.
+    def _is_tool_capable_chat_model(model_id: str) -> bool:
+        """chat 모델이 Bedrock toolConfig를 안정적으로 지원하는지 확인."""
+        if not model_id:
+            return False
+        mid = model_id.lower()
+        # Claude는 모두 도구 호출 안정적
+        if "claude" in mid:
+            return True
+        # Mistral Large/Pixtral도 toolConfig 지원
+        if "mistral-large" in mid or "pixtral" in mid:
+            return True
+        # Nova Pro도 도구 호출 가능 (Nova Lite/Micro는 제한적)
+        if "nova-pro" in mid:
+            return True
+        # 그 외 (Llama, DeepSeek-R1, Cohere Command 등) — 도구 호출 미지원/불안정
+        return False
+
+    # 사용자가 도구 호출 미지원 모델을 선택했으면 worker_id를 자동으로 Claude Sonnet으로 교체
+    if not _is_tool_capable_chat_model(worker_id):
+        original = worker_id
+        sonnet_pref = _find_model_by_keywords(["claude-sonnet-4-6", "claude-sonnet-4", "claude-sonnet"])
+        if sonnet_pref:
+            worker_id = _with_prefix(sonnet_pref)
+            print(f"[Orchestrator] worker 자동 변경 — {original} → {worker_id} (도구 호출 안정성)")
+
+    # Planner도 도구 호출/JSON 출력이 안정적이어야 함 — 비-Claude면 Opus로 대체
+    if not _is_tool_capable_chat_model(planner_id):
+        original = planner_id
+        opus_pref = _find_model_by_keywords(["claude-opus-4-7", "claude-opus-4", "claude-opus"])
+        sonnet_pref = _find_model_by_keywords(["claude-sonnet-4-6", "claude-sonnet-4", "claude-sonnet"])
+        if opus_pref or sonnet_pref:
+            planner_id = _with_prefix(opus_pref or sonnet_pref)
+            merger_id = planner_id  # merger도 동일한 강한 모델
+            print(f"[Orchestrator] planner 자동 변경 — {original} → {planner_id} (JSON 분해 안정성)")
+
     # RAG (코드 관련 질문만)
     if project_path and _is_code_related(user_prompt):
         try:
@@ -3278,6 +3397,15 @@ async def run_agent_orchestrated(request: Request):
         emit_queue: asyncio.Queue = asyncio.Queue()
 
         async def pipeline():
+            # 자동 모델 라우팅 알림 — worker_model과 worker_id가 다르면 사용자에게 알림
+            if worker_model and worker_id and worker_model.lower() not in worker_id.lower():
+                await emit_queue.put({
+                    "type": "model_routing",
+                    "original": worker_model,
+                    "routedTo": worker_id,
+                    "reason": "도구 호출 안정성을 위해 Claude로 자동 라우팅됨",
+                })
+
             # 1) Planner
             try:
                 plan = await _orchestrator_plan(gw, planner_id, user_prompt, base_sys, max_agents)
@@ -3289,14 +3417,12 @@ async def run_agent_orchestrated(request: Request):
             subtasks = plan["subtasks"][:max_agents]
             await emit_queue.put({"type": "plan", "subtasks": subtasks})
 
-            # primary_tool에 따라 worker 모델 선택 — vision/long-context 작업은 더 강한 모델로
+            # primary_tool 기반 자동 모델 라우팅 — 사용자 선택과 무관하게 작업에 최적 모델 사용.
+            # _auto_chat_model이 도구 호출 미지원 모델을 Claude로 자동 대체.
             def _pick_worker(st_dict):
                 pt = (st_dict.get("primary_tool") or "").lower()
-                # 코드 분석/리팩토링 → opus 우선 (있으면)
-                if pt in ("code", "edit_image"):
-                    return planner_id  # opus 시도
-                # 기본: 사용자가 지정한 worker
-                return worker_id
+                picked = _auto_chat_model(pt, worker_model)
+                return picked
 
             # 2) Parallel Agents — total timeout으로 무한 대기 방지
             tasks = [
