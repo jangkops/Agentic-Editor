@@ -430,7 +430,9 @@ class GatewayClient:
             had_data = False
             try:
                 async with httpx.AsyncClient(
-                    timeout=httpx.Timeout(300.0, connect=30.0, read=120.0)
+                    # SSE 스트림 — Lambda 응답 시간 제한 없음 (1시간), connect 30초, read 5분
+                    # 모델이 5분 이상 토큰 생성 안 하면 끊김으로 판단
+                    timeout=httpx.Timeout(3600.0, connect=30.0, read=300.0)
                 ) as client:
                     async with client.stream("POST", url, content=body_bytes, headers=signed_headers) as resp:
                         if resp.status_code != 200:

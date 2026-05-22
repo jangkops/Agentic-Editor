@@ -1555,9 +1555,9 @@ async function runOrchestrated(prompt) {
     const dec = new TextDecoder();
     let buf = '';
 
-    // 무한루프 방지를 위한 wall-clock timeout (기본 15분, env로 조정 가능)
+    // 무한루프 방지를 위한 wall-clock timeout (기본 60분, env로 조정 가능)
     // 사용자가 명시적으로 취소하지 않은 자동 timeout과 구분
-    const HARD_TIMEOUT_MS = (typeof window.AE_ORCH_TIMEOUT_MIN === 'number' ? window.AE_ORCH_TIMEOUT_MIN : 15) * 60 * 1000;
+    const HARD_TIMEOUT_MS = (typeof window.AE_ORCH_TIMEOUT_MIN === 'number' ? window.AE_ORCH_TIMEOUT_MIN : 60) * 60 * 1000;
     let _autoAbortReason = '';  // 자동 취소 사유 추적 (wall-clock vs user)
     const hardTimer = setTimeout(() => {
       _autoAbortReason = 'wall-clock';
@@ -1567,8 +1567,9 @@ async function runOrchestrated(prompt) {
 
     try {
       while (true) {
-        // 오케스트레이션은 Planner→N Workers→Merger로 시간이 오래 걸림 → idle timeout 600초
-        const { done, value } = await _readWithIdleTimeout(reader, 600000);
+        // 오케스트레이션은 Planner→N Workers→Merger로 시간이 오래 걸림 → idle timeout 60분
+        // 서버는 20초마다 heartbeat 송출하므로 정상 동작 시 절대 idle하지 않음
+        const { done, value } = await _readWithIdleTimeout(reader, 60 * 60 * 1000);
         if (done) break;
         buf += dec.decode(value, { stream: true });
         const events = buf.split('\n\n'); buf = events.pop() || '';
@@ -1772,7 +1773,7 @@ async function runOrchestrated(prompt) {
         errMsg = '사용자가 취소했습니다.';
         abortReason = 'user';
       } else if (typeof _autoAbortReason !== 'undefined' && _autoAbortReason === 'wall-clock') {
-        errMsg = '오케스트레이션 시간 초과 (8분) — 자동 중단됨';
+        errMsg = `오케스트레이션 시간 초과 (${HARD_TIMEOUT_MS / 60000}분) — 자동 중단됨`;
         abortReason = 'timeout';
       } else {
         // AbortController가 abort됐지만 사유 불명 — 네트워크 끊김 등

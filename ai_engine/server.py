@@ -3772,8 +3772,8 @@ async def _orchestrator_run_agent(
     aws_profile: str = "", bedrock_user: str = "", is_remote: bool = False,
 ):
     """하나의 하위 에이전트 실행 — 도구 루프 포함. 무한루프 방지를 위해 hard timeout."""
-    # 환경 변수로 조정 가능 — 기본 5분, 도구 루프 50회 제한과 함께 동작
-    agent_timeout = float(os.environ.get("AE_AGENT_TIMEOUT", "300"))
+    # 환경 변수로 조정 가능 — 기본 30분, 도구 루프 50회 제한과 함께 동작
+    agent_timeout = float(os.environ.get("AE_AGENT_TIMEOUT", "1800"))
     task_id = subtask.get("id", "?")
     role = subtask.get("role", "Worker")
     title = subtask.get("title", "")
@@ -4678,8 +4678,8 @@ async def run_agent_orchestrated(request: Request):
                 )
                 for st in subtasks
             ]
-            # 전체 오케스트레이션 timeout — 환경변수로 조정 (기본 7분)
-            total_timeout = float(os.environ.get("AE_ORCH_TOTAL_TIMEOUT", "420"))
+            # 전체 오케스트레이션 timeout — 환경변수로 조정 (기본 60분)
+            total_timeout = float(os.environ.get("AE_ORCH_TOTAL_TIMEOUT", "3600"))
             try:
                 raw_results = await asyncio.wait_for(
                     asyncio.gather(*tasks, return_exceptions=True),
