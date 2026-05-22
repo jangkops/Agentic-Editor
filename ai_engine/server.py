@@ -2581,18 +2581,22 @@ ORCHESTRATOR_AGENT_PROMPT = """당신은 멀티-에이전트 시스템의 전문
 """
 
 ORCHESTRATOR_MERGER_PROMPT = """당신은 멀티-에이전트 결과를 통합하는 리뷰어입니다.
+
+[입력 데이터의 verifiedFiles 필드는 시스템이 디스크에서 직접 확인한 실제 파일 목록입니다 — 이 목록만 신뢰하세요.]
+[에이전트의 summary 텍스트에 "✅ 완료" "생성됨" 등이 적혀 있어도 verifiedFiles에 없으면 실패입니다.]
+
 아래 각 에이전트의 작업 결과를 검토하고:
-1. 성공/실패 여부를 판정 (실제 파일이 생성되었는지 toolCount > 0 인지 확인)
-2. 충돌이나 누락이 있으면 지적
+1. 성공/실패 여부 — verifiedFiles에 파일이 있고 status="done"이면 성공, 그 외는 모두 실패
+2. 충돌이나 누락 지적
 3. 사용자에게 전달할 최종 요약 보고서를 마크다운으로 작성
 
 보고서 형식:
 ## 최종 통합 결과
-| 에이전트 | 역할 | 상태 | 생성된 파일 | 도구 사용 횟수 |
-|---------|------|------|-------------|--------------|
+| 에이전트 | 역할 | 상태 | 생성된 파일 (디스크 검증됨) | 도구 사용 횟수 |
+|---------|------|------|--------------------------|--------------|
 ...
 
-### 생성된 파일 목록
+### 생성된 파일 목록 (verifiedFiles 기반 — 실제 존재)
 - `.generated/file1.pdf` — 설명
 - `.generated/file2.xlsx` — 설명
 ...
@@ -2603,7 +2607,10 @@ ORCHESTRATOR_MERGER_PROMPT = """당신은 멀티-에이전트 결과를 통합�
 ### 주의/후속 작업
 - (있다면)
 
-도구를 사용하지 않고 텍스트만 출력한 에이전트는 "실패"로 표시하세요.
+**규칙**:
+- verifiedFileCount=0인 에이전트는 무조건 "실패"로 표시.
+- summary에 "✅", "완료", "생성됨"이 있어도 verifiedFiles에 없으면 그 주장은 무시하고 실패로 분류.
+- 거짓 파일 경로(verifiedFiles에 없는 경로)는 절대 보고서에 포함하지 마세요.
 """
 
 
@@ -2629,6 +2636,207 @@ async def _orchestrator_plan(gw, stream_model, user_prompt: str, system_prompt: 
     if not isinstance(plan.get("subtasks"), list) or not plan["subtasks"]:
         raise RuntimeError("Planner가 subtasks를 생성하지 않았습니다.")
     return plan
+
+
+async def _force_generate_from_text(
+    primary_tool: str,
+    target_files: list,
+    title: str,
+    description: str,
+    final_text: str,
+    project_path: str,
+    aws_profile: str,
+    bedrock_user: str,
+):
+    """에이전트가 도구를 안 부른 채 텍스트만 출력했을 때, 시스템이 직접
+    fallback 도구를 호출해서 파일을 강제 생성한다.
+
+    primary_tool과 target_files의 확장자를 보고 어떤 도구를 호출할지 결정한다.
+    final_text와 description에서 콘텐츠를 추출해 도구 input을 구성한다.
+
+    Returns:
+        list of (relative_path, file_info_dict) tuples for verified files.
+    """
+    pt = (primary_tool or "").lower()
+    # target_files에서 확장자 결정 → 없으면 primary_tool로 결정
+    needed_exts = []
+    if target_files:
+        for tf in target_files:
+            ext = (str(tf).split(".")[-1] or "").lower()
+            if ext and ext not in needed_exts:
+                needed_exts.append(ext)
+    if not needed_exts:
+        # primary_tool로 매핑
+        tool_to_ext = {
+            "generate_pdf": "pdf",
+            "generate_pptx": "pptx",
+            "generate_xlsx": "xlsx",
+            "generate_docx": "docx",
+            "generate_image": "png",
+            "write_file": "md",
+        }
+        if pt in tool_to_ext:
+            needed_exts.append(tool_to_ext[pt])
+
+    if not needed_exts:
+        return []
+
+    # 본문 텍스트 — final_text가 비어있으면 description 사용
+    base_text = (final_text or "").strip() or (description or "").strip() or title or "문서"
+
+    # 섹션 단위로 분리 (마크다운 헤더 + 빈 줄)
+    sections = _split_into_sections(base_text, fallback_title=title or "본문")
+
+    out = []
+    project_root = project_path if (project_path and os.path.isdir(project_path)) else os.getcwd()
+
+    for ext in needed_exts:
+        try:
+            if ext == "pdf":
+                inp = {
+                    "title": title or "Document",
+                    "sections": [{"heading": s["heading"], "body": s["body"]} for s in sections],
+                }
+                tout = await _tool_generate_pdf(inp, project_path)
+            elif ext == "pptx":
+                inp = {
+                    "title": title or "Presentation",
+                    "slides": [
+                        {"title": s["heading"][:80], "bullets": _extract_bullets(s["body"])[:6] or [s["body"][:200]]}
+                        for s in sections[:10]
+                    ] or [{"title": title or "Slide 1", "bullets": [base_text[:200]]}],
+                }
+                tout = await _tool_generate_pptx(inp, project_path, aws_profile=aws_profile, bedrock_user=bedrock_user)
+            elif ext == "xlsx":
+                # 마크다운 표가 있으면 그것을 사용, 없으면 섹션 헤더 + 본문 요약
+                rows = _extract_md_table(base_text) or [
+                    [s["heading"][:60], s["body"][:300]] for s in sections
+                ]
+                headers = ["Heading", "Content"] if not _extract_md_table(base_text) else None
+                if headers is None:
+                    # 첫 행이 헤더로 추출됨
+                    md_table = _extract_md_table(base_text)
+                    headers = md_table[0] if md_table else ["Col1", "Col2"]
+                    rows = md_table[1:] if md_table and len(md_table) > 1 else []
+                inp = {
+                    "title": title or "Workbook",
+                    "sheets": [{"name": "Summary", "headers": headers, "rows": rows or [["(empty)", "(empty)"]]}],
+                }
+                tout = await _tool_generate_xlsx(inp, project_path)
+            elif ext == "docx":
+                inp = {
+                    "title": title or "Document",
+                    "sections": [
+                        {"heading": s["heading"], "level": 2, "body": s["body"], "bullets": _extract_bullets(s["body"])}
+                        for s in sections
+                    ],
+                }
+                tout = await _tool_generate_docx(inp, project_path)
+            elif ext in ("png", "jpg", "jpeg"):
+                inp = {"prompt": (description or title or "Architecture diagram")[:1500], "size": "1024x1024"}
+                tout = await _tool_generate_image(inp, project_path, aws_profile=aws_profile, bedrock_user=bedrock_user)
+            elif ext in ("md", "txt"):
+                # write_file로 직접 작성
+                fname = (target_files[0] if target_files else f".generated/{_safe_slug(title or 'note')}.{ext}")
+                if not fname.startswith(".generated/") and not os.path.isabs(fname):
+                    fname = ".generated/" + os.path.basename(fname)
+                abs_path = fname if os.path.isabs(fname) else os.path.join(project_root, fname)
+                os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+                with open(abs_path, "w", encoding="utf-8") as f:
+                    f.write(base_text)
+                tout = json.dumps({"path": fname, "model": "filesystem", "sizeBytes": os.path.getsize(abs_path)})
+            else:
+                continue
+
+            try:
+                parsed = json.loads(tout) if isinstance(tout, str) else tout
+            except (json.JSONDecodeError, TypeError):
+                parsed = None
+            if not isinstance(parsed, dict) or "path" not in parsed or "error" in parsed:
+                print(f"[ForceGenerate] {ext} 실패: {tout[:300]}")
+                continue
+            rel = parsed["path"]
+            abs_path = rel if os.path.isabs(rel) else os.path.join(project_root, rel)
+            if not os.path.isfile(abs_path):
+                continue
+            out.append((rel, {
+                "path": rel,
+                "absPath": abs_path,
+                "size": os.path.getsize(abs_path),
+                "tool": "generate_" + (ext if ext != "jpg" else "image"),
+                "model": parsed.get("model", "system_fallback"),
+            }))
+        except Exception as e:
+            print(f"[ForceGenerate] {ext} 예외: {e}")
+            continue
+
+    return out
+
+
+def _split_into_sections(text: str, fallback_title: str = "본문") -> list:
+    """마크다운 텍스트를 헤더 단위로 분리. 헤더가 없으면 단일 섹션."""
+    if not text:
+        return [{"heading": fallback_title, "body": ""}]
+    lines = text.splitlines()
+    sections = []
+    current = {"heading": "", "body": []}
+    for line in lines:
+        m = re.match(r"^(#{1,6})\s+(.+)$", line.strip())
+        if m:
+            if current["heading"] or current["body"]:
+                sections.append({"heading": current["heading"] or fallback_title,
+                                 "body": "\n".join(current["body"]).strip()})
+            current = {"heading": m.group(2).strip(), "body": []}
+        else:
+            current["body"].append(line)
+    if current["heading"] or current["body"]:
+        sections.append({"heading": current["heading"] or fallback_title,
+                         "body": "\n".join(current["body"]).strip()})
+    return sections or [{"heading": fallback_title, "body": text.strip()}]
+
+
+def _extract_bullets(text: str) -> list:
+    """텍스트에서 불릿 항목(- / * / 숫자.)을 추출."""
+    if not text:
+        return []
+    bullets = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        m = re.match(r"^(?:[-*•]\s+|\d+\.\s+)(.+)$", stripped)
+        if m:
+            bullets.append(m.group(1).strip())
+    return bullets
+
+
+def _extract_md_table(text: str) -> list:
+    """마크다운 표를 [[헤더...], [행1...], ...] 형태로 추출. 없으면 빈 리스트."""
+    if not text:
+        return []
+    lines = text.splitlines()
+    rows = []
+    in_table = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("|") and stripped.endswith("|"):
+            cells = [c.strip() for c in stripped.strip("|").split("|")]
+            # 구분선 (---|---) 스킵
+            if all(re.match(r"^:?-+:?$", c) for c in cells if c):
+                in_table = True
+                continue
+            rows.append(cells)
+            in_table = True
+        elif in_table:
+            break
+    return rows
+
+
+def _safe_slug(s: str) -> str:
+    """파일명용 안전한 슬러그."""
+    if not s:
+        return "doc"
+    s = re.sub(r"[^a-zA-Z0-9가-힣\-_\s]+", "", s)
+    s = re.sub(r"\s+", "-", s.strip())
+    return (s[:40] or "doc").lower()
 
 
 async def _orchestrator_run_agent(
@@ -2696,6 +2904,8 @@ async def _orchestrator_run_agent_inner(
     max_turns = int(os.environ.get("AE_MAX_ORCH_TURNS", "50"))
     final_text_parts = []
     tool_log = []
+    # 실제 디스크에 존재 확인된 파일들 — 할루시네이션 방지의 핵심
+    verified_files = []
 
     await emit_queue.put({"type": "agent_start", "taskId": task_id, "role": role, "title": title, "targetFiles": target_files})
 
@@ -2807,6 +3017,18 @@ async def _orchestrator_run_agent_inner(
                             )
                             if not os.path.isfile(_abs):
                                 continue
+                            # 실제 디스크 검증 통과 → verified_files에 추가
+                            try:
+                                _stat = os.stat(_abs)
+                                verified_files.append({
+                                    "path": _rel,
+                                    "absPath": _abs,
+                                    "size": _stat.st_size,
+                                    "tool": tname,
+                                    "model": _actual_model or "",
+                                })
+                            except Exception:
+                                pass
                             # 실제 사용 모델 = (이미지 생성 모델) 또는 (도구별 기본) 또는 (chat 모델)
                             _model_label = _actual_model or _tool_default_model.get(tname) or stream_model
                             _meta_obj = {
@@ -2836,16 +3058,128 @@ async def _orchestrator_run_agent_inner(
         if stream_failed:
             # SSE 실패 — agent_error 이미 emit됨, error 결과로 반환
             return {"taskId": task_id, "role": role, "title": title, "status": "error",
-                    "summary": stream_error_msg or "스트리밍 실패", "tools": tool_log}
-        await emit_queue.put({"type": "agent_done", "taskId": task_id, "summary": final_text[-1200:], "toolCount": len(tool_log)})
-        return {"taskId": task_id, "role": role, "title": title, "status": "done", "summary": final_text, "tools": tool_log}
+                    "summary": stream_error_msg or "스트리밍 실패", "tools": tool_log,
+                    "verifiedFiles": []}
+
+        # 파일 생성 작업이었는지 판정 — primary_tool이나 target_files로 판단
+        primary_tool = (subtask.get("primary_tool") or "").lower()
+        wanted_files = bool(target_files) or primary_tool in (
+            "generate_image", "generate_pdf", "generate_pptx",
+            "generate_xlsx", "generate_docx", "edit_image", "write_file"
+        )
+
+        # 할루시네이션 차단 + 강제 생성:
+        # 파일 생성을 요구받았는데 실제 디스크에 검증된 파일이 0개면 →
+        # 시스템이 직접 fallback 도구를 호출해 파일을 강제 생성한다.
+        if wanted_files and not verified_files:
+            print(f"[Orchestrator] {task_id} 도구 미호출 감지 — 강제 fallback 실행 (primary_tool={primary_tool})")
+            await emit_queue.put({
+                "type": "agent_tool", "taskId": task_id,
+                "tool": "system_fallback", "status": "running",
+                "input": {"reason": "no tool calls — forcing file generation"},
+            })
+            try:
+                _forced = await _force_generate_from_text(
+                    primary_tool=primary_tool,
+                    target_files=target_files,
+                    title=title,
+                    description=description,
+                    final_text=final_text,
+                    project_path=project_path,
+                    aws_profile=aws_profile,
+                    bedrock_user=bedrock_user,
+                )
+                for fpath, finfo in _forced:
+                    verified_files.append(finfo)
+                    tool_log.append({
+                        "name": "system_fallback:" + finfo.get("tool", "?"),
+                        "input": {"forced": True},
+                        "output": fpath,
+                    })
+                    # meta sidecar
+                    try:
+                        _meta_obj = {
+                            "tool": finfo.get("tool", "system_fallback"),
+                            "model": finfo.get("model", "system_fallback"),
+                            "chatModel": stream_model,
+                            "agentId": task_id,
+                            "agentRole": role,
+                            "agentTitle": title,
+                            "createdAt": datetime.utcnow().isoformat() + "Z",
+                            "promptHint": "[forced fallback] " + (description or "")[:180],
+                            "forced": True,
+                        }
+                        with open(finfo["absPath"] + ".meta.json", "w", encoding="utf-8") as _mf:
+                            json.dump(_meta_obj, _mf, ensure_ascii=False, indent=2)
+                    except Exception:
+                        pass
+                await emit_queue.put({
+                    "type": "agent_tool", "taskId": task_id,
+                    "tool": "system_fallback", "status": "done",
+                    "output": f"forced {len(_forced)} files",
+                })
+            except Exception as _fe:
+                err_msg = f"강제 생성 실패: {_fe}"
+                print(f"[Orchestrator] {task_id} {err_msg}")
+                await emit_queue.put({
+                    "type": "agent_error", "taskId": task_id,
+                    "error": err_msg,
+                })
+                return {
+                    "taskId": task_id, "role": role, "title": title,
+                    "status": "error",
+                    "summary": f"{final_text}\n\n[시스템] {err_msg}",
+                    "tools": tool_log, "verifiedFiles": [],
+                }
+
+        # 강제 fallback 후에도 파일이 0개면 정말 실패
+        if wanted_files and not verified_files:
+            err_msg = "파일 생성 실패 — 강제 fallback도 결과 0건"
+            print(f"[Orchestrator] {task_id} {err_msg}")
+            await emit_queue.put({
+                "type": "agent_error", "taskId": task_id,
+                "error": err_msg,
+            })
+            return {
+                "taskId": task_id, "role": role, "title": title,
+                "status": "error",
+                "summary": f"{final_text}\n\n[시스템] {err_msg}",
+                "tools": tool_log, "verifiedFiles": [],
+            }
+
+        await emit_queue.put({
+            "type": "agent_done", "taskId": task_id,
+            "summary": final_text[-1200:],
+            "toolCount": len(tool_log),
+            "verifiedFiles": [vf["path"] for vf in verified_files],
+        })
+        return {
+            "taskId": task_id, "role": role, "title": title,
+            "status": "done", "summary": final_text, "tools": tool_log,
+            "verifiedFiles": verified_files,
+        }
     except Exception as e:
         await emit_queue.put({"type": "agent_error", "taskId": task_id, "error": str(e)})
-        return {"taskId": task_id, "role": role, "title": title, "status": "error", "summary": str(e), "tools": tool_log}
+        return {"taskId": task_id, "role": role, "title": title, "status": "error",
+                "summary": str(e), "tools": tool_log, "verifiedFiles": []}
 
 
 async def _orchestrator_merge(gw, stream_model, user_prompt, agent_results: list, base_system_prompt: str) -> str:
-    """Merger 호출 — 최종 보고서 생성."""
+    """Merger 호출 — 최종 보고서 생성. verifiedFiles 기반으로 거짓 완료 주장 차단."""
+    # 실제로 디스크에 검증된 파일들만 추출
+    all_verified_files = []
+    for r in agent_results:
+        for vf in r.get("verifiedFiles", []) or []:
+            if isinstance(vf, dict) and vf.get("path"):
+                all_verified_files.append({
+                    "agentId": r.get("taskId"),
+                    "agentRole": r.get("role"),
+                    "path": vf["path"],
+                    "size": vf.get("size", 0),
+                    "tool": vf.get("tool", "?"),
+                    "model": vf.get("model", ""),
+                })
+
     summary_input = {
         "userRequest": user_prompt[:2000],
         "agents": [
@@ -2853,9 +3187,11 @@ async def _orchestrator_merge(gw, stream_model, user_prompt, agent_results: list
                 "taskId": r["taskId"], "role": r["role"], "title": r["title"],
                 "status": r["status"], "summary": (r.get("summary") or "")[:1500],
                 "toolCount": len(r.get("tools", [])),
+                "verifiedFileCount": len(r.get("verifiedFiles") or []),
             }
             for r in agent_results
         ],
+        "verifiedFiles": all_verified_files,  # 실제 디스크 검증된 파일만
     }
     sys_prompt = ORCHESTRATOR_MERGER_PROMPT
     if base_system_prompt:
