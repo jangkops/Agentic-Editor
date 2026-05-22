@@ -1981,25 +1981,25 @@ async def run_agent_parallel(request: Request):
             if rag_context:
                 sp = (sp + "\n\n" + rag_context) if sp else rag_context
 
-            # 할루시네이션 방지 — 병렬 모드는 텍스트 응답만 가능 (도구 없음)
+            # 할루시네이션 방지 — 거짓 주장은 막되, 실제 내용은 충실히 작성하도록 균형
             _anti = (
-                "\n\n========== 절대 규칙 ==========\n"
-                "이 환경에는 어떠한 도구도 제공되지 않습니다:\n"
-                "- write_file, generate_image, run_command 등 모든 도구 사용 불가\n"
-                "- function_calls, tool_use, invoke 등의 XML/JSON 태그 출력 금지\n"
-                "- 파일을 실제로 생성/저장/수정할 수 없습니다\n"
+                "\n\n[병렬 모드 응답 가이드]\n"
+                "이 호출에서는 파일 생성/수정 도구를 사용할 수 없습니다. 하지만 사용자가 원하는 결과물의 "
+                "**실제 내용**(코드, 텍스트, 구조, 설계)은 반드시 충실하게 작성해주세요.\n"
                 "\n"
-                "절대 하지 말아야 할 것:\n"
-                "- '파일을 생성했습니다', '저장 완료', '생성 완료', '✅' 등 완료 주장\n"
-                "- '.generated/xxx.pdf 생성됨' 같은 가짜 경로 출력\n"
-                "- '<function_calls>', '<invoke>', '<tool_call>' 등 도구 호출 시뮬레이션\n"
-                "- 도구 실행 결과를 추측하여 출력\n"
+                "올바른 방식 (이렇게 하세요):\n"
+                "- 파일 내용을 마크다운 코드블록으로 직접 출력 (```python ... ```, ```markdown ... ```)\n"
+                "- 표/구조는 마크다운 표 또는 트리 형식으로 표현\n"
+                "- 이미지는 텍스트 설명 또는 ASCII 다이어그램으로 표현\n"
+                "- 충분히 상세하고 완성도 높은 내용 제공 (사용자가 그대로 활용 가능하도록)\n"
                 "\n"
-                "반드시 해야 할 것:\n"
-                "- 파일의 실제 내용(텍스트, 코드, 구조)을 직접 출력\n"
-                "- 마크다운 형식으로 명확히 구조화\n"
-                "- '아래 내용으로 파일을 만들 수 있습니다' 같이 명시적으로 안내\n"
-                "================================\n"
+                "피해야 할 것:\n"
+                "- '파일을 생성했습니다', '저장 완료' 같은 거짓 주장\n"
+                "- <function_calls>, <invoke>, <tool_call> 등 도구 호출 시뮬레이션 태그\n"
+                "- '도구가 없어서 못합니다' 라고만 답하고 끝내기 (반드시 내용은 제공)\n"
+                "\n"
+                "사용자는 당신의 응답을 보고 다음 단계로 '에이전트 모드'를 사용해 실제 파일을 만들 수 있습니다. "
+                "당신의 답변은 그 실제 파일의 내용 원천이 됩니다. 충실하게 작성해주세요."
             )
             sp = (sp + _anti) if sp else _anti.strip()
 
@@ -2095,19 +2095,22 @@ ORCHESTRATOR_PLANNER_PROMPT = """당신은 멀티-에이전트 시스템의 플�
 
 규칙:
 1. 각 subtask는 서로 파일/코드 영역이 겹치지 않아야 합니다 (충돌 방지).
-2. 각 subtask는 하나의 에이전트가 도구(read_file, write_file, list_directory, run_command, search_files)를 사용해 독립적으로 완료할 수 있어야 합니다.
+2. 각 subtask는 하나의 에이전트가 도구(read_file, write_file, list_directory, run_command, search_files, generate_image, generate_pdf, generate_pptx, generate_xlsx, generate_docx)를 사용해 독립적으로 완료할 수 있어야 합니다.
 3. subtask 개수는 요청 내용에 맞게 결정하되, 최대 {max_agents}개를 넘지 마세요.
 4. 사용자가 "수정 1~4" 처럼 명시한 번호/단계가 있으면 그대로 따르세요.
+5. **파일 생성 요청의 경우**: 각 파일 형식(PDF/XLSX/PPTX/DOCX/이미지)마다 **별도 subtask로 분리**하세요. 예: "PDF 1개 + XLSX 1개 + DOCX 1개" 요청 → 3개 subtask.
+6. 각 subtask의 description에는 **반드시 도구를 사용해 실제 파일을 생성/저장**하라고 명시하세요. "텍스트로 출력"이 아니라 "write_file 도구로 .generated/ 폴더에 저장".
+7. target_files에는 결과물 파일의 절대/상대 경로를 명시하세요 (예: ".generated/analysis.pdf").
 
 반드시 아래 JSON 형식으로만 응답하세요 (마크다운 코드블록 없이):
 {{
   "subtasks": [
     {{
       "id": "A",
-      "role": "역할명 (예: Tagger, Builder, Connector, Anchor)",
+      "role": "역할명 (예: PDF Generator, XLSX Builder, Image Creator, Code Refactorer)",
       "title": "간결한 제목",
-      "description": "이 에이전트가 수행해야 할 작업의 상세 지시",
-      "target_files": ["상대경로 or 절대경로", ...]
+      "description": "이 에이전트가 수행해야 할 작업의 상세 지시. 반드시 도구를 사용해 실제 파일을 생성/저장하라고 명시.",
+      "target_files": [".generated/result.pdf", ...]
     }},
     ...
   ]
@@ -2124,30 +2127,56 @@ ORCHESTRATOR_AGENT_PROMPT = """당신은 멀티-에이전트 시스템의 전문
 [지시사항]
 {description}
 
-[규칙]
-- 반드시 제공된 도구(read_file, write_file, list_directory, run_command, search_files)를 사용하여 실제로 작업을 수행하세요.
-- 대상 파일 외의 파일은 수정하지 마세요.
-- 작업이 끝나면 "[완료] <한 줄 요약>" 형태로 마무리하세요.
-- 다른 에이전트의 작업 영역을 침범하지 마세요.
+[작업 규칙 — 매우 중요]
+1. **반드시 도구를 사용하세요**. 텍스트로만 답변하지 마세요. 다음 도구들을 적극 활용:
+   - read_file: 기존 파일 내용 확인
+   - list_directory: 폴더 구조 파악
+   - search_files: 코드/문서 검색
+   - run_command: 셸 명령 실행 (Python 스크립트 등)
+   - write_file: 텍스트/코드 파일 작성
+   - generate_image: 이미지 생성 (PNG, .generated/에 자동 저장)
+   - generate_pdf: PDF 생성 (.generated/에 자동 저장)
+   - generate_pptx: PPTX 생성 (.generated/에 자동 저장)
+
+2. **파일 생성 작업의 표준 절차**:
+   a. 필요시 list_directory/read_file로 컨텍스트 수집
+   b. 적절한 generate_* 또는 write_file 도구로 실제 파일 생성
+   c. 생성된 파일 경로를 응답에 포함
+   d. **반드시 .generated/ 폴더에 저장** (없으면 run_command로 mkdir)
+
+3. **대상 파일 외의 파일은 수정하지 마세요**.
+
+4. **다른 에이전트의 작업 영역을 침범하지 마세요**.
+
+5. 작업이 끝나면 "[완료] <생성된 파일 경로 + 한 줄 요약>" 형태로 마무리하세요.
+
+6. 도구 호출 없이 텍스트만 출력하면 작업이 실패한 것으로 간주됩니다. 반드시 도구를 사용해 실제 결과물을 만들어내세요.
 """
 
 ORCHESTRATOR_MERGER_PROMPT = """당신은 멀티-에이전트 결과를 통합하는 리뷰어입니다.
 아래 각 에이전트의 작업 결과를 검토하고:
-1. 성공/실패 여부를 판정
+1. 성공/실패 여부를 판정 (실제 파일이 생성되었는지 toolCount > 0 인지 확인)
 2. 충돌이나 누락이 있으면 지적
 3. 사용자에게 전달할 최종 요약 보고서를 마크다운으로 작성
 
 보고서 형식:
-## ✅ 최종 통합 결과
-| 에이전트 | 역할 | 상태 | 요약 |
-|---------|------|------|------|
+## 최종 통합 결과
+| 에이전트 | 역할 | 상태 | 생성된 파일 | 도구 사용 횟수 |
+|---------|------|------|-------------|--------------|
+...
+
+### 생성된 파일 목록
+- `.generated/file1.pdf` — 설명
+- `.generated/file2.xlsx` — 설명
 ...
 
 ### 세부 사항
-- (각 에이전트별 핵심 변경점)
+- (각 에이전트별 핵심 작업 내역)
 
-### ⚠️ 주의/후속 작업
+### 주의/후속 작업
 - (있다면)
+
+도구를 사용하지 않고 텍스트만 출력한 에이전트는 "실패"로 표시하세요.
 """
 
 

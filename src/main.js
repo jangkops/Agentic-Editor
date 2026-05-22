@@ -1370,6 +1370,164 @@ async function runSingle(prompt) {
   await runAgentWorkflow(prompt);
 }
 
+// 멀티-에이전트 오케스트레이터 호출 (Planner → N agents with tools → Merger)
+async function runOrchestrated(prompt) {
+  if (!prompt) return;
+  state.isStreaming = true;
+  state._streamStartTime = Date.now();
+  state._abortController = new AbortController();
+
+  // 사용자 메시지로 prompt 등록 (이미 sendMessage에서 push했으면 중복 방지)
+  const lastMsg = state.messages[state.messages.length - 1];
+  const _alreadyPushed = lastMsg && lastMsg.role === 'user' && lastMsg.content === prompt;
+  if (!_alreadyPushed) {
+    state.messages.push({ role: 'user', content: prompt });
+  }
+  state.messages.push({
+    role: 'system',
+    content: '멀티-에이전트 오케스트레이션 시작 — Planner가 작업을 분해하고 N개 에이전트가 도구로 실행합니다.',
+  });
+  renderMessages();
+
+  // 가용 모델 중 가장 강한 worker 선택 (sonnet > opus > haiku 우선)
+  const allChat = (typeof ALL_MODELS !== 'undefined') ? ALL_MODELS.filter(m => m.capabilities && m.capabilities.chat) : [];
+  const _findByPrefix = (pfx) => allChat.find(m => (m.id || '').toLowerCase().includes(pfx))?.id;
+  const workerModel = _findByPrefix('claude-sonnet-4') || _findByPrefix('claude-opus-4') || _findByPrefix('claude-sonnet') || _findByPrefix('claude') || (allChat[0]?.id);
+  const plannerModel = _findByPrefix('claude-opus-4') || workerModel;
+
+  const agentStates = new Map(); // taskId → {role, title, status, toolCount}
+  let mergeReport = '';
+
+  try {
+    const resp = await fetch(`${apiBase()}/api/agents/run-orchestrated`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(_apiBody({
+        prompt,
+        plannerModel,
+        workerModel,
+        mergerModel: plannerModel,
+        maxAgents: 5,
+      })),
+      signal: state._abortController.signal,
+    });
+    if (!resp.ok) throw new Error(`서버 오류: ${resp.status}`);
+
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+
+    while (true) {
+      const { done, value } = await _readWithIdleTimeout(reader);
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const events = buf.split('\n\n'); buf = events.pop() || '';
+      for (const event of events) {
+        const trimmed = event.trim();
+        if (!trimmed || !trimmed.startsWith('data: ')) continue;
+        const d = trimmed.slice(6);
+        if (d === '[DONE]') continue;
+        try {
+          const ev = JSON.parse(d);
+          if (ev.heartbeat) continue;
+
+          if (ev.type === 'plan') {
+            const subtasks = ev.subtasks || [];
+            state.messages.push({
+              role: 'system',
+              content: `작업 분해 완료 — ${subtasks.length}개 에이전트 할당:\n` +
+                subtasks.map((s, i) => `  ${i+1}. [${s.id}] ${s.role}: ${s.title}`).join('\n'),
+            });
+            renderMessages();
+          } else if (ev.type === 'agent_start') {
+            agentStates.set(ev.taskId, { role: ev.role, title: ev.title, status: 'running', toolCount: 0 });
+            addLiveLog('system', `[${ev.taskId}] ${ev.role} 시작: ${ev.title}`);
+          } else if (ev.type === 'agent_tool') {
+            addLiveLog('tool', `[${ev.taskId}] ${ev.tool} ${ev.status}`, ev.input ? JSON.stringify(ev.input).substring(0, 100) : '');
+            const a = agentStates.get(ev.taskId);
+            if (a && ev.status === 'done') a.toolCount++;
+          } else if (ev.type === 'agent_done') {
+            const a = agentStates.get(ev.taskId);
+            if (a) { a.status = 'done'; a.toolCount = ev.toolCount || a.toolCount; }
+            addLiveLog('system', `[${ev.taskId}] 완료 — 도구 ${ev.toolCount || 0}회 사용`);
+          } else if (ev.type === 'agent_error') {
+            const a = agentStates.get(ev.taskId);
+            if (a) a.status = 'error';
+            addLiveLog('error', `[${ev.taskId}] 오류: ${ev.error || ''}`);
+          } else if (ev.type === 'merge') {
+            mergeReport = ev.report || ev.text || '';
+            // 최종 통합 보고서를 assistant 메시지로
+            state.messages.push({ role: 'assistant', content: mergeReport });
+            renderMessages();
+          } else if (ev.type === 'error') {
+            state.messages.push({ role: 'system', content: `오케스트레이션 오류: ${ev.message || ev.error || ''}` });
+            renderMessages();
+          }
+        } catch (_e) { /* parse fail — skip */ }
+      }
+    }
+
+    // 완료 요약
+    const doneCount = [...agentStates.values()].filter(a => a.status === 'done').length;
+    const errCount = [...agentStates.values()].filter(a => a.status === 'error').length;
+    const noToolCount = [...agentStates.values()].filter(a => a.status === 'done' && a.toolCount === 0).length;
+    const elapsed = Math.floor((Date.now() - (state._streamStartTime || Date.now())) / 1000);
+    state.messages.push({
+      role: 'system',
+      content: `오케스트레이션 완료 — ${doneCount}개 성공, ${errCount}개 실패` +
+        (noToolCount > 0 ? `, ${noToolCount}개는 도구 미사용 (실제 파일 생성 안 됨)` : '') +
+        ` (${fmtElapsed(elapsed)})`,
+    });
+
+    // 후속 추천 카드 — 도구를 사용하지 않은 에이전트가 있으면 재시도 권유
+    if (noToolCount > 0 && doneCount > 0) {
+      state.messages.push({
+        role: 'system',
+        _isRecommendCard: true,
+        _recommendData: {
+          title: '일부 에이전트가 파일을 생성하지 않았습니다',
+          reason: `${noToolCount}개 에이전트가 도구를 사용하지 않고 텍스트만 출력했습니다. 더 강한 모델로 재시도하면 실제 파일이 생성될 가능성이 높습니다.`,
+          actions: [
+            { key: 'retry-stronger', label: '더 강한 모델로 재시도', primary: true },
+            { key: 'view-generated', label: '.generated 폴더 확인' },
+          ],
+          hasHallucination: true,
+          originalPrompt: prompt,
+          doneResults: [],
+        },
+        content: '[추천] 일부 에이전트 재시도',
+      });
+    } else if (doneCount > 0) {
+      state.messages.push({
+        role: 'system',
+        _isRecommendCard: true,
+        _recommendData: {
+          title: '작업 완료 — 다음 단계',
+          reason: `${doneCount}개 에이전트가 작업을 완료했습니다. 결과를 검토하거나 추가 작업을 진행할 수 있습니다.`,
+          actions: [
+            { key: 'view-generated', label: '.generated 폴더 확인', primary: true },
+            { key: 'refine', label: '추가 요청' },
+          ],
+          hasHallucination: false,
+          originalPrompt: prompt,
+          doneResults: [],
+        },
+        content: '[추천] 작업 완료',
+      });
+    }
+    renderMessages();
+  } catch (e) {
+    const errMsg = e.name === 'AbortError' ? '사용자가 취소했습니다.' : e.message;
+    state.messages.push({ role: 'system', content: `오케스트레이션 오류: ${errMsg}` });
+    addLiveLog('error', `오케스트레이션 실패: ${errMsg}`);
+    renderMessages();
+  }
+
+  state.isStreaming = false;
+  _releaseUserPin && _releaseUserPin();
+  saveConversation();
+}
+
 // ===== 파이프라인 실행 — 여러 모델이 단계별로 순차 작업 =====
 async function runPipeline(prompt, stages) {
   if (!Array.isArray(stages) || !stages.length) return runSingle(prompt);
@@ -1996,6 +2154,36 @@ function _renderRecommendCardMessage(msg) {
   card.querySelector('[data-action="consensus"]')?.addEventListener('click', () => {
     cleanup();
     if (typeof runConsensus === 'function') runConsensus();
+  });
+
+  // 더 강한 모델로 오케스트레이터 재시도
+  card.querySelector('[data-action="retry-stronger"]')?.addEventListener('click', () => {
+    cleanup();
+    const enrichedPrompt = `${data.originalPrompt}\n\n[중요] 이전 시도에서 일부 에이전트가 도구를 사용하지 않아 실제 파일이 생성되지 않았습니다. 이번에는 반드시 generate_pdf, generate_image, generate_pptx, write_file 등의 도구를 적극 사용해서 실제 파일을 .generated/ 폴더에 만들어주세요.`;
+    runOrchestrated(enrichedPrompt);
+  });
+
+  // .generated 폴더 확인 — 파일 탐색기에서 해당 경로로 이동
+  card.querySelector('[data-action="view-generated"]')?.addEventListener('click', () => {
+    cleanup();
+    const folderPath = state.folderPath ? `${state.folderPath}/.generated` : '.generated';
+    addLiveLog('system', `생성 파일 폴더 확인: ${folderPath}`);
+    // 파일 탐색기 새로고침 트리거
+    if (typeof loadFileTree === 'function' && state.folderPath) {
+      loadFileTree(state.folderPath);
+    }
+    // 사이드바의 .generated 폴더 패널이 있으면 새로고침
+    document.dispatchEvent(new CustomEvent('generated-folder:refresh'));
+  });
+
+  // 추가 요청 — 입력창에 포커스
+  card.querySelector('[data-action="refine"]')?.addEventListener('click', () => {
+    cleanup();
+    const input = document.getElementById('chat-input');
+    if (input) {
+      input.placeholder = '이어서 무엇을 도와드릴까요?';
+      input.focus();
+    }
   });
 
   return card;
