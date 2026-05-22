@@ -2207,6 +2207,7 @@ async def _orchestrator_plan(gw, stream_model, user_prompt: str, system_prompt: 
 async def _orchestrator_run_agent(
     gw, stream_model: str, subtask: dict, project_path: str,
     base_system_prompt: str, emit_queue: asyncio.Queue,
+    aws_profile: str = "", bedrock_user: str = "", is_remote: bool = False,
 ):
     """하나의 하위 에이전트 실행 — 도구 루프 포함."""
     task_id = subtask.get("id", "?")
@@ -2420,7 +2421,8 @@ async def run_agent_orchestrated(request: Request):
             # 2) Parallel Agents
             tasks = [
                 asyncio.create_task(
-                    _orchestrator_run_agent(gw, worker_id, st, project_path, base_sys, emit_queue)
+                    _orchestrator_run_agent(gw, worker_id, st, project_path, base_sys, emit_queue,
+                                             aws_profile=aws_profile, bedrock_user=bedrock_user, is_remote=is_remote)
                 )
                 for st in subtasks
             ]
