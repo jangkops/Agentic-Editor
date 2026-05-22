@@ -593,14 +593,104 @@ async def _tool_generate_image(tool_input: dict, project_path: str, aws_profile:
     return json.dumps(payload)
 
 
+def _normalize_doc_input(tool_input: dict, default_kind: str = "sections"):
+    """모델이 도구 input의 shape을 헷갈려서 보내도 정상 형태로 정규화.
+
+    PDF는 sections, PPTX는 slides, XLSX는 sheets, DOCX는 sections를 기대하지만
+    LLM이 종종 다른 키 이름이나 잘못된 구조로 보냄. 이 함수가 유연하게 받아
+    공통 형태로 변환한다.
+
+    Args:
+        tool_input: 모델이 보낸 raw input dict
+        default_kind: 'sections' | 'slides' | 'sheets'
+
+    Returns:
+        (title: str, items: list[dict])
+        items의 형태:
+        - sections: [{heading, body, bullets, level?}]
+        - slides:   [{title, bullets, body?}]
+        - sheets:   [{name, headers, rows}]
+    """
+    if not isinstance(tool_input, dict):
+        return "", []
+
+    title = (
+        tool_input.get("title")
+        or tool_input.get("name")
+        or tool_input.get("heading")
+        or tool_input.get("file_title")
+        or "Untitled"
+    )
+    title = str(title).strip()
+
+    # 후보 키 — LLM이 다양한 이름으로 보낼 수 있음
+    candidate_keys = ["sections", "slides", "sheets", "pages", "items",
+                      "content", "data", "body", "rows", default_kind]
+    raw_items = None
+    for k in candidate_keys:
+        v = tool_input.get(k)
+        if isinstance(v, list) and v:
+            raw_items = v
+            break
+
+    # 단일 dict로 보낸 경우 (예: {"section": {...}})
+    if raw_items is None:
+        for k in ("section", "slide", "sheet", "page"):
+            v = tool_input.get(k)
+            if isinstance(v, dict):
+                raw_items = [v]
+                break
+
+    # 문자열로 본문만 보낸 경우 — 단일 섹션으로 wrap
+    if raw_items is None:
+        body = tool_input.get("body") or tool_input.get("text") or tool_input.get("description")
+        if body:
+            return title, [{"heading": title, "body": str(body)}]
+        return title, []
+
+    # 각 item 정규화
+    out = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            # 문자열 item — 본문으로 처리
+            out.append({"heading": "", "body": str(item)})
+            continue
+        n = dict(item)  # shallow copy
+        # Common: heading aliases
+        if "heading" not in n:
+            n["heading"] = n.get("title") or n.get("name") or n.get("header") or ""
+        # Common: body aliases
+        if "body" not in n:
+            n["body"] = n.get("content") or n.get("text") or n.get("description") or ""
+        # Common: bullets aliases
+        if "bullets" not in n:
+            n["bullets"] = n.get("points") or n.get("items") or n.get("list") or []
+        if not isinstance(n.get("bullets"), list):
+            n["bullets"] = []
+        # Slides: ensure title (PPTX uses 'title' as slide title)
+        if default_kind == "slides":
+            n["title"] = n.get("title") or n.get("heading") or ""
+        # Sheets: ensure name/headers/rows
+        if default_kind == "sheets":
+            n["name"] = n.get("name") or n.get("title") or n.get("sheet") or "Sheet1"
+            n["headers"] = n.get("headers") or n.get("columns") or n.get("header") or []
+            if not isinstance(n["headers"], list):
+                n["headers"] = []
+            n["rows"] = n.get("rows") or n.get("data") or []
+            if not isinstance(n["rows"], list):
+                n["rows"] = []
+        out.append(n)
+
+    return title, out
+
+
 async def _tool_generate_pdf(tool_input: dict, project_path: str) -> str:
-    """Generate a PDF document using reportlab."""
-    title = (tool_input.get("title") or "").strip()
-    sections = tool_input.get("sections")
+    """Generate a PDF document using reportlab. Accepts lenient input shapes."""
+    title, sections = _normalize_doc_input(tool_input, default_kind="sections")
 
     if not title:
         return json.dumps({"error": "title is required"})
-    if not sections or not isinstance(sections, list):
+    if not sections:
         return json.dumps({"error": "sections is required"})
 
     try:
@@ -661,13 +751,12 @@ async def _tool_generate_pdf(tool_input: dict, project_path: str) -> str:
 
 
 async def _tool_generate_pptx(tool_input: dict, project_path: str, aws_profile: str = '', bedrock_user: str = '') -> str:  # [patched-credentials]
-    """Generate a PowerPoint presentation using python-pptx."""
-    title = (tool_input.get("title") or "").strip()
-    slides_data = tool_input.get("slides")
+    """Generate a PowerPoint presentation using python-pptx. Accepts lenient input shapes."""
+    title, slides_data = _normalize_doc_input(tool_input, default_kind="slides")
 
     if not title:
         return json.dumps({"error": "title is required"})
-    if not slides_data or not isinstance(slides_data, list):
+    if not slides_data:
         return json.dumps({"error": "slides is required"})
 
     try:
@@ -754,13 +843,12 @@ async def _tool_generate_pptx(tool_input: dict, project_path: str, aws_profile: 
 
 
 async def _tool_generate_xlsx(tool_input: dict, project_path: str) -> str:
-    """Generate an Excel workbook (.xlsx) using openpyxl."""
-    title = (tool_input.get("title") or "").strip()
-    sheets_data = tool_input.get("sheets")
+    """Generate an Excel workbook (.xlsx) using openpyxl. Accepts lenient input shapes."""
+    title, sheets_data = _normalize_doc_input(tool_input, default_kind="sheets")
 
     if not title:
         return json.dumps({"error": "title is required"})
-    if not sheets_data or not isinstance(sheets_data, list):
+    if not sheets_data:
         return json.dumps({"error": "sheets is required"})
 
     try:
@@ -837,13 +925,12 @@ async def _tool_generate_xlsx(tool_input: dict, project_path: str) -> str:
 
 
 async def _tool_generate_docx(tool_input: dict, project_path: str) -> str:
-    """Generate a Word document (.docx) using python-docx."""
-    title = (tool_input.get("title") or "").strip()
-    sections = tool_input.get("sections")
+    """Generate a Word document (.docx) using python-docx. Accepts lenient input shapes."""
+    title, sections = _normalize_doc_input(tool_input, default_kind="sections")
 
     if not title:
         return json.dumps({"error": "title is required"})
-    if not sections or not isinstance(sections, list):
+    if not sections:
         return json.dumps({"error": "sections is required"})
 
     try:

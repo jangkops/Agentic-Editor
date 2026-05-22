@@ -134,7 +134,13 @@ function registerTerminalHandlers(processManager) {
         }
         // Remote active but bridge unavailable — fall through to local.
       }
-      return processManager.createTerminal(terminalId, legacyMainWindow);
+      return processManager.createTerminal(terminalId, legacyMainWindow, {
+        cols: opts.cols,
+        rows: opts.rows,
+        cwd: opts.cwd,
+        shell: opts.shell,
+        env: opts.env,
+      });
     } catch (error) {
       console.error(`[terminal:create] Error for ${terminalId}:`, error.message);
       return false;

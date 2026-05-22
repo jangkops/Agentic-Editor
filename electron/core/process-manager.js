@@ -62,7 +62,7 @@ class ProcessManager {
           name: 'xterm-256color',
           cols: opts.cols || 120, rows: opts.rows || 30,
           cwd,
-          env: { ...process.env, TERM: 'xterm-256color' },
+          env: { ...process.env, TERM: 'xterm-256color', ...(opts.env || {}) },
         });
         this._terminals.set(id, { type: 'pty', proc: term });
         term.onData((data) => safeSend('terminal:data', { id, data }));
@@ -72,7 +72,11 @@ class ProcessManager {
       }
 
       console.log(`[PTY] node-pty 없음, spawn fallback: ${shell}`);
-      const proc = spawn(shell, [], { cwd, env: { ...process.env, TERM: 'dumb' }, stdio: ['pipe', 'pipe', 'pipe'] });
+      const proc = spawn(shell, [], {
+        cwd,
+        env: { ...process.env, TERM: 'dumb', ...(opts.env || {}) },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
       this._terminals.set(id, { type: 'spawn', proc });
       proc.stdout.on('data', (d) => safeSend('terminal:data', { id, data: d.toString() }));
       proc.stderr.on('data', (d) => safeSend('terminal:data', { id, data: d.toString() }));

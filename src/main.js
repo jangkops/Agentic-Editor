@@ -1017,6 +1017,40 @@ function initChat() {
   const input=document.getElementById('chat-input'),sendBtn=document.getElementById('send-btn');
   input.onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();sendMessage();}};
   input.oninput=()=>{input.style.height='auto';input.style.height=Math.min(input.scrollHeight,120)+'px';};
+
+  // 이미지 클립보드 paste 지원 — 캡처/복사한 이미지를 채팅에 직접 붙여넣기
+  input.addEventListener('paste', async (e) => {
+    const items = (e.clipboardData || e.originalEvent?.clipboardData)?.items;
+    if (!items) return;
+    let pastedImage = false;
+    for (const item of items) {
+      if (item.type && item.type.startsWith('image/')) {
+        const blob = item.getAsFile();
+        if (!blob) continue;
+        pastedImage = true;
+        e.preventDefault();
+        const ext = (item.type.split('/')[1] || 'png').toLowerCase();
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          const dataUrl = ev.target.result;
+          const fname = `pasted-${Date.now()}.${ext}`;
+          state.attachedFiles.push({
+            name: fname,
+            type: item.type,
+            ext: ext === 'jpeg' ? 'jpg' : ext,
+            data: dataUrl,
+            size: blob.size,
+            rawBase64: dataUrl.split(',')[1] || '',
+          });
+          renderAttachedFiles();
+          addLiveLog('system', `이미지 붙여넣기 — ${fname} (${Math.round(blob.size / 1024)} KB)`);
+        };
+        reader.readAsDataURL(blob);
+      }
+    }
+    if (pastedImage) return;  // 이미지면 텍스트 paste는 막음
+  });
+
   sendBtn.onclick = () => {
     if (state.isStreaming) {
       // 취소
@@ -1055,8 +1089,67 @@ function initChat() {
 }
 function renderAttachedFiles() {
   const c=document.getElementById('attached-files-area');
-  c.innerHTML=state.attachedFiles.map((f,i)=>`<div class="attached-file"><span>${f.name} (${(f.size/1024).toFixed(0)}KB)</span><span class="remove" data-idx="${i}">✕</span></div>`).join('');
-  c.querySelectorAll('.remove').forEach(el=>el.onclick=()=>{state.attachedFiles.splice(+el.dataset.idx,1);renderAttachedFiles();});
+  c.innerHTML=state.attachedFiles.map((f,i)=>{
+    const isImg = ['png','jpg','jpeg','webp','gif'].includes((f.ext || '').toLowerCase());
+    if (isImg && f.data) {
+      return `<div class="attached-file attached-image" data-idx="${i}" style="cursor:zoom-in;display:inline-flex;align-items:center;gap:6px;padding:4px 8px;background:var(--color-bg-tertiary);border:1px solid var(--color-border);border-radius:4px">
+        <img src="${esc(f.data)}" alt="${esc(f.name)}" data-zoom-idx="${i}" style="width:32px;height:32px;object-fit:cover;border-radius:3px;cursor:zoom-in" />
+        <span style="font-size:11px">${esc(f.name)} (${(f.size/1024).toFixed(0)}KB)</span>
+        <span class="remove" data-idx="${i}" style="cursor:pointer;color:var(--color-text-muted)">✕</span>
+      </div>`;
+    }
+    return `<div class="attached-file"><span>${esc(f.name)} (${(f.size/1024).toFixed(0)}KB)</span><span class="remove" data-idx="${i}">✕</span></div>`;
+  }).join('');
+  c.querySelectorAll('.remove').forEach(el=>el.onclick=(ev)=>{ev.stopPropagation();state.attachedFiles.splice(+el.dataset.idx,1);renderAttachedFiles();});
+  // 첨부 이미지 클릭 → 확대 모달
+  c.querySelectorAll('img[data-zoom-idx]').forEach(img => {
+    img.onclick = (ev) => {
+      ev.stopPropagation();
+      const idx = +img.dataset.zoomIdx;
+      const f = state.attachedFiles[idx];
+      if (f && f.data) _showImageZoomModal(f.data, f.name);
+    };
+  });
+}
+
+// 이미지 확대 모달 — 휠 줌, +/− 버튼, ESC/오버레이로 닫기
+function _showImageZoomModal(src, name) {
+  const existing = document.getElementById('image-zoom-modal');
+  if (existing) existing.remove();
+  const m = document.createElement('div');
+  m.id = 'image-zoom-modal';
+  m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:10000;display:flex;align-items:center;justify-content:center;cursor:zoom-out';
+  m.innerHTML = `
+    <div style="position:absolute;top:16px;left:16px;color:#ccc;font-size:12px;font-family:var(--font-mono);background:rgba(0,0,0,0.5);padding:6px 10px;border-radius:4px">${esc(name || 'image')}</div>
+    <button id="izm-close" style="position:absolute;top:16px;right:16px;width:32px;height:32px;background:rgba(0,0,0,0.6);border:1px solid #555;color:#ccc;border-radius:4px;cursor:pointer;font-size:18px;line-height:1">✕</button>
+    <div style="position:absolute;bottom:24px;left:50%;transform:translateX(-50%);display:flex;gap:8px;background:rgba(0,0,0,0.7);padding:6px 10px;border-radius:6px">
+      <button id="izm-out" style="width:32px;height:32px;background:transparent;border:1px solid #555;color:#ccc;border-radius:4px;cursor:pointer;font-size:16px">−</button>
+      <button id="izm-reset" style="height:32px;padding:0 12px;background:transparent;border:1px solid #555;color:#ccc;border-radius:4px;cursor:pointer;font-size:11px">100%</button>
+      <button id="izm-in" style="width:32px;height:32px;background:transparent;border:1px solid #555;color:#ccc;border-radius:4px;cursor:pointer;font-size:16px">+</button>
+    </div>
+    <img id="izm-img" src="${esc(src)}" style="max-width:90vw;max-height:90vh;object-fit:contain;transition:transform 120ms ease;cursor:grab" />
+  `;
+  document.body.appendChild(m);
+  let scale = 1;
+  const img = m.querySelector('#izm-img');
+  const apply = () => { img.style.transform = `scale(${scale})`; m.querySelector('#izm-reset').textContent = `${Math.round(scale * 100)}%`; };
+  const close = () => m.remove();
+  m.onclick = (e) => { if (e.target === m) close(); };
+  img.onclick = (e) => e.stopPropagation();
+  m.querySelector('#izm-close').onclick = (e) => { e.stopPropagation(); close(); };
+  m.querySelector('#izm-in').onclick = (e) => { e.stopPropagation(); scale = Math.min(8, scale * 1.25); apply(); };
+  m.querySelector('#izm-out').onclick = (e) => { e.stopPropagation(); scale = Math.max(0.2, scale / 1.25); apply(); };
+  m.querySelector('#izm-reset').onclick = (e) => { e.stopPropagation(); scale = 1; apply(); };
+  // 휠 줌
+  m.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    if (e.deltaY < 0) scale = Math.min(8, scale * 1.1);
+    else scale = Math.max(0.2, scale / 1.1);
+    apply();
+  }, { passive: false });
+  // ESC
+  const onKey = (e) => { if (e.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); } };
+  document.addEventListener('keydown', onKey);
 }
 async function sendMessage() {
   const input=document.getElementById('chat-input');const text=input.value.trim();
@@ -4546,24 +4639,20 @@ function addTerminal() {
   state.terminals.push({ id, output: '' });
   state.activeTerminalIdx = state.terminals.length - 1;
   if (window.electronAPI?.terminalCreate) {
-    // Pass cwd when remote is active so the remote PTY opens in the workspace.
     const remote = (typeof window !== 'undefined' && window.__remoteStatus) || null;
     const isRemote = remote && remote.state === 'connected';
-    const opts = isRemote ? { cwd: state.folderPath || undefined } : undefined;
-    window.electronAPI.terminalCreate(id, opts).then((result) => {
-      if (result && (result.success || result.ok)) {
-        // PTY 준비 후 초기 명령 전송 (2초 대기 — 셸 초기화 완료 후)
-        // Remote 세션일 경우 cwd는 이미 bridge가 설정했으므로 cd 생략
-        setTimeout(() => {
-          if (window.electronAPI?.terminalWrite) {
-            if (!isRemote) {
-              const profile = state.settings?.awsProfile || '';
-              if (profile) window.electronAPI.terminalWrite(id, `export AWS_PROFILE=${profile}\n`);
-              if (state.folderPath) window.electronAPI.terminalWrite(id, `cd "${state.folderPath}"\n`);
-            }
-          }
-        }, 2000);
-      }
+    // PTY를 처음부터 올바른 cwd로 spawn — cd 명령 echo로 인한 깜빡임 제거
+    const profile = state.settings?.awsProfile || '';
+    const opts = {
+      cwd: state.folderPath || undefined,
+    };
+    if (!isRemote && profile) {
+      // 로컬 모드 — env로 AWS_PROFILE 주입 (export 명령 echo 없음)
+      // process-manager는 env를 받아 spawn 시 적용
+      opts.env = { AWS_PROFILE: profile };
+    }
+    window.electronAPI.terminalCreate(id, opts).then(() => {
+      // PTY가 cwd로 시작했으므로 추가 명령 불필요 — 사용자에게 깨끗한 프롬프트만 표시됨
     });
   }
   renderTerminalTabs(); renderTerminalContent();
