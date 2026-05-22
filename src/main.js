@@ -1054,6 +1054,7 @@ function initChat() {
   sendBtn.onclick = () => {
     if (state.isStreaming) {
       // 취소
+      state._userInitiatedAbort = true;  // 진짜 사용자 취소 vs auto-timeout 구분
       if (state._abortController) { state._abortController.abort(); state._abortController = null; }
       state.isStreaming = false;
       _releaseUserPin();
@@ -1554,11 +1555,14 @@ async function runOrchestrated(prompt) {
     const dec = new TextDecoder();
     let buf = '';
 
-    // 무한루프 방지를 위한 wall-clock timeout (8분)
-    const HARD_TIMEOUT_MS = 8 * 60 * 1000;
+    // 무한루프 방지를 위한 wall-clock timeout (기본 15분, env로 조정 가능)
+    // 사용자가 명시적으로 취소하지 않은 자동 timeout과 구분
+    const HARD_TIMEOUT_MS = (typeof window.AE_ORCH_TIMEOUT_MIN === 'number' ? window.AE_ORCH_TIMEOUT_MIN : 15) * 60 * 1000;
+    let _autoAbortReason = '';  // 자동 취소 사유 추적 (wall-clock vs user)
     const hardTimer = setTimeout(() => {
+      _autoAbortReason = 'wall-clock';
       try { state._abortController?.abort(); } catch (_) {}
-      addLiveLog('error', `오케스트레이션 wall-clock timeout (8분) — 강제 중단`);
+      addLiveLog('error', `오케스트레이션 wall-clock timeout (${HARD_TIMEOUT_MS / 60000}분) — 강제 중단`);
     }, HARD_TIMEOUT_MS);
 
     try {
@@ -1760,9 +1764,76 @@ async function runOrchestrated(prompt) {
     }
     renderMessages();
   } catch (e) {
-    const errMsg = e.name === 'AbortError' ? '사용자가 취소했습니다.' : e.message;
+    // AbortError 사유 정확히 구분 — 사용자 vs wall-clock vs 네트워크 문제
+    let errMsg;
+    let abortReason = '';
+    if (e.name === 'AbortError') {
+      if (state._userInitiatedAbort) {
+        errMsg = '사용자가 취소했습니다.';
+        abortReason = 'user';
+      } else if (typeof _autoAbortReason !== 'undefined' && _autoAbortReason === 'wall-clock') {
+        errMsg = '오케스트레이션 시간 초과 (8분) — 자동 중단됨';
+        abortReason = 'timeout';
+      } else {
+        // AbortController가 abort됐지만 사유 불명 — 네트워크 끊김 등
+        errMsg = '연결이 끊겼습니다. 재시도 가능합니다.';
+        abortReason = 'network';
+      }
+    } else {
+      errMsg = e.message || '알 수 없는 오류';
+      abortReason = 'error';
+    }
+    state._userInitiatedAbort = false;  // 다음 호출 위해 리셋
+
     state.messages = state.messages.filter(m => !m._thinking);
-    state.messages.push({ role: 'system', content: `오케스트레이션 오류: ${errMsg}` });
+
+    // === 체크포인트 저장 — 부분 성공한 에이전트 결과 보존 ===
+    // 완료된 verifiedFiles와 doneCount/agentStates를 cache에 저장 → 재시도 시 활용
+    const partialDone = [...agentStates.values()].filter(a => a.status === 'done');
+    const partialFiles = [];
+    for (const [, a] of agentStates) {
+      if (a.status === 'done' && a.toolCount > 0) {
+        partialFiles.push({ taskId: a.taskId || '?', role: a.role, title: a.title });
+      }
+    }
+    state._lastOrchestrationCheckpoint = {
+      originalPrompt: prompt,
+      timestamp: Date.now(),
+      doneAgents: partialDone.length,
+      totalAgents: agentStates.size,
+      abortReason,
+    };
+
+    const summary = abortReason === 'timeout' || abortReason === 'network'
+      ? `오케스트레이션 ${errMsg} — 완료된 ${partialDone.length}/${agentStates.size}개 에이전트 결과는 보존됨. "이어서 생성"으로 미완료 작업만 재실행 가능.`
+      : `오케스트레이션 오류: ${errMsg}`;
+    state.messages.push({ role: 'system', content: summary });
+
+    // 자동 중단인 경우 — 이어서 생성 카드 제공
+    if ((abortReason === 'timeout' || abortReason === 'network') && agentStates.size > 0) {
+      const incompleteIds = [];
+      for (const [tid, a] of agentStates) {
+        if (a.status !== 'done') incompleteIds.push(tid);
+      }
+      state.messages.push({
+        role: 'system',
+        _isRecommendCard: true,
+        _recommendData: {
+          title: '이어서 생성',
+          reason: `${partialDone.length}개 에이전트는 완료됐지만 ${incompleteIds.length}개가 미완료입니다. 미완료 작업만 다시 실행하면 됩니다.`,
+          actions: [
+            { key: 'resume-orchestrate', label: '미완료 작업만 이어서 실행', primary: true },
+            { key: 'retry-orchestrate', label: '전체 재시도' },
+          ],
+          hasHallucination: false,
+          originalPrompt: prompt,
+          incompleteIds,
+          doneResults: [],
+        },
+        content: '[추천] 이어서 생성',
+      });
+    }
+
     addLiveLog('error', `오케스트레이션 실패: ${errMsg}`);
     renderMessages();
   }
@@ -2485,6 +2556,16 @@ function _renderRecommendCardMessage(msg) {
   card.querySelector('[data-action="retry-orchestrate"]')?.addEventListener('click', () => {
     cleanup();
     runOrchestrated(data.originalPrompt);
+  });
+
+  // 미완료 작업만 이어서 실행 — 체크포인트 활용
+  card.querySelector('[data-action="resume-orchestrate"]')?.addEventListener('click', () => {
+    cleanup();
+    const incomplete = (data.incompleteIds && data.incompleteIds.length) ? data.incompleteIds : [];
+    const hint = incomplete.length
+      ? `\n\n[이어서 생성] 이전 시도에서 완료된 에이전트 ${(state._lastOrchestrationCheckpoint?.doneAgents || 0)}개의 결과는 이미 .generated/에 저장되어 있습니다. 미완료 ${incomplete.length}개 작업(${incomplete.join(', ')})만 다시 실행해주세요. 동일한 파일을 재생성하지 마세요.`
+      : '\n\n[이어서 생성] 이전 시도에서 일부 완료됨. 미완료 작업만 진행해주세요.';
+    runOrchestrated(data.originalPrompt + hint);
   });
 
   // 단일 모델로 전환 — 일반 채팅 흐름으로 fallback
