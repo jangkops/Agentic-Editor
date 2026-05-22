@@ -1480,7 +1480,7 @@ async function runSimpleChat(prompt) {
               const failedModelName = state.selectedModel?.name || failedModelId;
               _removeModelFromCatalog(failedModelId);
               // 사용자 UI에 raw 에러 숨김 → 친화적 안내만 표시
-              msg.content = `⚠️ 이 모델(${failedModelName})은 현재 호출할 수 없습니다. 목록에서 제거되었으니 다른 모델을 선택해 주세요.`;
+              msg.content = `이 모델(${failedModelName})은 현재 호출할 수 없습니다. 목록에서 제거되었으니 다른 모델을 선택해 주세요.`;
               msg._modelRemoved = true;
               continue;
             }
@@ -1588,7 +1588,7 @@ async function runAgentWorkflow(prompt) {
               const failedModelId = deniedMatch ? deniedMatch[1] : (state.selectedModel?.id || '');
               const failedModelName = state.selectedModel?.name || failedModelId;
               _removeModelFromCatalog(failedModelId);
-              msg.content = `⚠️ 이 모델(${failedModelName})은 현재 호출할 수 없습니다. 목록에서 제거되었으니 다른 모델을 선택해 주세요.`;
+              msg.content = `이 모델(${failedModelName})은 현재 호출할 수 없습니다. 목록에서 제거되었으니 다른 모델을 선택해 주세요.`;
               msg._modelRemoved = true;
               addLiveLog('error', `모델 호출 실패: ${failedModelName}`, p.error);
               continue;
@@ -1846,7 +1846,7 @@ async function runParallel(prompt) {
         state.parallelResults.set(sid, {
           ...r,
           status: 'error',
-          content: preserved ? `${preserved}\n\n---\n⚠️ 중단됨: ${errMsg}` : `⚠️ ${errMsg}`
+          content: preserved ? `${preserved}\n\n---\n중단됨: ${errMsg}` : `${errMsg}`
         });
       }
     }
@@ -2064,11 +2064,11 @@ function pickConsensusModel() {
 let _consensusHistory = [];
 
 // ===== [합의 모델 이어가기] 액션 핸들러 =====
-// 사용자가 합의 카드의 "🔗 이 모델로 계속 대화" 클릭 시 호출
+// 사용자가 합의 카드의 "이 모델로 계속 대화" 클릭 시 호출
 function continueWithConsensusModel(modelId, modelName) {
   const model = ALL_MODELS.find(m => m.id === modelId);
   if (!model) {
-    state.messages.push({ role:'system', content:`⚠️ 모델을 찾을 수 없음: ${modelName}` });
+    state.messages.push({ role:'system', content:`모델을 찾을 수 없음: ${modelName}` });
     renderMessages();
     return;
   }
@@ -2094,18 +2094,18 @@ function continueWithConsensusModel(modelId, modelName) {
   // 4) 시스템 메시지로 전환 사실 알림
   state.messages.push({
     role:'system',
-    content:`🔗 합의 모델로 전환: ${modelName} — 다음 메시지부터 이 모델만 호출됩니다 (모드 전환 버튼으로 병렬로 되돌릴 수 있음)`
+    content:`합의 모델로 전환: ${modelName} — 다음 메시지부터 이 모델만 호출됩니다 (모드 전환 버튼으로 병렬로 되돌릴 수 있음)`
   });
   renderMessages();
   saveConversation();
 }
 
-// 사용자가 "🔀 병렬 모드 유지" 클릭 시 호출 (명시적 확인 용도)
+// 사용자가 "병렬 모드 유지" 클릭 시 호출 (명시적 확인 용도)
 function keepParallelMode() {
   // 이미 병렬 모드이므로 상태는 그대로, 간단한 안내 메시지만 추가
   state.messages.push({
     role:'system',
-    content:'🔀 병렬 모드 유지 — 다음 메시지는 선택된 모델들에 병렬로 호출됩니다'
+    content:'병렬 모드 유지 — 다음 메시지는 선택된 모델들에 병렬로 호출됩니다'
   });
   renderMessages();
 }
@@ -2193,7 +2193,7 @@ ${dr.map((r, i) => `### 모델 ${i + 1}: ${r.model}\n${r.content.substring(0, 30
     addLiveLog('response', `합의 완료: ${consensusModelName}`, `${msg.content.length}자`);
     // [Fix #3] 스트림은 끝났는데 응답이 비어있으면 (idle timeout 등) 경고 + 재시도 마킹
     if (!msg.content || msg.content.trim().length < 10) {
-      msg.content = (msg.content || '') + `\n⚠️ 합의 모델 응답이 비어있습니다 (모델: ${consensusModelName}). 네트워크 또는 토큰 만료 가능성이 있습니다.`;
+      msg.content = (msg.content || '') + `\n합의 모델 응답이 비어있습니다 (모델: ${consensusModelName}). 네트워크 또는 토큰 만료 가능성이 있습니다.`;
       msg._retryable = true;
       msg._retryType = 'consensus';
       addLiveLog('error', `합의 응답 비어있음 — 재시도 권장`);
@@ -2202,9 +2202,9 @@ ${dr.map((r, i) => `### 모델 ${i + 1}: ${r.model}\n${r.content.substring(0, 30
     // [Fix #3] 합의 실패 시 부분 결과 보존 + 재시도 메타 추가
     const errMsg = e.message || String(e);
     if (!msg.content || msg.content.trim().length === 0) {
-      msg.content = `⚠️ 합의 도출 실패: ${errMsg}`;
+      msg.content = `합의 도출 실패: ${errMsg}`;
     } else {
-      msg.content += `\n\n---\n⚠️ 합의 도중 중단됨: ${errMsg} (위는 부분 결과)`;
+      msg.content += `\n\n---\n합의 도중 중단됨: ${errMsg} (위는 부분 결과)`;
     }
     msg._retryable = true;
     msg._retryType = 'consensus';
@@ -2240,25 +2240,56 @@ ${dr.map((r, i) => `### 모델 ${i + 1}: ${r.model}\n${r.content.substring(0, 30
   saveConversation();
 }
 
-// 합의 도출 후 추천 — 합의된 텍스트를 컨텍스트로 에이전트에 전달
+// 합의 도출 후 추천 — 합의된 텍스트를 컨텍스트로 다음 단계 제시 (항상 노출)
 function _showPostConsensusRecommendation(consensusText, originalPrompt) {
   if (!consensusText || !originalPrompt) return;
-  const _filePattern = /(?:pdf|xlsx|엑셀|pptx|파워포인트|docx|워드|hwp|이미지|image).*(생성|만들|작성|제작|그려)|(?:생성|만들|작성|제작|그려).*(?:pdf|xlsx|엑셀|pptx|파워포인트|docx|워드|hwp|이미지|image)/i;
-  if (!_filePattern.test(originalPrompt)) return;
+
+  // 작업 의도 분류 (간단한 패턴 매칭)
+  const _filePattern = /(?:pdf|xlsx|엑셀|pptx|파워포인트|docx|워드|hwp|이미지|image|png|jpg|svg|문서|보고서|발표|슬라이드|차트|그래프|다이어그램|도표|표).*(생성|만들|작성|제작|그려|구현)|(?:생성|만들|작성|제작|그려|구현).*(?:pdf|xlsx|엑셀|pptx|파워포인트|docx|워드|hwp|이미지|image|png|jpg|svg|문서|보고서|발표|슬라이드|차트|그래프|다이어그램|도표|표)/i;
+  const _codePattern = /(?:코드|함수|클래스|파일|모듈|컴포넌트|api|함수).*(작성|구현|만들|수정|리팩토링|디버깅)|구현해|작성해|코딩/i;
+  const _analysisPattern = /(?:분석|리뷰|검토|평가|비교|요약|설명)/i;
+
+  const isFileTask = _filePattern.test(originalPrompt);
+  const isCodeTask = _codePattern.test(originalPrompt);
+  const isAnalysisTask = _analysisPattern.test(originalPrompt);
 
   const container = document.getElementById('chat-messages');
   if (!container) return;
+
+  // 의도별 액션 구성
+  let title, reason, actions = [];
+  if (isFileTask) {
+    title = '실제 파일 생성하기';
+    reason = '합의된 내용을 바탕으로 에이전트가 실제 파일을 생성합니다 (PDF/XLSX/DOCX/이미지 등).';
+    actions.push({ key: 'orchestrate', label: '에이전트로 파일 생성', primary: true });
+    actions.push({ key: 'refine', label: '합의 내용 다듬기' });
+  } else if (isCodeTask) {
+    title = '다음 단계';
+    reason = '합의된 코드/구조를 바탕으로 실제 파일에 적용하거나 추가 작업을 진행합니다.';
+    actions.push({ key: 'orchestrate', label: '에이전트로 코드 적용', primary: true });
+    actions.push({ key: 'refine', label: '합의 내용 개선' });
+  } else if (isAnalysisTask) {
+    title = '심화 작업';
+    reason = '합의된 분석 결과를 바탕으로 후속 작업(보고서 작성, 코드 수정 등)을 이어갈 수 있습니다.';
+    actions.push({ key: 'refine', label: '추가 질문/심화 분석', primary: true });
+    actions.push({ key: 'orchestrate', label: '결과를 파일로 저장' });
+  } else {
+    title = '다음 단계';
+    reason = '합의된 답변을 활용해 후속 작업을 진행할 수 있습니다.';
+    actions.push({ key: 'refine', label: '이어서 질문하기', primary: true });
+    actions.push({ key: 'orchestrate', label: '에이전트로 작업 진행' });
+  }
 
   const card = document.createElement('div');
   card.className = 'model-recommend-card';
   card.innerHTML = `
     <div class="recommend-header">
-      <span class="recommend-title">합의 결과로 실제 파일 생성</span>
+      <span class="recommend-title">${esc(title)}</span>
       <span class="recommend-dismiss" title="무시">✕</span>
     </div>
-    <div class="recommend-reason">합의된 답변을 바탕으로 에이전트가 실제 파일을 생성합니다 (도구 사용).</div>
+    <div class="recommend-reason">${esc(reason)}</div>
     <div class="recommend-actions">
-      <button class="recommend-btn accept" data-action="orchestrate-from-consensus">합의 내용으로 파일 생성</button>
+      ${actions.map(a => `<button class="recommend-btn ${a.primary ? 'accept' : ''}" data-action="${a.key}">${esc(a.label)}</button>`).join('')}
       <button class="recommend-btn dismiss">닫기</button>
     </div>
   `;
@@ -2269,10 +2300,22 @@ function _showPostConsensusRecommendation(consensusText, originalPrompt) {
   card.querySelector('.recommend-dismiss')?.addEventListener('click', cleanup);
   card.querySelector('.recommend-btn.dismiss')?.addEventListener('click', cleanup);
 
-  card.querySelector('[data-action="orchestrate-from-consensus"]')?.addEventListener('click', () => {
+  // 에이전트로 작업 진행 (파일 생성, 코드 적용 등)
+  card.querySelector('[data-action="orchestrate"]')?.addEventListener('click', () => {
     cleanup();
-    const enrichedPrompt = `${originalPrompt}\n\n--- 합의된 답변 (참고용, 모든 모델이 동의한 내용) ---\n${consensusText.substring(0, 4000)}\n\n위 합의된 내용을 그대로 활용하여 실제 파일을 생성해주세요.`;
+    const enrichedPrompt = `${originalPrompt}\n\n--- 합의된 답변 (모든 모델이 동의한 내용) ---\n${consensusText.substring(0, 4000)}\n\n위 합의 내용을 활용하여 실제 작업을 수행해주세요.`;
     runOrchestrated(enrichedPrompt);
+  });
+
+  // 합의 내용 다듬기 / 이어서 질문 — 채팅 입력창에 컨텍스트 힌트 주입
+  card.querySelector('[data-action="refine"]')?.addEventListener('click', () => {
+    cleanup();
+    const input = document.getElementById('chat-input');
+    if (input) {
+      input.value = '';
+      input.placeholder = '합의 결과를 바탕으로 추가 질문하세요...';
+      input.focus();
+    }
   });
 }
 
@@ -2730,13 +2773,13 @@ function renderMessages(){
             const lockBtn = document.createElement('button');
             lockBtn.className = 'sm-btn';
             lockBtn.style.cssText = 'background:var(--color-success);color:#fff;border:none;padding:6px 12px;border-radius:6px;font-size:12px;cursor:pointer';
-            lockBtn.textContent = '🔗 이 모델로 계속 대화';
+            lockBtn.textContent = '이 모델로 계속 대화';
             lockBtn.title = `${msg.consensusModelName} 단일 모드로 전환하여 이 모델로만 대화를 이어갑니다`;
             lockBtn.addEventListener('click', () => continueWithConsensusModel(msg.consensusModelId, msg.consensusModelName));
             const parallelBtn = document.createElement('button');
             parallelBtn.className = 'sm-btn';
             parallelBtn.style.cssText = 'background:transparent;color:var(--color-text-secondary);border:1px solid var(--color-border);padding:6px 12px;border-radius:6px;font-size:12px;cursor:pointer';
-            parallelBtn.textContent = '🔀 병렬 모드 유지';
+            parallelBtn.textContent = '병렬 모드 유지';
             parallelBtn.title = '다음 메시지도 병렬로 여러 모델에 호출합니다 (기본 동작)';
             parallelBtn.addEventListener('click', () => keepParallelMode());
             actions.appendChild(lockBtn);
@@ -2820,10 +2863,10 @@ function renderMessages(){
                       input.focus();
                     }
                   } else {
-                    state.messages.push({ role:'system', content:`⚠️ 복원 실패: ${r.error}` });
+                    state.messages.push({ role:'system', content:`복원 실패: ${r.error}` });
                   }
                 } catch (e) {
-                  state.messages.push({ role:'system', content:`⚠️ 복원 오류: ${e.message}` });
+                  state.messages.push({ role:'system', content:`복원 오류: ${e.message}` });
                 }
                 renderMessages();
               });
@@ -3349,8 +3392,8 @@ function renderToolSummary(c, toolUses) {
             card.className = 'tool-media-card';
             card.style.cssText = 'margin:6px 0 10px 24px;padding:10px;background:var(--color-bg-tertiary,#2d2d30);border:1px solid var(--color-border,#3c3c3c);border-radius:6px;display:flex;gap:12px;align-items:flex-start;';
             card.innerHTML = `
-              <div class="tmc-thumb" style="flex-shrink:0;width:96px;height:96px;background:var(--color-bg-primary,#1e1e1e);border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:36px;overflow:hidden;cursor:pointer;">
-                ${ext==='pdf'?'📄':ext==='pptx'?'📊':'📎'}
+              <div class="tmc-thumb" style="flex-shrink:0;width:96px;height:96px;background:var(--color-bg-primary,#1e1e1e);border-radius:4px;display:flex;align-items:center;justify-content:center;overflow:hidden;cursor:pointer;">
+                <span style="font-size:13px;font-weight:700;color:var(--color-text-muted,#6a6a6a);text-transform:uppercase;letter-spacing:0.5px;">${ext.toUpperCase()}</span>
               </div>
               <div style="flex:1;min-width:0;">
                 <div style="font-weight:600;font-size:13px;margin-bottom:4px;color:var(--color-text-primary,#ccc);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(fileName)}">${esc(fileName)}</div>
