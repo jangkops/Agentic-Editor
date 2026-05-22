@@ -3406,6 +3406,26 @@ def _gather_config_files(project_path: str) -> str:
         return ""
 
 
+def _gather_real_context_forced(project_path: str, title: str = "") -> str:
+    """키워드 매칭 없이 forced fallback 시 강제로 실제 데이터 수집.
+
+    description에 명시된 키워드가 없어도 폴더 트리 + 코드 인벤토리는 항상 유용한
+    데이터이므로 fallback 경로에서는 무조건 활성화.
+    """
+    if not project_path or not os.path.isdir(project_path):
+        return ""
+    sections = []
+    folder = _gather_folder_tree(project_path)
+    if folder:
+        sections.append(folder)
+    inventory = _gather_code_inventory(project_path)
+    if inventory:
+        sections.append(inventory)
+    if not sections:
+        return ""
+    return "\n\n".join(sections)
+
+
 async def _enrich_content_via_gateway(
     gw, model_id: str, primary_tool: str, title: str,
     description: str, final_text: str, max_tokens: int = 2000,
@@ -3982,7 +4002,51 @@ async def _orchestrator_run_agent_inner(
 
         final_text = "".join(final_text_parts).strip()
         if stream_failed:
-            # SSE 실패 — agent_error 이미 emit됨, error 결과로 반환
+            # SSE 실패해도 forced fallback은 시도 — agent_error가 이미 emit되었지만
+            # 사용자가 파일을 요구했으면 디스크 데이터로라도 만들어준다.
+            primary_tool = (subtask.get("primary_tool") or "").lower()
+            wanted_files = bool(target_files) or primary_tool in (
+                "generate_image", "generate_pdf", "generate_pptx",
+                "generate_xlsx", "generate_docx", "edit_image", "write_file"
+            )
+            if wanted_files:
+                print(f"[Orchestrator] {task_id} SSE 실패 → forced fallback 시도")
+                try:
+                    real_only = _gather_real_context(description, project_path) \
+                        or _gather_real_context_forced(project_path, title)
+                    if real_only:
+                        _forced = await _force_generate_from_text(
+                            primary_tool=primary_tool,
+                            target_files=target_files,
+                            title=title,
+                            description=description,
+                            final_text=real_only,
+                            project_path=project_path,
+                            aws_profile=aws_profile,
+                            bedrock_user=bedrock_user,
+                        )
+                        for fpath, finfo in _forced:
+                            verified_files.append(finfo)
+                            tool_log.append({
+                                "name": "system_fallback:" + finfo.get("tool", "?"),
+                                "input": {"forced": True, "reason": "stream_failed"},
+                                "output": fpath,
+                            })
+                        if verified_files:
+                            await emit_queue.put({
+                                "type": "agent_done", "taskId": task_id,
+                                "summary": f"SSE 실패 후 강제 생성 완료 ({len(verified_files)}개 파일)",
+                                "toolCount": len(tool_log),
+                                "verifiedFiles": [vf["path"] for vf in verified_files],
+                            })
+                            return {
+                                "taskId": task_id, "role": role, "title": title,
+                                "status": "done",
+                                "summary": f"[강제 생성] {stream_error_msg or '스트리밍 실패'} → 디스크 데이터로 파일 생성됨",
+                                "tools": tool_log, "verifiedFiles": verified_files,
+                            }
+                except Exception as _e:
+                    print(f"[Orchestrator] SSE 실패 후 강제 생성도 실패: {_e}")
             return {"taskId": task_id, "role": role, "title": title, "status": "error",
                     "summary": stream_error_msg or "스트리밍 실패", "tools": tool_log,
                     "verifiedFiles": []}
@@ -4017,6 +4081,17 @@ async def _orchestrator_run_agent_inner(
                     final_text=final_text,
                     project_path=project_path,
                 )
+
+                # 게이트웨이 enrichment가 비어있거나 너무 짧으면 실제 디스크 데이터를
+                # 직접 final_text로 사용 — Claude 호출 없이도 파일은 무조건 생성됨.
+                if not enriched_text or len(enriched_text) < 200:
+                    real_only = _gather_real_context(description, project_path)
+                    if not real_only:
+                        # 키워드 매칭 안 됨 → forced 모드로 폴더+코드 인벤토리 수집
+                        real_only = _gather_real_context_forced(project_path, title)
+                    if real_only:
+                        enriched_text = real_only
+                        print(f"[Orchestrator] {task_id} enrichment 부족 — 실제 디스크 데이터로 대체 ({len(real_only)}자)")
                 # (2) 보강된 본문으로 결정적 도구 디스패처 호출 → 실제 파일 생성
                 _forced = await _force_generate_from_text(
                     primary_tool=primary_tool,
