@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   writeFile: (p, content) => ipcRenderer.invoke('fs:write-file', p, content),
   rename: (oldP, newP) => ipcRenderer.invoke('fs:rename', oldP, newP),
   mkdir: (p) => ipcRenderer.invoke('fs:mkdir', p),
+  deleteFile: (p) => ipcRenderer.invoke('fs:delete-file', p),
   readDir: (p) => ipcRenderer.invoke('fs:list-files', p),
   // Media file preview support
   readFileBase64: (p) => ipcRenderer.invoke('fs:read-file-base64', p),

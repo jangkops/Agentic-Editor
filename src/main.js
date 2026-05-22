@@ -5907,6 +5907,88 @@ document.addEventListener('preview-file', (e) => {
   openMediaPreview(path, name);
 });
 
+// 수정 버튼: 파일을 채팅 첨부로 등록 + 컨텍스트 메시지 추가
+document.addEventListener('preview-file:edit', async (e) => {
+  const { path, name, meta } = e.detail || {};
+  if (!path || !name) return;
+  try {
+    const ext = (name.split('.').pop() || '').toLowerCase();
+    const isImage = ['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(ext);
+    let dataUrl = '';
+    let size = 0;
+    if (window.electronAPI?.readFileBase64) {
+      const b64 = await window.electronAPI.readFileBase64(path);
+      if (b64) {
+        const mime = isImage
+          ? `image/${ext === 'jpg' ? 'jpeg' : ext}`
+          : (ext === 'pdf' ? 'application/pdf'
+            : ext === 'pptx' ? 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+            : ext === 'docx' ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+            : ext === 'xlsx' ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            : 'application/octet-stream');
+        dataUrl = `data:${mime};base64,${b64}`;
+        size = Math.floor(b64.length * 3 / 4);
+      }
+    }
+    if (!dataUrl) {
+      alert('파일을 읽을 수 없습니다. 다시 시도하세요.');
+      return;
+    }
+    state.attachedFiles.push({
+      name,
+      type: dataUrl.split(';')[0].slice(5),
+      ext,
+      data: dataUrl,
+      size,
+      rawBase64: dataUrl.split(',')[1] || '',
+      _sourcePath: path,
+    });
+    if (typeof renderAttachedFiles === 'function') renderAttachedFiles();
+    // 채팅에 컨텍스트 메시지 + 입력창 안내
+    const modelHint = meta && meta.model
+      ? ` (이전: ${meta.model.replace(/^us\.|^eu\.|^global\./, '').split('.').pop()})`
+      : '';
+    state.messages.push({
+      role: 'system',
+      content: `파일 "${name}"이(가) 첨부되었습니다${modelHint}. 어떻게 수정할지 입력해주세요.`,
+    });
+    if (typeof renderMessages === 'function') renderMessages();
+    const input = document.getElementById('chat-input');
+    if (input) {
+      input.placeholder = `${name} 수정 지시를 입력하세요...`;
+      input.focus();
+    }
+  } catch (err) {
+    console.error('[preview-file:edit] failed:', err);
+    alert(`수정 준비 실패: ${err.message || err}`);
+  }
+});
+
+// 삭제 후 — 에디터에 열려 있는 탭이 있으면 닫기
+document.addEventListener('preview-file:deleted', (e) => {
+  const { path, name } = e.detail || {};
+  if (!path) return;
+  // 미디어 미리보기가 해당 파일이면 닫기
+  try {
+    if (typeof _hideMediaPreview === 'function') _hideMediaPreview();
+  } catch {}
+  // 일반 에디터 탭 닫기
+  try {
+    if (Array.isArray(state.openTabs)) {
+      const idx = state.openTabs.findIndex(t => t.path === path || t.name === name);
+      if (idx >= 0) {
+        state.openTabs.splice(idx, 1);
+        if (state.activeTab === path) {
+          state.activeTab = state.openTabs[0]?.path || null;
+        }
+        if (typeof renderEditorTabs === 'function') renderEditorTabs();
+      }
+    }
+  } catch (err) {
+    console.warn('[preview-file:deleted] tab close failed:', err);
+  }
+});
+
 // Auto-restore monaco when user clicks a text-file tab (handled by renderEditorTabs hook)
 // Hook into existing tab switching by patching openFileInEditor to clear media wrapper
 if (typeof openFileInEditor === 'function') {

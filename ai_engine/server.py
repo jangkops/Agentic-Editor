@@ -1869,6 +1869,47 @@ async def run_agent_with_tools(request: Request):
                         tool_output = f"도구 실행 예외: {e}"
                     _tool_duration_ms = int((_time.time() - _tool_start) * 1000)
                     print(f"[Agent] 도구 실행: {tool_name} → {len(tool_output)}자 ({_tool_duration_ms}ms)")
+
+                    # 생성 파일에 .meta.json 사이드카 기록
+                    if tool_name in ("generate_image", "generate_pdf", "generate_pptx", "generate_xlsx", "generate_docx", "edit_image", "write_file"):
+                        try:
+                            _meta_paths = []
+                            try:
+                                _parsed = json.loads(tool_output) if isinstance(tool_output, str) else None
+                            except (json.JSONDecodeError, TypeError):
+                                _parsed = None
+                            if isinstance(_parsed, dict) and "path" in _parsed and "error" not in _parsed:
+                                _meta_paths.append(_parsed["path"])
+                            elif isinstance(_parsed, dict) and isinstance(_parsed.get("images"), list):
+                                for _it in _parsed["images"]:
+                                    if isinstance(_it, dict) and "path" in _it:
+                                        _meta_paths.append(_it["path"])
+                            if tool_name == "write_file" and "path" in tool_input:
+                                _meta_paths.append(tool_input["path"])
+                            for _rel in _meta_paths:
+                                _abs = _rel if os.path.isabs(_rel) else os.path.join(
+                                    project_path if (project_path and os.path.isdir(project_path)) else os.getcwd(),
+                                    _rel,
+                                )
+                                if not os.path.isfile(_abs):
+                                    continue
+                                _meta_obj = {
+                                    "tool": tool_name,
+                                    "model": stream_model,
+                                    "agentId": "single",
+                                    "agentRole": "Agent",
+                                    "agentTitle": prompt[:80],
+                                    "createdAt": datetime.utcnow().isoformat() + "Z",
+                                    "promptHint": prompt[:200],
+                                }
+                                try:
+                                    with open(_abs + ".meta.json", "w", encoding="utf-8") as _mf:
+                                        json.dump(_meta_obj, _mf, ensure_ascii=False, indent=2)
+                                except Exception as _me:
+                                    print(f"[Agent] meta write 실패 {_abs}: {_me}")
+                        except Exception as _e:
+                            print(f"[Agent] meta 처리 예외: {_e}")
+
                     yield f"data: {json.dumps({'tool': tool_name, 'output': tool_output[:500], 'status': 'done', 'durationMs': _tool_duration_ms}, ensure_ascii=False)}\n\n"
                     _tr_max = int(os.environ.get("AE_TOOL_RESULT_MAX", "80000"))
                     tool_results.append({"toolResult": {"toolUseId": tool_id, "content": [{"text": tool_output[:_tr_max]}]}})
@@ -2392,6 +2433,48 @@ async def _orchestrator_run_agent_inner(
                 await emit_queue.put({"type": "agent_tool", "taskId": task_id, "tool": tname, "input": tinput, "status": "running"})
                 tout = await asyncio.to_thread(_execute_tool, tname, tinput, project_path, aws_profile, bedrock_user)  # [patched-credentials]
                 tool_log.append({"name": tname, "input": tinput, "output": tout[:400]})
+
+                # 생성 파일에 .meta.json 사이드카 기록 — 어떤 모델/에이전트가 만들었는지 추적
+                if tname in ("generate_image", "generate_pdf", "generate_pptx", "generate_xlsx", "generate_docx", "edit_image", "write_file"):
+                    try:
+                        _meta_paths = []
+                        try:
+                            _parsed = json.loads(tout) if isinstance(tout, str) else None
+                        except (json.JSONDecodeError, TypeError):
+                            _parsed = None
+                        if isinstance(_parsed, dict) and "path" in _parsed and "error" not in _parsed:
+                            _meta_paths.append(_parsed["path"])
+                        elif isinstance(_parsed, dict) and isinstance(_parsed.get("images"), list):
+                            for _it in _parsed["images"]:
+                                if isinstance(_it, dict) and "path" in _it:
+                                    _meta_paths.append(_it["path"])
+                        # write_file: tool_input["path"]
+                        if tname == "write_file" and "path" in tinput:
+                            _meta_paths.append(tinput["path"])
+                        for _rel in _meta_paths:
+                            _abs = _rel if os.path.isabs(_rel) else os.path.join(
+                                project_path if (project_path and os.path.isdir(project_path)) else os.getcwd(),
+                                _rel,
+                            )
+                            if not os.path.isfile(_abs):
+                                continue
+                            _meta_obj = {
+                                "tool": tname,
+                                "model": stream_model,
+                                "agentId": task_id,
+                                "agentRole": role,
+                                "agentTitle": title,
+                                "createdAt": datetime.utcnow().isoformat() + "Z",
+                                "promptHint": (subtask.get("description") or "")[:200],
+                            }
+                            try:
+                                with open(_abs + ".meta.json", "w", encoding="utf-8") as _mf:
+                                    json.dump(_meta_obj, _mf, ensure_ascii=False, indent=2)
+                            except Exception as _me:
+                                print(f"[Orchestrator] meta write 실패 {_abs}: {_me}")
+                    except Exception as _e:
+                        print(f"[Orchestrator] meta 처리 예외: {_e}")
+
                 await emit_queue.put({"type": "agent_tool", "taskId": task_id, "tool": tname, "status": "done", "output": tout[:300]})
                 _tr_max = int(os.environ.get("AE_TOOL_RESULT_MAX", "80000"))
                 tool_results.append({"toolResult": {"toolUseId": tid, "content": [{"text": tout[:_tr_max]}]}})

@@ -107,6 +107,33 @@ function registerFsHandlers(mainWindow) {
   });
 
   /**
+   * 파일 삭제
+   * Used by file-preview-panel delete button.
+   * @param {string} filePath - 삭제할 파일 경로
+   * @returns {boolean} 성공 여부
+   */
+  ipcMain.handle('fs:delete-file', async (_, filePath) => {
+    try {
+      const bridge = _remoteBridge();
+      if (bridge) {
+        if (typeof bridge.unlink === 'function') {
+          await bridge.unlink(filePath);
+          return true;
+        }
+        // Bridge older API doesn't expose unlink — fall back to local unlink
+        // for files that exist locally (most .generated/ files do).
+      }
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+      return true;
+    } catch (error) {
+      console.error(`[fs:delete-file] Failed to delete ${filePath}:`, error.message);
+      throw new Error(error.message);
+    }
+  });
+
+  /**
    * 디렉터리 생성 (재귀)
    * Remote: bridge.mkdir(path, {recursive: true}) via SFTP (Req 6.1).
    * @param {IpcMainInvokeEvent} _ - IPC 이벤트
