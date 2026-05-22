@@ -1905,48 +1905,75 @@ async function runParallel(prompt) {
   renderMessages();
 }
 
-// 병렬 완료 후 추천 카드 — 파일 생성 작업이면 결과를 오케스트레이터에 전달
+// 병렬 완료 후 추천 카드 — 항상 다음 단계 제시 (의도별 맞춤 액션)
 function _showPostParallelRecommendation(originalPrompt) {
   if (!originalPrompt) return;
-  const _filePattern = /(?:pdf|xlsx|엑셀|pptx|파워포인트|docx|워드|hwp|이미지|image).*(생성|만들|작성|제작|그려)|(?:생성|만들|작성|제작|그려).*(?:pdf|xlsx|엑셀|pptx|파워포인트|docx|워드|hwp|이미지|image)|파일.*(?:3|4|5|여러).*(?:종|개|장)/i;
-  const isFileTask = _filePattern.test(originalPrompt);
-
   const doneResults = [...state.parallelResults.values()].filter(r => r.status === 'done');
   if (doneResults.length < 1) return;
 
   const container = document.getElementById('chat-messages');
   if (!container) return;
 
+  // 할루시네이션 감지 — "생성 완료", "저장됨", "<function_calls>" 등 패턴
+  const _hallucinationPattern = /(?:생성|저장|작성|만들었|created|saved|completed).*(완료|되었|됨|finished|done|✅)|<function_calls>|<invoke|<tool_call|\.generated\/[\w\-]+\.(pdf|xlsx|pptx|docx|png)/i;
+  const hallucinatingCount = doneResults.filter(r => _hallucinationPattern.test(r.content || '')).length;
+  const hasHallucination = hallucinatingCount > 0;
+
+  // 의도 분류
+  const _filePattern = /(?:pdf|xlsx|엑셀|pptx|파워포인트|docx|워드|hwp|이미지|image|png|jpg|svg|문서|보고서|발표|슬라이드|차트|그래프|다이어그램|도표|표).*(생성|만들|작성|제작|그려|구현)|(?:생성|만들|작성|제작|그려|구현).*(?:pdf|xlsx|엑셀|pptx|파워포인트|docx|워드|hwp|이미지|image|png|jpg|svg|문서|보고서|발표|슬라이드|차트|그래프|다이어그램|도표|표)|파일.*(?:3|4|5|여러).*(?:종|개|장)/i;
+  const _codePattern = /(?:코드|함수|클래스|모듈|컴포넌트|api).*(작성|구현|만들|수정|리팩토링|디버깅)|구현해|작성해|코딩/i;
+  const isFileTask = _filePattern.test(originalPrompt);
+  const isCodeTask = _codePattern.test(originalPrompt);
+
+  // 의도별 액션 구성
+  let title, reason, actions = [];
+  if (isFileTask) {
+    title = hasHallucination ? '주의: 실제 파일은 생성되지 않았습니다' : '실제 파일 생성하기';
+    reason = hasHallucination
+      ? `${hallucinatingCount}개 모델이 파일 생성 완료를 주장했지만, 병렬 모드에서는 도구가 제공되지 않아 실제 파일은 만들어지지 않았습니다. 실제로 파일을 만들려면 에이전트 모드를 사용하세요.`
+      : `병렬 모드는 텍스트 응답만 가능하여 실제 파일이 생성되지 않았습니다. ${doneResults.length}개 모델 응답을 종합해 에이전트가 실제 파일을 생성할 수 있습니다.`;
+    actions.push({ key: 'orchestrate', label: '에이전트로 실제 파일 생성', primary: true });
+    if (doneResults.length >= 2) actions.push({ key: 'consensus', label: '합의 도출' });
+  } else if (isCodeTask) {
+    title = '다음 단계';
+    reason = `${doneResults.length}개 모델의 코드 제안을 종합해 실제 파일에 적용하거나 합의를 도출할 수 있습니다.`;
+    actions.push({ key: 'orchestrate', label: '에이전트로 코드 적용', primary: true });
+    if (doneResults.length >= 2) actions.push({ key: 'consensus', label: '합의 도출' });
+  } else {
+    title = '다음 단계';
+    reason = `${doneResults.length}개 모델의 응답을 비교하거나 다음 작업으로 이어갈 수 있습니다.`;
+    if (doneResults.length >= 2) actions.push({ key: 'consensus', label: '합의 도출', primary: true });
+    actions.push({ key: 'orchestrate', label: '에이전트로 작업 진행' });
+  }
+
   const card = document.createElement('div');
-  card.className = 'model-recommend-card';
+  card.className = 'model-recommend-card' + (hasHallucination ? ' recommend-warning' : '');
   card.innerHTML = `
     <div class="recommend-header">
-      <span class="recommend-title">${isFileTask ? '실제 파일 생성하기' : '다음 단계'}</span>
+      <span class="recommend-title">${esc(title)}</span>
       <span class="recommend-dismiss" title="무시">✕</span>
     </div>
-    <div class="recommend-reason">${isFileTask
-      ? `병렬 모드는 텍스트 응답만 가능하여 실제 파일이 생성되지 않았습니다. ${doneResults.length}개 모델 응답을 종합해 에이전트가 실제 파일을 생성할 수 있습니다.`
-      : `${doneResults.length}개 모델의 응답을 비교하거나 합의 도출 후 다음 작업으로 이어갑니다.`}</div>
+    <div class="recommend-reason">${esc(reason)}</div>
     <div class="recommend-actions">
-      ${isFileTask ? `<button class="recommend-btn accept" data-action="orchestrate-with-context">에이전트로 실제 파일 생성</button>` : ''}
-      ${doneResults.length >= 2 ? `<button class="recommend-btn" data-action="consensus">합의 도출</button>` : ''}
+      ${actions.map(a => `<button class="recommend-btn ${a.primary ? 'accept' : ''}" data-action="${a.key}">${esc(a.label)}</button>`).join('')}
       <button class="recommend-btn dismiss">닫기</button>
     </div>
   `;
   container.appendChild(card);
-  container.scrollTop = container.scrollHeight;
+  // 스크롤 보장
+  setTimeout(() => { container.scrollTop = container.scrollHeight; }, 50);
 
   const cleanup = () => { card.classList.add('recommend-fade-out'); setTimeout(() => card.remove(), 300); };
   card.querySelector('.recommend-dismiss')?.addEventListener('click', cleanup);
   card.querySelector('.recommend-btn.dismiss')?.addEventListener('click', cleanup);
 
-  // 핵심: 병렬 결과를 컨텍스트로 합쳐서 오케스트레이터에 전달
-  card.querySelector('[data-action="orchestrate-with-context"]')?.addEventListener('click', () => {
+  // 에이전트로 작업 진행 — 병렬 결과를 컨텍스트로 합쳐서 오케스트레이터에 전달
+  card.querySelector('[data-action="orchestrate"]')?.addEventListener('click', () => {
     cleanup();
     const contextSummary = doneResults.map((r, i) =>
       `### [참고 답변 ${i+1}] ${r.modelName}\n${(r.content || '').substring(0, 1500)}`
     ).join('\n\n---\n\n');
-    const enrichedPrompt = `${originalPrompt}\n\n--- 이전 ${doneResults.length}개 모델의 답변 (참고용) ---\n${contextSummary}\n\n위 답변들을 참고하여 실제 파일을 생성해주세요. 각 모델이 제안한 구조와 내용을 종합해 사용자 의도에 가장 부합하는 결과물을 만들어주세요.`;
+    const enrichedPrompt = `${originalPrompt}\n\n--- 이전 ${doneResults.length}개 모델의 답변 (참고용) ---\n${contextSummary}\n\n위 답변들을 참고하여 도구(write_file, generate_image 등)를 사용해 실제 파일을 생성해주세요. 각 모델이 제안한 구조와 내용을 종합해 사용자 의도에 가장 부합하는 결과물을 만들어주세요.`;
     runOrchestrated(enrichedPrompt);
   });
 

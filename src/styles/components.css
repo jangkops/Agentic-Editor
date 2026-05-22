@@ -943,3 +943,13 @@
   border-top:1px solid var(--color-border);
   flex-shrink:0;
 }
+
+/* ===== Recommend card — Warning variant (할루시네이션 감지 시) ===== */
+.model-recommend-card.recommend-warning {
+  border-color: var(--color-warning, #ce9178);
+  border-left-color: var(--color-warning, #ce9178);
+  box-shadow: 0 2px 12px rgba(206, 145, 120, 0.15);
+}
+.model-recommend-card.recommend-warning .recommend-title {
+  color: var(--color-warning, #ce9178);
+}
