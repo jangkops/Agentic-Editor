@@ -1941,6 +1941,36 @@ async def run_agent_parallel(request: Request):
     messages = _build_messages(chat_history, prompt, session_id)
 
     async def parallel_stream():
+        # 할루시네이션 sanitizer — 도구 호출 시뮬레이션과 거짓 완료 주장을 제거
+        def _sanitize_hallucination(text: str) -> tuple:
+            """모델이 도구 사용을 시뮬레이션한 흔적이나 거짓 주장을 감지하고 정리.
+            반환: (cleaned_text, was_modified)
+            """
+            if not text:
+                return text, False
+            original = text
+            # 1) function_calls/tool_call XML 태그 제거 (앞뒤 공백 포함)
+            text = re.sub(r'<function_calls>.*?</function_calls>', '', text, flags=re.DOTALL | re.IGNORECASE)
+            text = re.sub(r'<invoke[^>]*>.*?</invoke>', '', text, flags=re.DOTALL | re.IGNORECASE)
+            text = re.sub(r'<tool_call>.*?</tool_call>', '', text, flags=re.DOTALL | re.IGNORECASE)
+            text = re.sub(r'<parameter[^>]*>.*?</parameter>', '', text, flags=re.DOTALL | re.IGNORECASE)
+            text = re.sub(r'<function_calls>|</function_calls>|<invoke[^>]*>|</invoke>|<tool_call>|</tool_call>', '', text, flags=re.IGNORECASE)
+            # 2) 가짜 .generated/ 경로의 ![이미지] 마크다운 (실제로 생성 안 됐음)
+            text = re.sub(r'!\[[^\]]*\]\(\.generated/[^)]+\)', '[*이미지 생성 위치 — 실제 파일 없음*]', text)
+            # 3) 거짓 완료 주장 약화 ("생성 완료!" → "*아래 내용으로 생성 가능*")
+            text = re.sub(r'(✅|✓|🎉)\s*[^\n.]{0,30}(생성|저장|작성|만들).{0,10}(완료|되었|됨)[!.]?', '*다음 내용으로 생성 가능:*', text, flags=re.IGNORECASE)
+            # 4) "모든 파일이 .generated/에 저장됩니다" 같은 거짓 안내
+            text = re.sub(r'(모든\s*)?파일.{0,20}\.generated/.{0,30}(저장|생성|만들|작성).{0,20}(됩니다|되었|완료|돼요)', '*아래 코드를 실행하면 .generated/에 파일이 생성됩니다*', text, flags=re.IGNORECASE)
+
+            modified = (text != original)
+            # 5) 너무 많이 잘려나갔으면 경고 추가
+            if modified and len(text.strip()) < 50 and len(original) > 200:
+                text = ("*[알림] 이 모델의 응답에서 도구 호출 시뮬레이션이 감지되어 정리되었습니다. "
+                        "병렬 모드에서는 도구를 사용할 수 없습니다. "
+                        "실제 파일 생성을 원하시면 '에이전트로 작업 진행' 버튼을 사용하세요.*\n\n"
+                        + text)
+            return text.strip(), modified
+
         async def call_model(slot):
             model_id = slot.get("modelId", "")
             slot_id = slot.get("slotId", "")
@@ -1999,6 +2029,10 @@ async def run_agent_parallel(request: Request):
                     if decision == "ALLOW":
                         output = result.get("output", {}).get("message", {}).get("content", [])
                         text = "\n".join(c.get("text", "") for c in output if "text" in c)
+                        # 할루시네이션 후처리 — 도구 호출 시뮬레이션, 거짓 완료 주장 제거
+                        text, _was_sanitized = _sanitize_hallucination(text)
+                        if _was_sanitized:
+                            print(f"[Parallel] SANITIZED slot={slot_id} model={model_id}")
                         print(f"[Parallel] DONE  slot={slot_id} model={model_id} elapsed={_time.time()-_t_start:.2f}s")
                         return {"slotId": slot_id, "modelId": model_id, "status": "done", "content": text}
                     elif decision == "ACCEPTED":

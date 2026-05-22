@@ -1911,10 +1911,7 @@ function _showPostParallelRecommendation(originalPrompt) {
   const doneResults = [...state.parallelResults.values()].filter(r => r.status === 'done');
   if (doneResults.length < 1) return;
 
-  const container = document.getElementById('chat-messages');
-  if (!container) return;
-
-  // 할루시네이션 감지 — "생성 완료", "저장됨", "<function_calls>" 등 패턴
+  // 할루시네이션 감지
   const _hallucinationPattern = /(?:생성|저장|작성|만들었|created|saved|completed).*(완료|되었|됨|finished|done|✅)|<function_calls>|<invoke|<tool_call|\.generated\/[\w\-]+\.(pdf|xlsx|pptx|docx|png)/i;
   const hallucinatingCount = doneResults.filter(r => _hallucinationPattern.test(r.content || '')).length;
   const hasHallucination = hallucinatingCount > 0;
@@ -1946,34 +1943,53 @@ function _showPostParallelRecommendation(originalPrompt) {
     actions.push({ key: 'orchestrate', label: '에이전트로 작업 진행' });
   }
 
+  // 추천 카드를 system 메시지로 등록 → renderMessages가 안정적으로 표시
+  state.messages.push({
+    role: 'system',
+    _isRecommendCard: true,
+    _recommendData: {
+      title, reason, actions, hasHallucination, originalPrompt,
+      doneResults: doneResults.map(r => ({ modelName: r.modelName, content: r.content })),
+    },
+    content: '[추천] ' + title,
+  });
+  renderMessages();
+  // 스크롤 보장
+  setTimeout(() => {
+    const cc = document.getElementById('chat-messages');
+    if (cc) cc.scrollTop = cc.scrollHeight;
+  }, 100);
+}
+
+// 추천 카드 렌더링 (renderMessages에서 호출)
+function _renderRecommendCardMessage(msg) {
+  const data = msg._recommendData;
+  if (!data) return null;
   const card = document.createElement('div');
-  card.className = 'model-recommend-card' + (hasHallucination ? ' recommend-warning' : '');
+  card.className = 'model-recommend-card' + (data.hasHallucination ? ' recommend-warning' : '');
+  card.style.margin = '8px 12px';
   card.innerHTML = `
     <div class="recommend-header">
-      <span class="recommend-title">${esc(title)}</span>
+      <span class="recommend-title">${esc(data.title)}</span>
       <span class="recommend-dismiss" title="무시">✕</span>
     </div>
-    <div class="recommend-reason">${esc(reason)}</div>
+    <div class="recommend-reason">${esc(data.reason)}</div>
     <div class="recommend-actions">
-      ${actions.map(a => `<button class="recommend-btn ${a.primary ? 'accept' : ''}" data-action="${a.key}">${esc(a.label)}</button>`).join('')}
+      ${data.actions.map(a => `<button class="recommend-btn ${a.primary ? 'accept' : ''}" data-action="${a.key}">${esc(a.label)}</button>`).join('')}
       <button class="recommend-btn dismiss">닫기</button>
     </div>
   `;
-  container.appendChild(card);
-  // 스크롤 보장
-  setTimeout(() => { container.scrollTop = container.scrollHeight; }, 50);
 
   const cleanup = () => { card.classList.add('recommend-fade-out'); setTimeout(() => card.remove(), 300); };
   card.querySelector('.recommend-dismiss')?.addEventListener('click', cleanup);
   card.querySelector('.recommend-btn.dismiss')?.addEventListener('click', cleanup);
 
-  // 에이전트로 작업 진행 — 병렬 결과를 컨텍스트로 합쳐서 오케스트레이터에 전달
   card.querySelector('[data-action="orchestrate"]')?.addEventListener('click', () => {
     cleanup();
-    const contextSummary = doneResults.map((r, i) =>
+    const contextSummary = data.doneResults.map((r, i) =>
       `### [참고 답변 ${i+1}] ${r.modelName}\n${(r.content || '').substring(0, 1500)}`
     ).join('\n\n---\n\n');
-    const enrichedPrompt = `${originalPrompt}\n\n--- 이전 ${doneResults.length}개 모델의 답변 (참고용) ---\n${contextSummary}\n\n위 답변들을 참고하여 도구(write_file, generate_image 등)를 사용해 실제 파일을 생성해주세요. 각 모델이 제안한 구조와 내용을 종합해 사용자 의도에 가장 부합하는 결과물을 만들어주세요.`;
+    const enrichedPrompt = `${data.originalPrompt}\n\n--- 이전 ${data.doneResults.length}개 모델의 답변 (참고용) ---\n${contextSummary}\n\n위 답변들을 참고하여 도구(write_file, generate_image 등)를 사용해 실제 파일을 생성해주세요.`;
     runOrchestrated(enrichedPrompt);
   });
 
@@ -1981,6 +1997,8 @@ function _showPostParallelRecommendation(originalPrompt) {
     cleanup();
     if (typeof runConsensus === 'function') runConsensus();
   });
+
+  return card;
 }
 
 let _consensusModelId = null;
@@ -2732,6 +2750,14 @@ function renderMessages(){
       addCopySupport(d, msg.content);
       c.appendChild(d);
     }else if(msg.role==='system'){
+      // 추천 카드 메시지인 경우 — 별도 렌더링
+      if (msg._isRecommendCard && typeof _renderRecommendCardMessage === 'function') {
+        const cardEl = _renderRecommendCardMessage(msg);
+        if (cardEl) {
+          c.appendChild(cardEl);
+          continue;
+        }
+      }
       const d=document.createElement('div');d.className=`chat-msg system ${FI}`;
       d.textContent=msg.content;
       // [Fix #3] 재시도 가능한 에러 메시지에 재시도 버튼 추가
