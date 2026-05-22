@@ -2670,9 +2670,10 @@ async def _enrich_content_via_gateway(
     gw, model_id: str, primary_tool: str, title: str,
     description: str, final_text: str, max_tokens: int = 2000,
 ) -> str:
-    """게이트웨이 1회 호출로 파일 본문 콘텐츠 보강.
+    """게이트웨이 호출로 파일 본문 콘텐츠 보강 — 퀄리티 보장.
 
     forced fallback 직전에 호출해서 빈약한 final_text를 풍부한 본문으로 확장.
+    형식별 최소 분량 임계치를 만족할 때까지 최대 2회 재시도.
     게이트웨이를 반드시 경유 (비용/사용량 측정 유지).
 
     Args:
@@ -2682,9 +2683,19 @@ async def _enrich_content_via_gateway(
         title, description, final_text: 원본 컨텍스트
 
     Returns:
-        보강된 마크다운 텍스트. 실패 시 final_text 그대로 반환.
+        보강된 마크다운 텍스트. 모든 시도 실패 시 final_text 그대로 반환.
     """
     pt = (primary_tool or "").lower()
+    # 형식별 퀄리티 임계치 — 사용자가 보고서로 사용해도 충분한 분량
+    quality_min = {
+        "generate_pdf":   1500,
+        "generate_docx":  1500,
+        "generate_pptx":   800,   # 슬라이드는 압축적
+        "generate_xlsx":   400,   # 표는 데이터 위주
+        "generate_image":  150,   # 이미지 prompt
+        "write_file":      400,
+    }.get(pt, 600)
+
     style_hint = {
         "generate_pdf":  "다단 마크다운 보고서 형식 (## 헤더, 본문 단락, 필요 시 표).",
         "generate_pptx": "슬라이드 헤더와 불릿 위주 (## 섹션 = 슬라이드 제목, 각 섹션 4-6개 불릿).",
@@ -2694,110 +2705,67 @@ async def _enrich_content_via_gateway(
         "write_file":    "코드/마크다운/텍스트 콘텐츠.",
     }.get(pt, "마크다운 형식의 충실한 본문.")
 
+    # 형식별 추가 퀄리티 가이드라인
+    quality_guide = {
+        "generate_pdf":   "최소 4개 섹션, 각 섹션 2-4 문단의 깊이 있는 설명. Lorem ipsum이나 placeholder 금지 — 실제 정보로 채울 것.",
+        "generate_docx":  "최소 4개 섹션, 각 섹션 2-4 문단의 풍부한 내용. 도입→본론→결론 구조. 실제 정보 위주.",
+        "generate_pptx":  "최소 5개 슬라이드(권장 7-10개). 각 슬라이드 3-5개 구체적 불릿. 첫 슬라이드 개요, 마지막 결론/Next Steps.",
+        "generate_xlsx":  "헤더 행 + 최소 5행 이상의 의미있는 데이터. 가능하면 10-20행. 합리적인 실제 값.",
+        "generate_image": "스타일/구성/조명/색감/시점을 모두 포함한 구체적 영문 prompt 1줄.",
+        "write_file":     "실제 사용 가능한 풍부한 콘텐츠. 빈 placeholder 금지.",
+    }.get(pt, "충실하고 구체적인 콘텐츠로 작성.")
+
     sys_prompt = f"""당신은 파일 생성 작업의 콘텐츠 작성자입니다.
 주제와 지시사항에 맞는 충실한 본문을 작성하세요.
 
 [출력 형식] {style_hint}
+[퀄리티 기준] {quality_guide}
 [제약] 도구 호출은 하지 않습니다. 마크다운 본문만 출력하세요.
 [중요] '생성 완료' 같은 거짓 주장 금지. 실제 콘텐츠만 작성.
 """
 
-    user_msg = f"""작업: {title}
+    user_msg_base = f"""작업: {title}
 지시사항: {description}
 
 이전 응답 일부 (참고):
 {(final_text or '')[:1500]}
 
-위 정보를 바탕으로 [{pt}] 작업에 사용할 본문을 마크다운으로 작성해주세요."""
+위 정보를 바탕으로 [{pt}] 작업에 사용할 본문을 마크다운으로 작성해주세요. 최소 {quality_min}자 이상의 풍부한 내용을 작성하세요."""
 
-    messages = [{"role": "user", "content": [{"text": user_msg}]}]
-    try:
-        # 게이트웨이 경유 호출 — 비용/사용량 측정됨
-        result = await asyncio.wait_for(
-            gw.converse(model_id=model_id, messages=messages, system_prompt=sys_prompt),
-            timeout=90,
-        )
-        if result.get("decision") != "ALLOW":
-            print(f"[Enrich] gateway 거부: {result.get('error') or result.get('decision')}")
-            return final_text or description or title or "내용 없음"
-        output = result.get("output", {}).get("message", {}).get("content", [])
-        text = "\n".join(c.get("text", "") for c in output if "text" in c).strip()
-        if not text or len(text) < 50:
-            return final_text or description or title or "내용 없음"
-        return text
-    except Exception as e:
-        print(f"[Enrich] 예외: {e}")
-        return final_text or description or title or "내용 없음"
-
-
-async def _generate_quality_content(
-    gw, title: str, description: str, existing_text: str,
-    target_format: str, aws_profile: str, bedrock_user: str,
-) -> str:
-    """Claude Sonnet으로 고품질 마크다운 콘텐츠 생성.
-
-    fallback 경로의 콘텐츠 퀄리티 보장을 위한 보조 호출. format별 최적 구조
-    (PDF/DOCX는 보고서 스타일, PPTX는 슬라이드, XLSX는 표)로 출력하도록 지시.
-    """
-    fmt = (target_format or "").lower()
-    # 형식별 시스템 프롬프트 — 각 형식의 특성에 맞춘 콘텐츠 구조 유도
-    if fmt == "xlsx":
-        sys_prompt = """당신은 데이터 정리 전문가입니다. 사용자 요청에 맞는 표 형식 데이터를 마크다운 표(|...|...|)로 작성하세요.
-- 첫 행은 헤더, 그 다음 행부터 데이터
-- 최소 5행 이상, 가능하면 10-20행
-- 숫자/날짜/이름은 합리적인 실제 값으로 채우기 (Lorem ipsum 금지)
-- 헤더 위에 1-2 문단의 컨텍스트 설명 추가"""
-    elif fmt == "pptx":
-        sys_prompt = """당신은 프레젠테이션 디자이너입니다. 사용자 요청에 맞는 슬라이드 콘텐츠를 마크다운으로 작성하세요.
-- 각 슬라이드는 ## 제목 + 3-5개 불릿 포인트 (- 시작)
-- 최소 5개 슬라이드, 권장 7-10개
-- 첫 슬라이드는 도입/개요, 마지막 슬라이드는 결론/Next Steps
-- 각 불릿은 구체적이고 정보가 풍부해야 함 (한 단어 단순 나열 금지)"""
-    elif fmt == "pdf" or fmt == "docx":
-        sys_prompt = """당신은 기술 문서 작성자입니다. 사용자 요청에 맞는 보고서를 마크다운으로 작성하세요.
-- ## 헤더로 명확한 섹션 구분 (최소 4개 섹션)
-- 각 섹션은 2-4 문단의 깊이 있는 설명
-- 필요한 곳에 불릿 리스트, 표, 코드 블록 활용
-- 도입(개요) → 본론(상세) → 결론 구조
-- 최소 1500자 이상의 풍부한 내용"""
-    else:
-        sys_prompt = """사용자 요청에 맞는 마크다운 문서를 작성하세요. ## 헤더로 섹션 구분, 풍부한 본문, 적절한 불릿/표 사용."""
-
-    user_prompt = f"""제목: {title or '문서'}
-
-요청 내용:
-{description or '상세 정보 없음'}
-
-{f'참고 컨텍스트(이전 출력 일부):{chr(10)}{existing_text[:800]}' if existing_text else ''}
-
-위 요청에 맞는 고품질 콘텐츠를 마크다운으로 작성해주세요. 실제로 유용한 정보를 채워서 작성하세요."""
-
-    # Sonnet 4.6 우선 — fallback chain
-    candidates = [
-        "us.anthropic.claude-sonnet-4-6-20250929-v1:0",
-        "us.anthropic.claude-sonnet-4-20250514-v1:0",
-        "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-    ]
-    for model_id in candidates:
+    # 최대 2회 시도 — 첫 시도 결과가 임계치 미만이면 재시도
+    best = ""
+    for attempt in range(2):
+        user_msg = user_msg_base
+        if attempt > 0 and best:
+            # 두 번째 시도 — 첫 결과보다 더 풍부하게 작성하라고 지시
+            user_msg += f"\n\n[재시도] 이전 시도는 분량이 부족했습니다 ({len(best)}자). 더 깊이 있고 풍부하게 작성해주세요."
+        messages = [{"role": "user", "content": [{"text": user_msg}]}]
         try:
             result = await asyncio.wait_for(
-                gw.converse(
-                    model_id=model_id,
-                    messages=[{"role": "user", "content": [{"text": user_prompt}]}],
-                    system_prompt=sys_prompt,
-                ),
-                timeout=120,
+                gw.converse(model_id=model_id, messages=messages, system_prompt=sys_prompt),
+                timeout=90,
             )
             if result.get("decision") != "ALLOW":
+                print(f"[Enrich] gateway 거부(attempt {attempt+1}): {result.get('error') or result.get('decision')}")
                 continue
             output = result.get("output", {}).get("message", {}).get("content", [])
             text = "\n".join(c.get("text", "") for c in output if "text" in c).strip()
-            if text and len(text) >= 400:
-                return text
+            if text and len(text) > len(best):
+                best = text
+            if best and len(best) >= quality_min:
+                # 퀄리티 임계치 만족 — 즉시 반환
+                if attempt > 0:
+                    print(f"[Enrich] 재시도로 퀄리티 임계치 달성 ({len(best)}자 >= {quality_min}자)")
+                return best
         except Exception as e:
-            print(f"[QualityGen] {model_id} 실패: {e}")
+            print(f"[Enrich] 예외(attempt {attempt+1}): {e}")
             continue
-    return ""
+
+    # 임계치 미달이지만 가지고 있는 best가 final_text보다 풍부하면 그것 사용
+    if best and len(best) > len(final_text or ""):
+        print(f"[Enrich] 임계치({quality_min}) 미달이지만 best({len(best)}자) 사용")
+        return best
+    return final_text or description or title or "내용 없음"
 
 
 async def _force_generate_from_text(
@@ -2809,17 +2777,14 @@ async def _force_generate_from_text(
     project_path: str,
     aws_profile: str,
     bedrock_user: str,
-    gw=None,
 ):
-    """에이전트가 도구를 안 부른 채 텍스트만 출력했거나 짧은 텍스트만 출력했을 때,
-    시스템이 직접 fallback 도구를 호출해서 파일을 강제 생성한다.
+    """결정적 도구 디스패처 — final_text(보통 _enrich_content_via_gateway로 보강됨)를
+    파일로 변환한다.
 
-    퀄리티 보장 전략:
-    1. final_text가 충분히 풍부하면(>= 800자) 그대로 사용
-    2. final_text가 짧거나 비어있으면 Claude Sonnet으로 description 기반 고품질 콘텐츠 생성
-    3. 이렇게 만들어진 콘텐츠를 결정론적 generator(reportlab/python-pptx/openpyxl/python-docx)에 입력
-
-    이 흐름은 항상 Claude 콘텐츠 + 결정론적 파일 생성을 결합하므로 퀄리티가 유지된다.
+    퀄리티 보장:
+    - 호출 전에 _enrich_content_via_gateway로 Claude가 풍부한 콘텐츠를 만들어 둠
+    - 이 함수는 마크다운 → 결정적 라이브러리(reportlab/python-pptx/openpyxl/python-docx) 변환만 수행
+    - 따라서 결과 파일의 내용 퀄리티 = Claude 출력 퀄리티 그대로
 
     primary_tool과 target_files의 확장자를 보고 어떤 도구를 호출할지 결정한다.
 
@@ -2850,31 +2815,8 @@ async def _force_generate_from_text(
     if not needed_exts:
         return []
 
-    # === 콘텐츠 퀄리티 게이트 ===
-    # final_text가 충분한지 확인. 부족하면 Claude로 보강 콘텐츠 생성.
-    raw_text = (final_text or "").strip()
-    desc_text = (description or "").strip()
-    QUALITY_THRESHOLD = 800  # 800자 미만이면 보강 (사용자 보고서 수준 콘텐츠 보장)
-    needs_enrichment = len(raw_text) < QUALITY_THRESHOLD
-
-    if needs_enrichment and gw is not None:
-        try:
-            # Claude로 고품질 콘텐츠 생성 — 사용자 description + 기존 final_text를 컨텍스트로
-            enriched = await _generate_quality_content(
-                gw=gw, title=title, description=desc_text,
-                existing_text=raw_text, target_format=needed_exts[0],
-                aws_profile=aws_profile, bedrock_user=bedrock_user,
-            )
-            if enriched and len(enriched) >= QUALITY_THRESHOLD:
-                base_text = enriched
-                print(f"[ForceGenerate] 콘텐츠 보강 — {len(raw_text)}자 → {len(enriched)}자")
-            else:
-                base_text = raw_text or desc_text or (title or "문서")
-        except Exception as e:
-            print(f"[ForceGenerate] 콘텐츠 보강 실패(원본 사용): {e}")
-            base_text = raw_text or desc_text or (title or "문서")
-    else:
-        base_text = raw_text or desc_text or (title or "문서")
+    # 본문 텍스트 — final_text가 비어있으면 description, title 순으로 fallback
+    base_text = (final_text or "").strip() or (description or "").strip() or (title or "문서")
 
     # 섹션 단위로 분리 (마크다운 헤더 + 빈 줄)
     sections = _split_into_sections(base_text, fallback_title=title or "본문")
