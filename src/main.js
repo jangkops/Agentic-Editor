@@ -38,40 +38,25 @@ function rebuildModelList() {
   ALL_MODELS.length = 0;
   for (const [p, ms] of Object.entries(MODEL_CATALOG)) ms.forEach(m => ALL_MODELS.push({ ...m, provider: p }));
 }
-// 403 model_denied 시 호출 — 해당 모델을 목록에서 영구 제거 (디스크 영속)
+// 일시적 호출 실패 시 호출 — 모델 제거는 하지 않음 (영구 denylist 금지)
+// 게이트웨이 일시 에러/quota/max_tokens 한계 등은 자동 복구 가능하므로
+// 한 번 실패했다고 모델을 영구 제거하면 안 됨. 사용자가 다시 시도할 수 있어야 함.
 function _removeModelFromCatalog(modelId) {
-  const cleanId = modelId.replace(/^us\.|^eu\.|^global\./, '');
-  if (_deniedModels.has(cleanId)) return; // 이미 제거됨
-  _deniedModels.add(cleanId);
-  for (const [provider, models] of Object.entries(MODEL_CATALOG)) {
-    MODEL_CATALOG[provider] = models.filter(m => m.id !== cleanId);
-    if (!MODEL_CATALOG[provider].length) delete MODEL_CATALOG[provider];
-  }
-  rebuildModelList();
-  renderModelList('');
-  const countEl = document.getElementById('topbar-model-count');
-  if (countEl) countEl.textContent = `${ALL_MODELS.length}개 모델`;
-  // 디스크에 영구 저장 — 재시작 후에도 해당 모델은 목록에 등장하지 않음
-  try {
-    window.electronAPI?.addDeniedModel?.(cleanId);
-  } catch (err) {
-    console.warn('[Model] denylist 영속화 실패:', err?.message || err);
-  }
-  console.log(`[Model] ${cleanId} 제거됨 (호출 불가 — denylist 영구 등록)`);
+  const cleanId = String(modelId || '').replace(/^us\.|^eu\.|^global\./, '');
+  // no-op — 로그만 남기고 카탈로그는 절대 변경하지 않음
+  console.log(`[Model] ${cleanId} 일시 호출 실패 (목록 유지 — 재시도 가능)`);
 }
 
-// 앱 시작 시 디스크에서 denylist 로드 → 메모리 Set 초기화
+// 앱 시작 시 디스크 denylist를 항상 비움 — denylist 기능은 비활성화
+// 게이트웨이 일시 에러/quota/한계 변경은 영구 차단 사유가 아님
 async function _loadDeniedModelsFromDisk() {
   try {
-    const list = await window.electronAPI?.loadDeniedModels?.();
-    if (Array.isArray(list) && list.length > 0) {
-      // 게이트웨이 allowlist 확장(v22)으로 이전 denylist 무효화 — 자동 초기화
-      console.log(`[Model] denylist ${list.length}개 발견 — 게이트웨이 업데이트로 초기화`);
-      try { await window.electronAPI?.clearDeniedModels?.(); } catch (_) {}
-      _deniedModels.clear();
-    }
+    // 디스크 denylist가 남아있으면 항상 클리어
+    try { await window.electronAPI?.clearDeniedModels?.(); } catch (_) {}
+    _deniedModels.clear();
+    console.log('[Model] denylist 비활성화 — 모든 모델 호출 가능');
   } catch (err) {
-    console.warn('[Model] denylist 로드 실패:', err?.message || err);
+    console.warn('[Model] denylist 클리어 실패:', err?.message || err);
   }
 }
 rebuildModelList();
@@ -1752,19 +1737,27 @@ async function runSimpleChat(prompt) {
             continue;
           }
           if (p.error) {
-            // 모델 관련 에러 (Gateway 허용 안 됨, Bedrock validation 실패 등)
-            // → 해당 모델을 목록에서 조용히 제거 + 사용자에게는 간단한 안내만
-            const isModelError = p.error.includes('not in allowed list') || p.error.includes('model_denied')
+            // 모델 관련 에러 분류:
+            // 1) max_tokens 한계 초과 → 자동 재시도 가능, 모델은 유지
+            // 2) tool_use 미지원 → 자동 재시도 (도구 없이), 모델은 유지
+            // 3) 권한/식별자 문제 → 일시적, 모델은 유지 (denylist 영구 제거 금지)
+            const isMaxTokensError = /maximum tokens.*exceeds.*model limit|max tokens.*invalid/i.test(p.error);
+            const isToolError = /tool[_\s-]?use.*not supported|tool[_\s-]?config.*invalid/i.test(p.error);
+            const isAccessError = p.error.includes('not in allowed list') || p.error.includes('model_denied')
                 || p.error.includes('model identifier is invalid') || p.error.includes('ValidationException')
                 || p.error.includes('model_access_denied') || p.error.includes('AccessDeniedException');
-            if (isModelError) {
-              const deniedMatch = p.error.match(/model\s+([\w.\-:]+)\s+not in allowed/);
-              const failedModelId = deniedMatch ? deniedMatch[1] : (state.selectedModel?.id || '');
-              const failedModelName = state.selectedModel?.name || failedModelId;
-              _removeModelFromCatalog(failedModelId);
-              // 사용자 UI에 raw 에러 숨김 → 친화적 안내만 표시
-              msg.content = `이 모델(${failedModelName})은 현재 호출할 수 없습니다. 목록에서 제거되었으니 다른 모델을 선택해 주세요.`;
-              msg._modelRemoved = true;
+            if (isMaxTokensError || isToolError || isAccessError) {
+              const failedModelName = state.selectedModel?.name || state.selectedModel?.id || '모델';
+              // 모델은 카탈로그에 유지 — denylist 영구 제거 금지
+              if (isMaxTokensError) {
+                msg.content = `${failedModelName}: 토큰 한계를 자동 조정해 재시도가 진행됩니다. 잠시만 기다려 주세요. 동일 오류 반복 시 다른 모델을 선택해보세요.`;
+              } else if (isToolError) {
+                msg.content = `${failedModelName}: 도구 호출을 지원하지 않아 도구 없이 재시도합니다.`;
+              } else {
+                msg.content = `${failedModelName} 호출 중 일시적 오류가 발생했습니다. 다시 시도하거나 다른 모델로 같은 작업을 수행할 수 있습니다.`;
+              }
+              msg._modelRemoved = false;
+              addLiveLog('warning', `모델 일시 오류: ${failedModelName}`, p.error.substring(0, 200));
               continue;
             }
             // 토큰 만료 → 자동 재로그인 시도
@@ -1862,18 +1855,23 @@ async function runAgentWorkflow(prompt) {
         try {
           const p = JSON.parse(d);
           if (p.error) {
-            // 모델 관련 에러 → 조용히 제거 + 친화적 메시지
-            const isModelError = p.error.includes('not in allowed list') || p.error.includes('model_denied')
+            // 모델 관련 에러 분류 — denylist 영구 제거 금지
+            const isMaxTokensError = /maximum tokens.*exceeds.*model limit|max tokens.*invalid/i.test(p.error);
+            const isToolError = /tool[_\s-]?use.*not supported|tool[_\s-]?config.*invalid/i.test(p.error);
+            const isAccessError = p.error.includes('not in allowed list') || p.error.includes('model_denied')
                 || p.error.includes('model identifier is invalid') || p.error.includes('ValidationException')
                 || p.error.includes('model_access_denied') || p.error.includes('AccessDeniedException');
-            if (isModelError) {
-              const deniedMatch = p.error.match(/model\s+([\w.\-:]+)\s+not in allowed/);
-              const failedModelId = deniedMatch ? deniedMatch[1] : (state.selectedModel?.id || '');
-              const failedModelName = state.selectedModel?.name || failedModelId;
-              _removeModelFromCatalog(failedModelId);
-              msg.content = `이 모델(${failedModelName})은 현재 호출할 수 없습니다. 목록에서 제거되었으니 다른 모델을 선택해 주세요.`;
-              msg._modelRemoved = true;
-              addLiveLog('error', `모델 호출 실패: ${failedModelName}`, p.error);
+            if (isMaxTokensError || isToolError || isAccessError) {
+              const failedModelName = state.selectedModel?.name || state.selectedModel?.id || '모델';
+              if (isMaxTokensError) {
+                msg.content = `${failedModelName}: 토큰 한계를 자동 조정해 재시도가 진행됩니다. 잠시만 기다려 주세요. 동일 오류 반복 시 다른 모델을 선택해보세요.`;
+              } else if (isToolError) {
+                msg.content = `${failedModelName}: 도구 호출을 지원하지 않아 도구 없이 재시도합니다.`;
+              } else {
+                msg.content = `${failedModelName} 호출 중 일시적 오류가 발생했습니다. 다시 시도하거나 다른 모델로 같은 작업을 수행할 수 있습니다.`;
+              }
+              msg._modelRemoved = false;
+              addLiveLog('warning', `모델 일시 오류: ${failedModelName}`, p.error.substring(0, 200));
               continue;
             }
             // 토큰 만료

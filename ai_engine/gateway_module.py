@@ -11,6 +11,122 @@ from botocore.credentials import Credentials
 from botocore.awsrequest import AWSRequest
 
 
+# ─────────────────────────────────────────────────────────────────
+# Per-model max_tokens limits (Bedrock Converse / ConverseStream)
+# Source: AWS Bedrock model documentation. Update when new models are added.
+# Conservative defaults are used — stay under documented limits to avoid
+# ValidationException ("maximum tokens you requested exceeds the model limit").
+# ─────────────────────────────────────────────────────────────────
+_MODEL_MAX_TOKENS_MAP = {
+    # Anthropic Claude — most support 64K output, Opus 4 supports up to 64K
+    "claude-opus-4":     64000,
+    "claude-sonnet-4":   64000,
+    "claude-haiku-4":    32000,
+    "claude-3-7-sonnet": 64000,
+    "claude-3-5-sonnet": 8192,
+    "claude-3-opus":     4096,
+    "claude-3-haiku":    4096,
+    # Amazon Nova
+    "nova-pro":          5120,
+    "nova-lite":         5120,
+    "nova-micro":        5120,
+    # DeepSeek — R1 has a 32K cap; "lower than 32768" → use 32767
+    "deepseek-r1":       32767,
+    "deepseek":          32767,
+    # Mistral / Pixtral
+    "mistral-large":     8192,
+    "mistral-small":     8192,
+    "pixtral-large":     8192,
+    "pixtral":           8192,
+    # Meta Llama
+    "llama3-3":          8192,
+    "llama3-2":          8192,
+    "llama3-1":          8192,
+    "llama":             8192,
+    # Cohere
+    "command-r":         4000,
+    "command":           4000,
+    # NVIDIA Nemotron
+    "nemotron":          16384,
+    # Writer Palmyra
+    "palmyra":           8192,
+    # AI21 Jamba
+    "jamba":             4096,
+    # Stability/Titan/Nova-Canvas — image models, not used in text mode but
+    # safe defaults if accidentally invoked
+    "stability":         1024,
+    "titan-image":       1024,
+    "nova-canvas":       1024,
+}
+
+# Absolute fallback when no pattern matches — Bedrock minimum guarantee
+_DEFAULT_MAX_TOKENS = 4096
+
+
+def _resolve_model_max_tokens(model_id: str) -> int:
+    """Return the safe max_tokens limit for a model id.
+
+    Matches by case-insensitive substring against `_MODEL_MAX_TOKENS_MAP`.
+    Falls back to `_DEFAULT_MAX_TOKENS` (4096) if no pattern matches —
+    this guarantees we never send a value above any known Bedrock limit.
+
+    Examples:
+        us.deepseek.r1-v1:0           → 32768
+        us.anthropic.claude-opus-4-7  → 64000
+        amazon.nova-pro-v1:0          → 5120
+        unknown-model-id              → 4096
+    """
+    if not model_id:
+        return _DEFAULT_MAX_TOKENS
+    mid = model_id.lower()
+    # Strip common prefixes
+    for pfx in ("us.", "eu.", "global."):
+        if mid.startswith(pfx):
+            mid = mid[len(pfx):]
+            break
+    # Longer keys first (e.g., "claude-3-7-sonnet" before "claude-3")
+    for key in sorted(_MODEL_MAX_TOKENS_MAP.keys(), key=lambda k: -len(k)):
+        if key in mid:
+            return _MODEL_MAX_TOKENS_MAP[key]
+    return _DEFAULT_MAX_TOKENS
+
+
+def _is_max_tokens_error(msg: str) -> bool:
+    """Detect Bedrock max_tokens validation errors."""
+    if not msg:
+        return False
+    low = str(msg).lower()
+    return ("maximum tokens" in low and "exceeds" in low) or \
+           ("validationexception" in low and "max" in low and "token" in low)
+
+
+def _extract_model_token_limit(msg: str) -> int:
+    """Extract the model's actual token limit from an error message.
+
+    Bedrock errors like:
+        'The maximum tokens you requested exceeds the model limit of 32768.'
+
+    Returns 0 if no number can be extracted.
+    """
+    import re
+    if not msg:
+        return 0
+    m = re.search(r"model limit of (\d+)", msg, re.IGNORECASE)
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            return 0
+    # Generic fallback — find any number after "limit"
+    m = re.search(r"limit[^0-9]+(\d{3,6})", msg, re.IGNORECASE)
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            return 0
+    return 0
+
+
 class GatewayClient:
     STREAM_URL = "https://5kzi5pmk6leqq74cq64jza37lu0qipbk.lambda-url.us-west-2.on.aws/"
 
@@ -84,7 +200,13 @@ class GatewayClient:
         else:
             self._try_us_prefix = False
             used_id = model_id
-        body = {"modelId": used_id, "messages": messages, "inferenceConfig": {"maxTokens": int(os.environ.get("AE_MAX_TOKENS", "64000"))}}
+        # 모델별 max_tokens 한계 자동 조정 — ValidationException 방지
+        # 환경변수 AE_MAX_TOKENS는 상한선으로만 작동 (모델 한계가 더 작으면 더 작은 값 사용)
+        env_cap = int(os.environ.get("AE_MAX_TOKENS", "64000"))
+        model_limit = _resolve_model_max_tokens(used_id)
+        # 양쪽의 최소값 사용 — 모델 한계를 절대 초과하지 않음
+        effective_max = min(env_cap, model_limit)
+        body = {"modelId": used_id, "messages": messages, "inferenceConfig": {"maxTokens": effective_max}}
         if system_prompt:
             body["system"] = [{"text": system_prompt}]
         if tool_config:
@@ -280,50 +402,97 @@ class GatewayClient:
         return result
 
     async def stream_sse_realtime(self, model_id, messages, system_prompt="", tool_config=None):
-        """Lambda Function URL — 실시간 SSE 이터레이터 (httpx 비동기, 스레드 고갈 없음)."""
-        url = self.STREAM_URL
-        payload = self._build_payload(model_id, messages, system_prompt, tool_config)
-        body_bytes = json.dumps(payload).encode()
-        creds = self._get_creds()
-        aws_req = AWSRequest(method="POST", url=url, data=body_bytes,
-                             headers={"Content-Type": "application/json"})
-        BotocoreSigV4(creds, "lambda", self.region).add_auth(aws_req)
-        signed_headers = dict(aws_req.headers)
+        """Lambda Function URL — 실시간 SSE 이터레이터 (httpx 비동기, 스레드 고갈 없음).
 
-        try:
-            # read timeout 120s — Lambda 응답이 120초 이상 무응답이면 끊김 감지
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(300.0, connect=30.0, read=120.0)
-            ) as client:
-                async with client.stream("POST", url, content=body_bytes, headers=signed_headers) as resp:
-                    if resp.status_code != 200:
-                        body_text = ""
-                        async for chunk in resp.aiter_text():
-                            body_text += chunk
-                            if len(body_text) > 500:
+        max_tokens 검증 실패 시 자동으로 한계의 50%로 줄여 재시도. 최대 2회 재시도.
+        """
+        max_retries = 2
+        attempt = 0
+        # 시작점 — 모델별 사전 한계
+        current_max = _resolve_model_max_tokens(model_id)
+        # env_cap
+        env_cap = int(os.environ.get("AE_MAX_TOKENS", "64000"))
+        current_max = min(env_cap, current_max)
+
+        while attempt <= max_retries:
+            url = self.STREAM_URL
+            # payload 생성 — current_max 사용
+            payload = self._build_payload(model_id, messages, system_prompt, tool_config)
+            payload["inferenceConfig"]["maxTokens"] = current_max
+            body_bytes = json.dumps(payload).encode()
+            creds = self._get_creds()
+            aws_req = AWSRequest(method="POST", url=url, data=body_bytes,
+                                 headers={"Content-Type": "application/json"})
+            BotocoreSigV4(creds, "lambda", self.region).add_auth(aws_req)
+            signed_headers = dict(aws_req.headers)
+
+            error_event = None
+            had_data = False
+            try:
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(300.0, connect=30.0, read=120.0)
+                ) as client:
+                    async with client.stream("POST", url, content=body_bytes, headers=signed_headers) as resp:
+                        if resp.status_code != 200:
+                            body_text = ""
+                            async for chunk in resp.aiter_text():
+                                body_text += chunk
+                                if len(body_text) > 500:
+                                    break
+                            error_event = {"type": "error", "message": f"Lambda HTTP {resp.status_code}: {body_text[:300]}"}
+                        else:
+                            buf = ""
+                            async for chunk in resp.aiter_text():
+                                buf += chunk
+                                while '\n' in buf:
+                                    line, buf = buf.split('\n', 1)
+                                    line = line.strip()
+                                    if not line or not line.startswith('data: '):
+                                        continue
+                                    try:
+                                        evt = json.loads(line[6:])
+                                    except json.JSONDecodeError:
+                                        continue
+                                    # max_tokens 검증 실패 감지 → 재시도 (yield하지 않음)
+                                    if evt.get("type") == "error":
+                                        msg = (evt.get("message") or evt.get("error") or "")
+                                        if _is_max_tokens_error(msg):
+                                            extracted = _extract_model_token_limit(msg)
+                                            if extracted and extracted - 1 < current_max:
+                                                # 에러는 "lower than X" 라고 함 → X-1 사용
+                                                new_max = max(1024, extracted - 1)
+                                            else:
+                                                new_max = max(1024, int(current_max * 0.5))
+                                            if attempt < max_retries and new_max < current_max:
+                                                print(f"[GW] max_tokens 한계 초과 — {current_max} → {new_max}로 재시도 (attempt {attempt+1})")
+                                                error_event = None  # 외부 루프에서 재시도
+                                                current_max = new_max
+                                                attempt += 1
+                                                # 안쪽 chunk 루프 탈출 → while 루프 재시작
+                                                break
+                                    had_data = True
+                                    yield evt
+                                else:
+                                    # inner while 정상 종료 (break 안 일어남) — 다음 chunk 받기
+                                    continue
+                                # break 발생 — chunk 루프 끝
                                 break
-                        yield {"type": "error", "message": f"Lambda HTTP {resp.status_code}: {body_text[:300]}"}
-                        return
-                    buf = ""
-                    async for chunk in resp.aiter_text():
-                        buf += chunk
-                        while '\n' in buf:
-                            line, buf = buf.split('\n', 1)
-                            line = line.strip()
-                            if not line or not line.startswith('data: '):
-                                continue
-                            try:
-                                yield json.loads(line[6:])
-                            except json.JSONDecodeError:
-                                continue
-        except httpx.ReadTimeout:
-            yield {"type": "error", "message": "Lambda 응답 타임아웃 (120초 무응답)"}
-        except httpx.ConnectTimeout:
-            yield {"type": "error", "message": "Lambda 연결 타임아웃"}
-        except httpx.RemoteProtocolError as e:
-            yield {"type": "error", "message": f"Lambda 연결 끊김: {e}"}
-        except Exception as e:
-            yield {"type": "error", "error": str(e)}
+            except httpx.ReadTimeout:
+                error_event = {"type": "error", "message": "Lambda 응답 타임아웃 (120초 무응답)"}
+            except httpx.ConnectTimeout:
+                error_event = {"type": "error", "message": "Lambda 연결 타임아웃"}
+            except httpx.RemoteProtocolError as e:
+                error_event = {"type": "error", "message": f"Lambda 연결 끊김: {e}"}
+            except Exception as e:
+                error_event = {"type": "error", "error": str(e)}
+
+            # 재시도 케이스 (max_tokens 줄임)
+            if error_event is None and not had_data and attempt <= max_retries:
+                continue
+            # 정상 종료 또는 재시도 불가능한 에러
+            if error_event is not None:
+                yield error_event
+            return
 
     async def _converse_stream_live_once(self, model_id, messages, system_prompt="", tool_config=None):
         """Lambda Function URL을 통한 스트리밍 (1회 시도, httpx 비동기)."""
