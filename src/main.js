@@ -258,7 +258,9 @@ async function initApp() {
     const r = await fetch(`${apiBase()}/api/debug/cwd`);
     if (r.ok) {
       const j = await r.json();
-      if (j && j.cwd) window.__workstationCwd = j.cwd;
+      // generatedRoot 우선 (실제 .generated/ 부모 — userData/generated/ 또는 ~/.agentic-editor/)
+      const root = j.generatedRoot || j.cwd;
+      if (root) window.__workstationCwd = root;
     }
   } catch {}
   // bedrockUser 자동 감지 (설정에 없으면)

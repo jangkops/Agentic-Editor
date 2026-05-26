@@ -371,6 +371,53 @@ def _format_bridge_result(tool_name, br):
 
 # ===== Media Generation Tools =====
 
+def _resolve_local_root(project_path: str = "") -> str:
+    """파일 저장에 사용할 사용자별 쓰기 가능한 로컬 루트 경로 반환.
+
+    우선순위:
+    1. project_path가 로컬에 존재하고 쓰기 가능하면 그대로 사용 (작업 폴더 우선)
+    2. AE_GENERATED_ROOT 환경변수 (Electron이 userData 경로 주입)
+    3. ~/.agentic-editor/ (사용자 홈, 항상 쓰기 가능)
+    4. tempfile.gettempdir() (최후 fallback)
+
+    30명 배포 시 핵심:
+    - 사용자 A의 ~/.agentic-editor/ 와 사용자 B의 ~/.agentic-editor/는 OS 레벨에서 격리
+    - 앱 설치 디렉토리(/Applications/...)는 읽기 전용이라 절대 사용 안 함
+    """
+    # 1) project_path 우선 (사용자가 작업 중인 폴더)
+    if project_path and os.path.isdir(project_path):
+        try:
+            # 쓰기 가능 확인
+            test_file = os.path.join(project_path, ".ae_write_test")
+            with open(test_file, "w") as f:
+                f.write("")
+            os.remove(test_file)
+            return project_path
+        except (OSError, PermissionError):
+            pass
+
+    # 2) Electron이 userData 경로를 환경변수로 주입한 경우
+    env_root = os.environ.get("AE_GENERATED_ROOT", "").strip()
+    if env_root:
+        try:
+            os.makedirs(env_root, exist_ok=True)
+            return env_root
+        except (OSError, PermissionError):
+            pass
+
+    # 3) ~/.agentic-editor/ — 항상 사용자별로 격리됨, 쓰기 가능
+    home_root = os.path.expanduser("~/.agentic-editor")
+    try:
+        os.makedirs(home_root, exist_ok=True)
+        return home_root
+    except (OSError, PermissionError):
+        pass
+
+    # 4) tempdir fallback
+    import tempfile as _tf
+    return _tf.gettempdir()
+
+
 # Image generation model preference chain — ordered by general quality/recency
 IMAGE_MODELS = [
     "stability.stable-image-ultra-v1:1",   # 최고 품질 (사진/리얼리즘)
@@ -491,7 +538,7 @@ async def _tool_generate_image(tool_input: dict, project_path: str, aws_profile:
     # Output path
     # Always use a locally-existing directory for generated media.
     # Remote project_path may not exist locally; fall back to cwd.
-    _local_root = project_path if (project_path and os.path.isdir(project_path)) else os.getcwd()
+    _local_root = _resolve_local_root(project_path)
     gen_dir = os.path.join(_local_root, ".generated")
     os.makedirs(gen_dir, exist_ok=True)
     ts = str(int(_t.time() * 1000))
@@ -707,7 +754,7 @@ async def _tool_generate_pdf(tool_input: dict, project_path: str) -> str:
     import time as _t, re as _re
     # Always use a locally-existing directory for generated media.
     # Remote project_path may not exist locally; fall back to cwd.
-    _local_root = project_path if (project_path and os.path.isdir(project_path)) else os.getcwd()
+    _local_root = _resolve_local_root(project_path)
     gen_dir = os.path.join(_local_root, ".generated")
     os.makedirs(gen_dir, exist_ok=True)
     slug = _slug_from_title(title) or "doc"
@@ -771,7 +818,7 @@ async def _tool_generate_pptx(tool_input: dict, project_path: str, aws_profile: 
     import time as _t, re as _re
     # Always use a locally-existing directory for generated media.
     # Remote project_path may not exist locally; fall back to cwd.
-    _local_root = project_path if (project_path and os.path.isdir(project_path)) else os.getcwd()
+    _local_root = _resolve_local_root(project_path)
     gen_dir = os.path.join(_local_root, ".generated")
     os.makedirs(gen_dir, exist_ok=True)
     slug = _slug_from_title(title) or "deck"
@@ -862,7 +909,7 @@ async def _tool_generate_xlsx(tool_input: dict, project_path: str) -> str:
         return json.dumps({"error": "missing-dep", "lib": "openpyxl", "hint": "pip install openpyxl"})
 
     import time as _t, re as _re
-    _local_root = project_path if (project_path and os.path.isdir(project_path)) else os.getcwd()
+    _local_root = _resolve_local_root(project_path)
     gen_dir = os.path.join(_local_root, ".generated")
     os.makedirs(gen_dir, exist_ok=True)
     slug = _slug_from_title(title) or "workbook"
@@ -943,7 +990,7 @@ async def _tool_generate_docx(tool_input: dict, project_path: str) -> str:
         return json.dumps({"error": "missing-dep", "lib": "python-docx", "hint": "pip install python-docx"})
 
     import time as _t, re as _re
-    _local_root = project_path if (project_path and os.path.isdir(project_path)) else os.getcwd()
+    _local_root = _resolve_local_root(project_path)
     gen_dir = os.path.join(_local_root, ".generated")
     os.makedirs(gen_dir, exist_ok=True)
     slug = _slug_from_title(title) or "doc"
@@ -1125,7 +1172,7 @@ async def _tool_edit_image(tool_input: dict, project_path: str, aws_profile: str
                 # Save
                 # Always use a locally-existing directory for generated media.
                 # Remote project_path may not exist locally; fall back to cwd.
-                _local_root = project_path if (project_path and os.path.isdir(project_path)) else os.getcwd()
+                _local_root = _resolve_local_root(project_path)
                 gen_dir = os.path.join(_local_root, ".generated")
                 os.makedirs(gen_dir, exist_ok=True)
                 ts = str(int(_t.time() * 1000))
@@ -1242,7 +1289,7 @@ async def _tool_edit_image(tool_input: dict, project_path: str, aws_profile: str
                 continue
             # Always use a locally-existing directory for generated media.
             # Remote project_path may not exist locally; fall back to cwd.
-            _local_root = project_path if (project_path and os.path.isdir(project_path)) else os.getcwd()
+            _local_root = _resolve_local_root(project_path)
             gen_dir = os.path.join(_local_root, ".generated")
             os.makedirs(gen_dir, exist_ok=True)
             ts = str(int(_t.time() * 1000))
@@ -1567,8 +1614,16 @@ async def health():
 
 @app.get("/api/debug/cwd")
 async def debug_cwd():
-    """Return server cwd so renderer knows where .generated/ files land."""
-    return {"cwd": os.getcwd()}
+    """Return server cwd + the actual root used for .generated/ files.
+
+    `generatedRoot`는 _resolve_local_root이 사용하는 실제 쓰기 루트.
+    file-preview-panel이 이 값을 보고 .generated/ 위치를 정확히 찾는다.
+    """
+    return {
+        "cwd": os.getcwd(),
+        "generatedRoot": _resolve_local_root(""),
+        "envRoot": os.environ.get("AE_GENERATED_ROOT", ""),
+    }
 
 @app.get("/api/debug/bridge")
 async def debug_bridge():

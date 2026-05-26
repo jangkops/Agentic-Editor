@@ -154,11 +154,12 @@ class FilePreviewPanel extends HTMLElement {
         const r = await fetch(apiUrl);
         if (r.ok) {
           const j = await r.json();
-          if (j && j.cwd) {
-            this._workstationCwd = j.cwd;
-            if (typeof window !== 'undefined') window.__workstationCwd = j.cwd;
-            console.log('[file-preview-panel] workstation cwd fetched:', j.cwd);
-            // setupWatcher 재실행 (다른 dir 감시)
+          // generatedRoot 우선 사용 (실제 .generated/ 부모 폴더)
+          const root = j.generatedRoot || j.cwd;
+          if (root) {
+            this._workstationCwd = root;
+            if (typeof window !== 'undefined') window.__workstationCwd = root;
+            console.log('[file-preview-panel] generated root fetched:', root);
             await this._setupWatcher();
           }
         }

@@ -28,6 +28,21 @@ class ProcessManager {
     const env = { ...process.env, PYTHONUNBUFFERED: '1' };
     if (this._bridgeUrl) env.AE_BRIDGE_URL = this._bridgeUrl;
     if (this._bridgeToken) env.AE_BRIDGE_TOKEN = this._bridgeToken;
+
+    // 사용자별 쓰기 가능한 .generated 루트 — 30명 배포 시 앱 설치 폴더가 읽기 전용일 수 있어
+    // userData 경로(또는 ~/.agentic-editor)를 명시적으로 주입한다.
+    try {
+      const electronApp = require('electron').app;
+      if (electronApp && typeof electronApp.getPath === 'function') {
+        // userData/generated/ — OS가 사용자별로 자동 격리
+        env.AE_GENERATED_ROOT = path.join(electronApp.getPath('userData'), 'generated');
+      } else {
+        env.AE_GENERATED_ROOT = path.join(require('os').homedir(), '.agentic-editor');
+      }
+    } catch (_) {
+      env.AE_GENERATED_ROOT = path.join(require('os').homedir(), '.agentic-editor');
+    }
+
     this._pythonProcess = spawn('python3', [scriptPath], {
       cwd: path.join(__dirname, '..', '..'),
       env,
