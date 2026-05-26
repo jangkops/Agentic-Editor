@@ -101,12 +101,25 @@ class FilePreviewPanel extends HTMLElement {
 
   _generatedDir() {
     if (!this._projectPath) return '';
+    // If project path looks like a remote path (FSx, /home/, etc.), the
+    // Python server stores files in its own cwd. Detect by checking if
+    // the project path is "remote-style" (starts with /fsx, /home, /opt,
+    // or contains an SSH alias prefix). For remote paths, fall back to
+    // the workstation cwd that Electron is running from.
     const p = this._projectPath;
     const isRemoteLike = /^\/fsx\/|^\/home\/|^\/opt\//.test(p) || p.includes('[SSH:');
+    // _workstationCwd가 없으면 window 글로벌에서 한 번 더 시도
+    if (!this._workstationCwd && typeof window !== 'undefined' && window.__workstationCwd) {
+      this._workstationCwd = window.__workstationCwd;
+    }
     if (isRemoteLike && this._workstationCwd) {
       const sep = this._workstationCwd.includes('\\') && !this._workstationCwd.includes('/') ? '\\' : '/';
       const base = this._workstationCwd.replace(/[\\/]+$/, '');
       return `${base}${sep}.generated`;
+    }
+    // 원격 path지만 workstation cwd를 모르는 경우 — Python 서버에서 가져올 때까지 기다림
+    if (isRemoteLike && !this._workstationCwd) {
+      console.warn('[file-preview-panel] remote project but no workstation cwd — files may be invisible');
     }
     const sep = p.includes('\\') && !p.includes('/') ? '\\' : '/';
     const base = p.replace(/[\\/]+$/, '');
@@ -133,6 +146,25 @@ class FilePreviewPanel extends HTMLElement {
   }
 
   async _refresh() {
+    // workstation cwd가 아직 없고 project-path가 원격이면 적극적으로 fetch
+    if (!this._workstationCwd && this._projectPath &&
+        /^\/fsx\/|^\/home\/|^\/opt\//.test(this._projectPath)) {
+      try {
+        const apiUrl = (typeof apiBase === 'function' ? apiBase() : 'http://127.0.0.1:8765') + '/api/debug/cwd';
+        const r = await fetch(apiUrl);
+        if (r.ok) {
+          const j = await r.json();
+          if (j && j.cwd) {
+            this._workstationCwd = j.cwd;
+            if (typeof window !== 'undefined') window.__workstationCwd = j.cwd;
+            console.log('[file-preview-panel] workstation cwd fetched:', j.cwd);
+            // setupWatcher 재실행 (다른 dir 감시)
+            await this._setupWatcher();
+          }
+        }
+      } catch (_e) { /* best-effort */ }
+    }
+
     const dir = this._generatedDir();
     if (!dir || !window.electronAPI || typeof window.electronAPI.listFilesWithStats !== 'function') {
       this._items = [];
