@@ -4,14 +4,14 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1.0">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self' http://localhost:* https://raw.githubusercontent.com https://cdn.jsdelivr.net https://*.github.com https://*.githubusercontent.com; img-src 'self' data:; worker-src 'self' blob: https://cdn.jsdelivr.net; font-src 'self' https://cdn.jsdelivr.net data:;">
-  <title>AI 에디터</title>
+  <title>Mogam Works</title>
   <link rel="stylesheet" href="styles/layout.css">
   <link rel="stylesheet" href="styles/components.css">
 </head>
 <body>
 <div id="app">
   <div class="topbar">
-    <span class="app-title">◆ AI 에디터</span>
+    <span class="app-title">◆ Mogam Works</span>
     <span style="flex:1"></span>
     <span class="topbar-sep" id="topbar-model-count"></span>
     <div class="topbar-gauge" id="topbar-quota-gauge" title="월간 사용량 로딩 중..." style="-webkit-app-region:no-drag;display:flex;align-items:center;gap:4px;cursor:default">
@@ -38,7 +38,7 @@
       <button class="lp-btn" id="btn-source-control">소스 제어</button>
       <button class="lp-btn" id="btn-github-import">GitHub</button>
       <button class="lp-btn" id="btn-remote-explorer">Remote <span id="remote-indicator" style="display:none;margin-left:4px;">●</span></button>
-      <button class="lp-btn" id="btn-generated-files" title="생성된 미디어 파일">생성</button>
+      <button class="lp-btn" id="btn-generated-files" title="생성된 미디어 파일 · PPTX 템플릿">생성</button>
     </div>
     <div class="file-tree-path" id="file-tree-path" style="display:flex;align-items:center">
       <button class="ft-action-btn" id="btn-open-folder" title="프로젝트 열기" style="flex-shrink:0;margin-right:4px;font-size:11px;padding:2px 6px">+</button>
@@ -58,9 +58,22 @@
     <!-- Remote Explorer 패널 (VS Code 스타일) -->
     <div class="file-tree" id="remote-explorer-panel" style="display:none"></div>
 
-    <!-- Generated Files 패널 (이미지/PDF/PPTX 미리보기) -->
-    <div id="generated-files-panel" style="display:none;flex:1;overflow:hidden">
-      <file-preview-panel id="file-preview-panel"></file-preview-panel>
+    <!-- 생성 패널 (PPTX 템플릿 관리 + 생성된 미디어 파일 미리보기 통합) -->
+    <div id="generated-files-panel" style="display:none;flex:1;overflow:hidden;flex-direction:column">
+      <!-- 템플릿 섹션 (접이식 — PPTX 템플릿 등록·미리보기·삭제) -->
+      <div id="gen-template-section">
+        <button id="gen-template-toggle" class="gen-section-toggle" type="button" aria-expanded="true" title="PPTX 템플릿 관리">
+          <span class="gen-section-caret">▾</span>
+          <span class="gen-section-label">PPTX 템플릿</span>
+        </button>
+        <div id="gen-template-body">
+          <template-panel id="template-panel"></template-panel>
+        </div>
+      </div>
+      <!-- 생성된 파일 미리보기 섹션 (이미지/PDF/PPTX) -->
+      <div id="gen-files-section">
+        <file-preview-panel id="file-preview-panel"></file-preview-panel>
+      </div>
     </div>
     <!-- 우클릭 컨텍스트 메뉴 -->
     <div id="file-context-menu" class="context-menu" style="display:none"></div>
@@ -194,7 +207,7 @@
       <div id="attached-files-area" class="attached-files"></div>
       <div class="chat-input-row">
         <button class="attach-btn" id="btn-attach" title="파일 첨부">+</button>
-        <input type="file" id="file-attach-input" accept=".pdf,.pptx,.xlsx,.png,.jpg,.jpeg" multiple style="display:none">
+        <input type="file" id="file-attach-input" accept=".pdf,.pptx,.xlsx,.png,.jpg,.jpeg,.zip,.docx,.txt,.md,.json,.csv,.py,.js,.ts,.html,.css,.yaml,.yml" multiple style="display:none">
         <textarea class="chat-textarea" id="chat-input" placeholder="무엇이든 물어보세요..." rows="1"></textarea>
         <button class="send-btn" id="send-btn">전송</button>
       </div>
@@ -254,12 +267,16 @@
 <remote-host-key-dialog></remote-host-key-dialog>
 <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.50.0/min/vs/loader.js"></script>
 <script src="lib/utils.js"></script>
+<script src="lib/image-thumbnails.js"></script>
+<script src="lib/file-list-sort.js"></script>
+<script src="lib/file-size.js"></script>
 <script src="components/image-viewer.js"></script>
 <script src="components/pdf-viewer.js"></script>
 <script src="components/pptx-viewer.js"></script>
 <script src="components/docx-viewer.js"></script>
 <script src="components/xlsx-viewer.js"></script>
 <script src="components/file-preview-panel.js"></script>
+<script src="components/template-panel.js"></script>
 <script src="components/denylist-manager.js"></script>
 <script src="components/remote-host-picker.js"></script>
 <script src="components/remote-ad-hoc-dialog.js"></script>

@@ -38,11 +38,17 @@ function registerFsHandlers(mainWindow) {
 
   /**
    * 파일 열기 다이얼로그
+   * 선택적 opts.filters 지원 — 인자가 없으면 기존 동작과 동일 (하위호환).
+   * 예: openFile({ filters: [{ name: 'PowerPoint', extensions: ['pptx'] }] })
+   * (요구사항 8.3, design §구성요소 8 — Template_Upload_Control의 .pptx 필터)
+   * @param {IpcMainInvokeEvent} _evt - IPC 이벤트 (사용 안 함)
+   * @param {{filters?: Array}} [opts] - 선택적 다이얼로그 옵션
+   * @returns {string|null} 선택된 파일 경로 또는 취소 시 null
    */
-  ipcMain.handle('fs:open-file', async () => {
-    const result = await dialog.showOpenDialog(mainWindow, {
-      properties: ['openFile'],
-    });
+  ipcMain.handle('fs:open-file', async (_evt, opts) => {
+    const properties = ['openFile'];
+    const filters = (opts && Array.isArray(opts.filters)) ? opts.filters : [];
+    const result = await dialog.showOpenDialog(mainWindow, { properties, filters });
     return result.canceled ? null : result.filePaths[0];
   });
 
@@ -234,6 +240,26 @@ function registerFsHandlers(mainWindow) {
   ipcMain.handle('fs:show-save-dialog', async (_, opts) => {
     try {
       const options = opts || {};
+      // TASK 8 — sourcePath 사전 검증.
+      // file-preview-panel이 표시한 path가 실제 디스크에 없거나 0바이트인 경우
+      // 사용자가 다운로드를 눌러도 빈 파일이 복사되거나 ENOENT로 실패한다.
+      // 다이얼로그 띄우기 전에 분명한 에러 반환해 사용자가 원인을 알게 한다.
+      if (options.sourcePath && !options.remote) {
+        try {
+          const st = fs.statSync(options.sourcePath);
+          if (!st.isFile()) {
+            return { ok: false, error: `소스가 파일이 아닙니다: ${options.sourcePath}` };
+          }
+          if (st.size <= 0) {
+            return { ok: false, error: `빈 파일입니다 (0 bytes): ${options.sourcePath}` };
+          }
+        } catch (statErr) {
+          return {
+            ok: false,
+            error: `파일을 찾을 수 없습니다: ${options.sourcePath} (${statErr.code || statErr.message || 'ENOENT'})`,
+          };
+        }
+      }
       const result = await dialog.showSaveDialog(mainWindow, {
         defaultPath: options.defaultPath || '',
         filters: options.filters || [],
@@ -313,6 +339,78 @@ function registerFsHandlers(mainWindow) {
     } catch (err) {
       console.error(`[fs:list-files-with-stats] failed:`, err.message);
       return [];
+    }
+  });
+
+  /**
+   * Local-only variant — bypasses remote SFTP bridge so file-preview-panel can
+   * see files written to the workstation's _resolve_local_root() (e.g.
+   * ~/.agentic-editor/.generated/) even while a remote SSH session is active.
+   *
+   * Without this, the panel passed the local path through fs:list-files-with-stats
+   * which routes via SFTP — the remote host has no such directory, returning [].
+   * Result: user sees "no generated files" while the agent reports 5 verified files.
+   */
+  ipcMain.handle('fs:list-files-with-stats-local', async (_, dirPath) => {
+    try {
+      if (!fs.existsSync(dirPath)) return [];
+      const names = fs.readdirSync(dirPath);
+      return names.map(n => {
+        const full = require('path').join(dirPath, n);
+        try {
+          const st = fs.statSync(full);
+          return {
+            name: n,
+            path: full,
+            isDirectory: st.isDirectory(),
+            size: st.size,
+            mtime: st.mtime.toISOString(),
+          };
+        } catch {
+          return { name: n, path: full, isDirectory: false, size: 0, mtime: null };
+        }
+      });
+    } catch (err) {
+      console.error(`[fs:list-files-with-stats-local] failed:`, err.message);
+      return [];
+    }
+  });
+
+  /**
+   * Local-only file read (binary base64) — same rationale as the local list
+   * variant above. Used by file-preview-panel for thumbnails of files saved
+   * to the workstation's local root while a remote session is active.
+   */
+  ipcMain.handle('fs:read-file-base64-local', async (_, filePath) => {
+    try {
+      if (!fs.existsSync(filePath)) return null;
+      return fs.readFileSync(filePath).toString('base64');
+    } catch (err) {
+      console.error(`[fs:read-file-base64-local] failed:`, err.message);
+      return null;
+    }
+  });
+
+  /**
+   * Local-only file delete — same rationale as the local list/read variants.
+   * file-preview-panel reads the workstation's local .generated/ via
+   * fs:list-files-with-stats-local, but the generic fs:delete-file routes
+   * through the SFTP bridge when a remote SSH session is active — so a local
+   * file silently fails to delete (bridge has no such path). This local-only
+   * variant always uses fs.unlinkSync on the local filesystem.
+   * (이슈 3: 삭제 경로 불일치 수정)
+   * @param {string} filePath - 삭제할 로컬 파일 경로
+   * @returns {boolean} 성공 여부
+   */
+  ipcMain.handle('fs:delete-file-local', async (_, filePath) => {
+    try {
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+      return true;
+    } catch (error) {
+      console.error(`[fs:delete-file-local] Failed to delete ${filePath}:`, error.message);
+      throw new Error(error.message);
     }
   });
 

@@ -190,50 +190,41 @@ const TASK_EXECUTION_STRATEGIES = {
   'pdf-gen': {
     pipeline: {
       stages: [
-        { stage: 'outline',  task: 'architecture',  label: '문서 구조·목차 설계' },
-        { stage: 'content',  task: 'pdf-gen',       label: '본문 작성' },
-        { stage: 'imgplan',  task: 'image-prompt',  label: '표지·다이어그램 컨셉 정교화' },
-        { stage: 'image',    task: 'image-gen',     label: '표지·다이어그램 이미지 생성' },
+        { stage: 'generate', task: 'pdf-gen', label: '문서 생성 (편집 가능 고품질)' },
       ],
-      reason: '구조 → 본문 → 시각자료 컨셉 → 이미지 생성 4단계로 품질 극대화',
+      reason: '단일 생성으로 결과물 1개만 산출 — 단계 중복 생성/품질 편차 방지',
     },
   },
   'pptx-gen': {
     pipeline: {
       stages: [
-        { stage: 'outline',  task: 'architecture',  label: '슬라이드 구조 설계' },
-        { stage: 'content',  task: 'pptx-gen',      label: '각 슬라이드 내용 작성' },
-        { stage: 'imgplan',  task: 'image-prompt',  label: '슬라이드 이미지 컨셉 정교화' },
-        { stage: 'image',    task: 'image-gen',     label: '슬라이드 이미지·아이콘 생성' },
+        { stage: 'generate', task: 'pptx-gen', label: '발표자료 생성 (편집 가능 고품질)' },
       ],
-      reason: '구조 → 내용 → 이미지 컨셉 → 이미지 생성 4단계로 발표자료 품질 극대화',
+      reason: '단일 생성으로 결과물 1개만 산출 — 단계 중복 생성/품질 편차 방지',
     },
   },
   'xlsx-work': {
     pipeline: {
       stages: [
-        { stage: 'parse',    task: 'xlsx-work',     label: '데이터 파싱·계산' },
-        { stage: 'narrate',  task: 'pdf-gen',       label: '결과 해설·인사이트' },
+        { stage: 'generate', task: 'xlsx-work', label: '엑셀 생성 (데이터·해설 포함)' },
       ],
-      reason: '수치는 코딩 모델, 해설은 추론 모델이 강점',
+      reason: '단일 생성으로 결과물 1개만 산출',
     },
   },
   'docx-work': {
     pipeline: {
       stages: [
-        { stage: 'outline',  task: 'architecture',  label: '문서 구조 설계' },
-        { stage: 'content',  task: 'docx-work',     label: '본문 작성' },
+        { stage: 'generate', task: 'docx-work', label: '문서 생성 (편집 가능)' },
       ],
-      reason: '구조 → 본문으로 분리하면 일관성 유지',
+      reason: '단일 생성으로 결과물 1개만 산출',
     },
   },
   'hwp-work': {
     pipeline: {
       stages: [
-        { stage: 'outline',  task: 'architecture',  label: '문서 구조 설계' },
-        { stage: 'content',  task: 'hwp-work',      label: '한글 본문 작성 (한국어 자연스러움)' },
+        { stage: 'generate', task: 'hwp-work', label: '한글 문서 생성' },
       ],
-      reason: '구조는 추론 모델, 한글 본문은 한국어 강점 모델로 분리',
+      reason: '단일 생성으로 결과물 1개만 산출',
     },
   },
   'drawio-work': {
@@ -299,8 +290,8 @@ const TASK_PATTERNS = [
   { id: 'diagram-gen',   pattern: /다이어그램.*(만들|생성|그려)|mermaid|plantuml|flowchart|시퀀스.*다이어그램|클래스.*다이어그램|아키텍처.*도식|관계도|순서도/i, description: '다이어그램 생성 (mermaid/plantuml)' },
 
   // 슬라이드 분석 — pptx-gen보다 먼저
-  { id: 'pptx-analysis', pattern: /pptx.*(분석|요약|읽|내용|추출)|슬라이드.*(분석|요약|읽|내용)|발표.*(자료.*분석|요약)/i, extPattern: /\.pptx?$/i, description: 'PPTX 슬라이드 분석' },
-  { id: 'pptx-gen',      pattern: /pptx|파워포인트|프레젠테이션|슬라이드.*만들|발표.*자료|deck.*create/i, extPattern: /\.pptx?$/i, description: 'PPTX 슬라이드 생성' },
+  { id: 'pptx-analysis', pattern: /pptx?.*(분석|요약|읽|내용|추출)|슬라이드.*(분석|요약|읽|내용)|발표.*(자료.*분석|요약)/i, extPattern: /\.pptx?$/i, description: 'PPTX 슬라이드 분석' },
+  { id: 'pptx-gen',      pattern: /pptx?|피피티|파워포인트|프레젠테이션|슬라이드.*(만들|제작|생성)|발표.*자료|deck.*create/i, extPattern: /\.pptx?$/i, description: 'PPTX 슬라이드 생성' },
 
   // 엑셀 분석 — xlsx-work보다 먼저
   { id: 'xlsx-analysis', pattern: /xlsx.*(분석|요약|읽|내용|인사이트)|엑셀.*(분석|요약|인사이트|차트.*해석)|스프레드시트.*(분석|요약)/i, extPattern: /\.xlsx?$/i, description: '엑셀 데이터 분석' },
@@ -349,6 +340,38 @@ function _compareVersions(idA, idB, prefix) {
   return 0;
 }
 
+// ─── 모델 ID에서 사용자 친화 버전 라벨 동적 생성 ───────────────────────
+// 카탈로그에 어떤 최신 버전이 추가돼도(opus 4-8, sonnet 4-7 등) 라벨이 자동 반영된다.
+// 하드코딩된 후보 라벨(c.name) 대신 실제 매칭된 모델 ID의 버전을 파싱한다.
+//   anthropic.claude-opus-4-7-20251015-v1:0   → "Claude Opus 4.7"
+//   anthropic.claude-opus-4-8-...             → "Claude Opus 4.8"
+//   anthropic.claude-opus-4-20250514-v1:0     → "Claude Opus 4"  (마이너 없음·날짜만)
+//   anthropic.claude-3-5-sonnet-20241022-v2:0 → "Claude Sonnet 3.5"
+//   anthropic.claude-3-opus-20240229-v1:0     → "Claude Opus 3"
+function _refineModelLabel(modelId, fallbackName) {
+  const id = String(modelId || '').toLowerCase().replace(/^(us|eu|global)\./, '');
+  const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+
+  // 최신 세대: claude-<family>-<major>(-<minor>)?(-<date>)?
+  let m = id.match(/claude-(opus|sonnet|haiku)-(\d+)(?:-(\d+))?/);
+  if (m) {
+    const family = cap(m[1]);
+    const major = m[2];
+    const maybeMinor = m[3];
+    // 마이너 자리가 날짜(YYYYMMDD, 3자리 이상)면 마이너 없음으로 간주
+    let ver = major;
+    if (maybeMinor && maybeMinor.length <= 2) ver = `${major}.${maybeMinor}`;
+    return `Claude ${family} ${ver}`;
+  }
+  // 레거시: claude-3-5-sonnet / claude-3-opus
+  m = id.match(/claude-(\d+)-(\d+)-(opus|sonnet|haiku)/);
+  if (m) return `Claude ${cap(m[3])} ${m[1]}.${m[2]}`;
+  m = id.match(/claude-(\d+)-(opus|sonnet|haiku)/);
+  if (m) return `Claude ${cap(m[2])} ${m[1]}`;
+
+  return fallbackName;
+}
+
 function _findTopModelsForTask(taskId, currentModelId, availableModels, maxCount) {
   const candidates = TASK_MODEL_MAP[taskId];
   if (!candidates || !candidates.length) return [];
@@ -368,7 +391,9 @@ function _findTopModelsForTask(taskId, currentModelId, availableModels, maxCount
     const match = matches.find(m => m.id !== currentModelId && !seen.has(m.id));
     if (!match) continue;
     seen.add(match.id);
-    results.push({ ...match, traits: { name: c.name, desc: c.desc } });
+    // 라벨은 실제 매칭 모델 ID 기준으로 최신 버전을 동적 표기 (Claude 계열).
+    // Claude가 아니면 후보 정의의 이름(c.name)을 그대로 사용.
+    results.push({ ...match, traits: { name: _refineModelLabel(match.id, c.name), desc: c.desc } });
   }
   return results;
 }
@@ -419,7 +444,19 @@ function getModelRecommendation(text, currentModelId) {
   }
   if (!matchedTask) return null;
 
-  const tops = _findTopModelsForTask(matchedTask.id, currentModelId, availableModels, 3);
+  let tops = _findTopModelsForTask(matchedTask.id, currentModelId, availableModels, 3);
+  // 이미지 생성/편집 — Vertex(Nano Banana Pro)가 항상 1순위로 사용된다.
+  // 카탈로그에 Bedrock 이미지 모델(Stability 등)이 없어도 추천이 사라지지 않도록
+  // Vertex 가상 엔트리를 후보 맨 앞에 보장한다(사용자 요구: Vertex 당연·이미지 특화 필수).
+  if (matchedTask.id === 'image-gen' || matchedTask.id === 'image-edit') {
+    const hasVx = tops.some(m => /vertex|nano-banana/i.test(m.id || ''));
+    if (!hasVx) {
+      tops = [{
+        id: 'vertex.nano-banana-pro',
+        traits: { name: 'Vertex Nano Banana Pro', desc: '이미지 특화 — Vertex(Gemini), 한글·텍스트 정확도 최고' },
+      }, ...tops];
+    }
+  }
   if (!tops.length) return null;
 
   const best = tops[0];
@@ -462,14 +499,24 @@ function getModelRecommendation(text, currentModelId) {
   if (strategy.pipeline) {
     const stages = [];
     for (const s of strategy.pipeline.stages) {
+      let stModel = null;
       const ms = _findTopModelsForTask(s.task, '', availableModels, 1);
-      if (!ms.length) { stages.length = 0; break; }
-      stages.push({
-        stage: s.stage,
-        label: s.label,
-        task: s.task,
-        model: { id: ms[0].id, name: ms[0].traits.name || ms[0].name, desc: ms[0].traits.desc || '' },
-      });
+      if (ms.length) {
+        stModel = { id: ms[0].id, name: ms[0].traits.name || ms[0].name, desc: ms[0].traits.desc || '' };
+      }
+      if (s.task === 'image-gen') {
+        // 이미지 단계는 Vertex(Nano Banana Pro)가 항상 우선 사용되고 Stability가 폴백.
+        // 카탈로그에 Bedrock 이미지 모델이 없어도 파이프라인이 누락되지 않도록
+        // Vertex 가상 엔트리를 보장한다(사용자 요구: 이미지 특화 모델 필수 추천).
+        const stab = stModel ? stModel.name : 'Stable Image';
+        stModel = {
+          id: (ms.length ? ms[0].id : 'vertex.nano-banana-pro'),
+          name: `Vertex Nano Banana Pro + ${stab}`,
+          desc: '이미지 특화 — Vertex(Gemini) 우선, Stability 자동 폴백',
+        };
+      }
+      if (!stModel) { stages.length = 0; break; }
+      stages.push({ stage: s.stage, label: s.label, task: s.task, model: stModel });
     }
     if (stages.length === strategy.pipeline.stages.length) {
       options.pipeline = {
@@ -479,6 +526,15 @@ function getModelRecommendation(text, currentModelId) {
     }
   }
 
+  // 문서·이미지·비디오 생성 작업 — 파이프라인을 최우선 추천(첫 탭·활성).
+  // 사용자 요구: 어떤 모델로 물어보든 ppt/pdf/이미지 슬라이드 제작은 파이프라인 우선,
+  // 이미지 특화 모델(Vertex/Stability)이 반드시 단계에 포함되게 한다.
+  const GEN_TASKS = new Set([
+    'pptx-gen', 'pdf-gen', 'docx-work', 'xlsx-work', 'hwp-work',
+    'image-gen', 'video-gen', 'diagram-gen', 'drawio-work', 'image-edit',
+  ]);
+  const pipelineFirst = GEN_TASKS.has(matchedTask.id) && !!options.pipeline;
+
   return {
     id: matchedTask.id,
     description: matchedTask.description,
@@ -487,6 +543,11 @@ function getModelRecommendation(text, currentModelId) {
     targetModel: best,
     candidates: options.single.candidates,
     recommend: 'multi-strategy',
+    pipelineFirst,
+    // 이미지/비디오 생성 작업은 채팅 모델 셀렉터를 교체하면 안 된다(도구 호출 불가).
+    // informational=true이면 카드는 "어떤 특화 모델이 자동 선택될지" 안내만 하고,
+    // 선택 시 채팅 모델을 유지한 채 정상 진행한다 (generate_image 도구가 자동 라우팅).
+    informational: (matchedTask.id === 'image-gen' || matchedTask.id === 'video-gen'),
   };
 }
 
@@ -501,9 +562,19 @@ function showRecommendationCard(recommendation) {
     if (recommendation.recommend === 'multi-strategy' && recommendation.options) {
       const opts = recommendation.options;
       const tabs = [];
-      if (opts.single)    tabs.push({ key: 'single',   label: '단일' });
-      if (opts.parallel)  tabs.push({ key: 'parallel', label: `병렬 (${opts.parallel.models.length})` });
-      if (opts.pipeline)  tabs.push({ key: 'pipeline', label: `파이프라인 (${opts.pipeline.stages.length}단계)` });
+      const _tabSingle = () => ({ key: 'single', label: '단일' });
+      const _tabParallel = () => ({ key: 'parallel', label: `병렬 (${opts.parallel.models.length})` });
+      const _tabPipeline = () => ({ key: 'pipeline', label: `파이프라인 (${opts.pipeline.stages.length}단계)${recommendation.pipelineFirst ? ' ★추천' : ''}` });
+      if (recommendation.pipelineFirst && opts.pipeline) {
+        // 생성 작업 — 파이프라인 최우선(첫 탭·활성)
+        tabs.push(_tabPipeline());
+        if (opts.parallel) tabs.push(_tabParallel());
+        if (opts.single)   tabs.push(_tabSingle());
+      } else {
+        if (opts.single)    tabs.push(_tabSingle());
+        if (opts.parallel)  tabs.push(_tabParallel());
+        if (opts.pipeline)  tabs.push(_tabPipeline());
+      }
 
       const tabHtml = tabs.map((t, i) =>
         `<button class="recommend-tab${i === 0 ? ' active' : ''}" data-tab="${t.key}">${t.label}</button>`
@@ -532,9 +603,30 @@ function showRecommendationCard(recommendation) {
       };
 
       const body = card.querySelector('[data-tab-body]');
+      const isInfo = !!recommendation.informational;
       const renderTab = (key) => {
         body.innerHTML = '';
         if (key === 'single') {
+          if (isInfo) {
+            // 이미지/비디오 생성 — 채팅 모델을 교체하지 않고 어떤 특화 모델이
+            // 자동 선택될지 순위로 보여준 뒤, 현재 채팅 모델로 그대로 생성 진행.
+            body.innerHTML = `<div class="recommend-reason">${esc(opts.single.reason)} — 아래 특화 모델이 자동 선택됩니다.</div>` +
+              `<div class="recommend-strategy-list">` +
+              opts.single.candidates.map(m =>
+                `<div class="recommend-strategy-item">
+                  <span class="recommend-rank">${m.rank}위</span>
+                  <span class="recommend-model-name">${esc(m.name)}</span>
+                  <span class="recommend-model-desc">${esc(m.desc)}</span>
+                </div>`
+              ).join('') + `</div>` +
+              `<button class="recommend-btn accept" data-action="proceed-info">이 모델로 생성 진행</button>`;
+            const piBtn = body.querySelector('[data-action="proceed-info"]');
+            if (piBtn) piBtn.addEventListener('click', () => {
+              recommendation.recommend = 'image-proceed';
+              cleanup(); resolve('accept');
+            });
+            return;
+          }
           body.innerHTML = `<div class="recommend-reason">${esc(opts.single.reason)}</div>` +
             opts.single.candidates.map(m =>
               `<button class="recommend-btn accept recommend-multi" data-action="select-single" data-model-id="${esc(m.id)}" data-model-name="${esc(m.name)}">
@@ -708,6 +800,7 @@ if (typeof window !== 'undefined') {
   window.getModelRecommendation = getModelRecommendation;
   window.showRecommendationCard = showRecommendationCard;
   window.applyRecommendation = applyRecommendation;
+  window.refineModelLabel = _refineModelLabel;
   window.MODEL_RECOMMEND_API = {
     TASK_MODEL_MAP,
     TASK_PATTERNS,

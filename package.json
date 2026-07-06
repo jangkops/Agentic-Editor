@@ -4,7 +4,8 @@
   "main": "electron/main.js",
   "scripts": {
     "predev": "node scripts/setup-venv.js && (lsof -ti:8765 | xargs kill -9 2>/dev/null || true)",
-    "dev:python": "ai_engine/.venv/bin/python -m uvicorn ai_engine.server:app --reload --reload-dir ai_engine --port 8765 --workers 1 --timeout-keep-alive 300",
+    "dev:python": "ai_engine/.venv/bin/python -m uvicorn ai_engine.server:app --port 8765 --workers 1 --timeout-keep-alive 300",
+    "dev:python:reload": "ai_engine/.venv/bin/python -m uvicorn ai_engine.server:app --reload --reload-dir ai_engine --port 8765 --workers 1 --timeout-keep-alive 300",
     "dev:electron": "wait-on http://localhost:8765/health && electron .",
     "dev": "concurrently \"npm:dev:python\" \"npm:dev:electron\"",
     "setup:venv": "node scripts/setup-venv.js",
@@ -18,7 +19,10 @@
     "postinstall": "npx @electron/rebuild -f -w node-pty || echo 'electron-rebuild skipped'"
   },
   "dependencies": {
-    "electron": "^28.0.0",
+    "@aws-sdk/client-sso": "^3.1079.0",
+    "@aws-sdk/client-sso-oidc": "^3.1079.0",
+    "@aws-sdk/client-sts": "^3.1079.0",
+    "@aws-sdk/credential-providers": "^3.1079.0",
     "node-pty": "^1.1.0",
     "xterm": "^5.3.0",
     "xterm-addon-fit": "^0.8.0"
@@ -26,7 +30,9 @@
   "devDependencies": {
     "@electron/rebuild": "^3.7.2",
     "concurrently": "^8.2.0",
+    "electron": "^28.0.0",
     "electron-builder": "^24.0.0",
+    "fast-check": "^4.8.0",
     "jest": "^29.7.0",
     "wait-on": "^7.0.0"
   }

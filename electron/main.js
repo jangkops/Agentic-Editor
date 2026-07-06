@@ -12,7 +12,7 @@ const path = require('path');
 // Core managers
 const { ProcessManager } = require('./core/process-manager');
 const { DataStore } = require('./core/data-store');
-const { AwsSsoManager } = require('./core/aws-sso-manager');
+const { AwsSsoManager, resolveDefaultSsoPreset } = require('./core/aws-sso-manager');
 
 // Window management
 const { WindowManager } = require('./src/window-manager');
@@ -25,6 +25,13 @@ const { registerTerminalHandlers } = require('./src/ipc-terminal-handlers');
 const { registerProjectHandlers } = require('./src/ipc-project-handlers');
 const { registerGitHandlers } = require('./src/ipc-git-handlers');
 const { registerRemoteHandlers } = require('./src/ipc-remote-handlers');
+// Slides — HTML → PNG via headless BrowserWindow (Genspark/Gamma-class output).
+// Loaded here so the bridge-server (which exposes it over HTTP for ai_engine)
+// can require the same module without circular deps.
+const { registerSlidesHandlers, renderHtmlToPng } = require('./src/ipc-slides-handler');
+// Templates — `template:*` channels proxied to the FastAPI backend
+// (/api/templates ...). See .kiro/specs/pptx-template-styling/tasks.md §13.4.
+const { registerTemplateHandlers } = require('./src/ipc-template-handlers');
 
 // Remote SSH — session manager & router
 // The RemoteSessionManager owns the set of live SSH sessions and the
@@ -71,7 +78,7 @@ app.whenReady().then(() => {
   // Bridge server: enables AI agent tools to operate on remote files via SSH.
   // Must start AFTER sessionRouter is wired so bridge can route requests.
   const { startBridgeServer } = require('./src/remote/bridge-server');
-  startBridgeServer({ sessionRouter, logger: console }).then((bridge) => {
+  startBridgeServer({ sessionRouter, logger: console, renderHtmlToPng }).then((bridge) => {
     processManager.setBridgeEnv(bridge.url, bridge.token);
     // Write a discovery file so an externally-started ai_engine (e.g.
     // `npm run dev:python` started before Electron) can find the bridge.
@@ -327,6 +334,61 @@ function registerAllIpcHandlers() {
   // AWS SSO
   registerSsoHandlers(ssoManager);
 
+  // AWS SSO 온보딩 — ~/.aws/config에 SSO 프로파일 블록을 기록 (spec app-deployment-readiness §6.1).
+  // security.md("All handlers registered in electron/main.js only")를 엄격히 준수하기 위해
+  // 이 핸들러는 별도 모듈이 아닌 main.js에서 직접 등록한다. 실제 config 파일 쓰기 로직과
+  // secret-free 블록 생성(buildSsoProfileBlock)은 AwsSsoManager.writeSsoProfile에 위치한다.
+  // 반환 계약: 성공 {success:true, profile}, 중복 {success:false, duplicate:true, error},
+  //            권한 오류 {success:false, error, manualHint:<수동 붙여넣기용 ini 블록>}.
+  ipcMain.handle('aws:write-sso-profile', (_event, input) => {
+    try {
+      return ssoManager.writeSsoProfile(input || {});
+    } catch (error) {
+      console.error('[aws:write-sso-profile] Error:', error && error.message);
+      return { success: false, error: (error && error.message) || String(error) };
+    }
+  });
+
+  // AWS SSO zero-config 온보딩 — 무입력 자동 프로파일 생성.
+  // 최종 사용자가 아무 값도 입력하지 않고 "로그인" 버튼만 눌러 사용할 수 있도록,
+  // 확정된 조직 기본 SSO 프리셋(resolveDefaultSsoPreset)으로 ~/.aws/config에 프로파일을
+  // 자동 생성한다. security.md("All handlers registered in electron/main.js only") 준수를 위해
+  // 이 핸들러도 main.js에서 직접 등록한다. 실제 config 쓰기와 secret-free 블록 생성은
+  // AwsSsoManager.writeSsoProfile에 위치(자격증명 절대 미기록 — 이미 secret-free).
+  // 반환 계약:
+  //   신규 생성 → { success:true, profile, created:true }
+  //   이미 존재 → { success:true, profile, created:false }
+  //   실패      → { success:false, profile, error, manualHint? }
+  ipcMain.handle('aws:ensure-default-sso-profile', (_event) => {
+    try {
+      const preset = resolveDefaultSsoPreset(process.env);
+      // 대상 프로파일이 이미 존재하면 그대로 성공 반환(재생성하지 않음).
+      let existing = [];
+      try { existing = ssoManager.listProfiles(); } catch (_) { existing = []; }
+      if (Array.isArray(existing) && existing.includes(preset.name)) {
+        return { success: true, profile: preset.name, created: false };
+      }
+      // 없으면 secret-free 프로파일 블록을 생성한다.
+      const r = ssoManager.writeSsoProfile(preset);
+      if (r && r.success) {
+        return { success: true, profile: r.profile || preset.name, created: true };
+      }
+      // writeSsoProfile이 중복으로 판단한 경우(레이스 등)도 성공으로 취급.
+      if (r && r.duplicate) {
+        return { success: true, profile: r.profile || preset.name, created: false };
+      }
+      return {
+        success: false,
+        profile: preset.name,
+        error: (r && r.error) || '기본 SSO 프로파일 생성에 실패했습니다',
+        ...(r && r.manualHint ? { manualHint: r.manualHint } : {}),
+      };
+    } catch (error) {
+      console.error('[aws:ensure-default-sso-profile] Error:', error && error.message);
+      return { success: false, error: (error && error.message) || String(error) };
+    }
+  });
+
   // Terminal
   registerTerminalHandlers(processManager);
 
@@ -352,6 +414,20 @@ function registerAllIpcHandlers() {
     sessionManager: remoteSessionManager,
     localAiEngineRoot: path.join(__dirname, '..', 'ai_engine'),
   });
+
+  // Slides — HTML → PNG capture via hidden BrowserWindow.
+  // Used by ai_engine's _force_generate_from_text to produce Genspark/Gamma
+  // -class slide backgrounds for PPTX/PDF embedding. Registered AFTER the
+  // remote handlers so the bridge-server (which depends on this) can serve
+  // /bridge/render-html-to-png as soon as the IPC handler is live.
+  registerSlidesHandlers(mainWindow);
+
+  // Templates — `template:*` channels proxied to FastAPI (/api/templates ...).
+  // Registered here (main.js only) per security.md; the backend resolves the
+  // userData store root from AE_GENERATED_ROOT and the handlers use the
+  // AE_ENGINE_URL-based FastAPI base. See .kiro/specs/pptx-template-styling
+  // tasks.md §13.4 (requirements 8.1, 8.8).
+  registerTemplateHandlers(mainWindow);
 
   console.log('[IPC] All handlers registered');
 }

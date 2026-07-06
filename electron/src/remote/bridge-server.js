@@ -28,10 +28,14 @@ const crypto = require('crypto');
  * @param {Object} opts
  * @param {Object} opts.sessionRouter - the shared sessionRouter singleton
  * @param {Object} [opts.logger] - logger with .info/.warn/.error
+ * @param {Function} [opts.renderHtmlToPng] - optional HTML→PNG renderer
+ *        (signature: (opts) => Promise<{ok, path, width, height, sizeBytes}>).
+ *        When provided, /bridge/render-html-to-png is exposed; otherwise
+ *        that endpoint returns 503 and ai_engine falls back to mermaid.
  * @returns {Promise<{url: string, token: string, stop: Function}>}
  */
 function startBridgeServer(opts) {
-  const { sessionRouter, logger } = opts || {};
+  const { sessionRouter, logger, renderHtmlToPng } = opts || {};
   if (!sessionRouter) throw new Error('bridge-server: sessionRouter required');
 
   const token = crypto.randomBytes(16).toString('hex');
@@ -73,7 +77,7 @@ function startBridgeServer(opts) {
 
       const url = req.url || '/';
       try {
-        const result = await handleRequest(url, payload, sessionRouter);
+        const result = await handleRequest(url, payload, sessionRouter, { renderHtmlToPng });
         if (result === null) {
           res.writeHead(404, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: 'not found' }));
@@ -115,7 +119,8 @@ function startBridgeServer(opts) {
  * Dispatch a bridge request to the appropriate sessionRouter operation.
  * @private
  */
-async function handleRequest(url, payload, sessionRouter) {
+async function handleRequest(url, payload, sessionRouter, extras) {
+  const renderHtmlToPng = extras && extras.renderHtmlToPng;
   const active = sessionRouter.getActive();
   // Treat the session as remote-usable as soon as the SSH channel is
   // live, not only after `connected`. Provisioning runs in the
@@ -193,6 +198,25 @@ async function handleRequest(url, payload, sessionRouter) {
     const cmd = `grep -rn ${pattern} --color=never "${query}" "${searchPath}" 2>/dev/null | head -50`;
     const r = await sessionRouter.exec(cmd, {});
     return { ok: true, output: r.stdout || '검색 결과 없음' };
+  }
+
+  // ----- /bridge/render-html-to-png -----------------------------------
+  // Local-only operation: renders HTML to PNG via the host's hidden
+  // BrowserWindow. Does NOT route through the remote SSH session because
+  // the captured slide is meant to be embedded into the *local* PPTX/PDF
+  // produced by ai_engine on the workstation. ai_engine sees this as a
+  // pass-through to Electron's Chromium.
+  if (url === '/bridge/render-html-to-png') {
+    if (typeof renderHtmlToPng !== 'function') {
+      return { ok: false, error: 'render-html-to-png not available (Electron not running?)' };
+    }
+    return renderHtmlToPng({
+      html: String(payload.html || ''),
+      width: payload.width,
+      height: payload.height,
+      outputPath: String(payload.outputPath || ''),
+      timeoutMs: payload.timeoutMs,
+    });
   }
 
   return null; // unknown endpoint

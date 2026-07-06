@@ -1,25 +1,96 @@
-appId: com.internal.ai-editor
-productName: AI Editor
+appId: com.internal.mogam-works
+productName: Mogam Works
 directories:
   buildResources: build
   output: dist_electron
+
+# 앱에 포함할 소스 파일. node_modules의 *프로덕션* 의존성(node-pty/xterm)은
+# electron-builder가 자동 포함하므로 여기 명시하지 않는다(devDeps 비대화 방지).
 files:
   - electron/**/*
   - src/**/*
   - package.json
+  - "!**/*.map"
+  - "!**/__pycache__/**"
+
+# node-pty는 네이티브 모듈 — asar 밖으로 풀어야 런타임 로드 가능.
+asar: true
+asarUnpack:
+  - "node_modules/node-pty/**/*"
+
+# PyInstaller로 동결한 백엔드 — OS별 러너에서 빌드된 ai_engine_dist/를 그대로 번들.
+# 런타임에 process.resourcesPath/ai_engine_dist/ai-engine-server/ 에서 실행된다.
 extraResources:
   - from: ai_engine_dist/
     to: ai_engine_dist
     filter:
       - "**/*"
+
+# GitHub Releases 자동 배포/업데이트 (electron-updater 연동).
+# GH_TOKEN 환경변수가 있으면 `electron-builder --publish always`가 릴리스에 업로드.
+publish:
+  - provider: github
+    owner: jangkops               # git remote origin(github.com/jangkops/Agentic-Editor)에서 확정
+    repo: Agentic-Editor          # git remote origin에서 확정
+    releaseType: release
+
 mac:
   category: public.app-category.developer-tools
   target:
-    - dmg
-    - zip
+    # PKG — Developer ID Installer 인증서 확보 시에만 활성화한다.
+    #   미서명 상태에서는 productbuild 단계가 실패하고(빌드 중단) Gatekeeper 경고도
+    #   남으므로, 무료+install.command 배포 방식에서는 기본 빌드에서 제외한다.
+    #   인증서를 확보하면 아래 두 줄의 주석을 해제해 더블클릭+비번 설치를 켤 수 있다.
+    # - target: pkg
+    #   arch: [arm64, x64]
+    # DMG — 드래그 설치 방식(현재 채택한 배포 채널). 미서명이면 install.command로 경고 우회.
+    - target: dmg
+      arch: [arm64, x64]
+    # ZIP — electron-updater 자동 업데이트 채널용.
+    - target: zip
+      arch: [arm64, x64]
+  artifactName: "${productName}-${version}-${arch}.${ext}"
+  # 사내 배포 — 코드서명/공증 미설정 시 사용자가 Gatekeeper 우회 필요.
+  # 서명 인증서가 있으면 CSC_LINK/CSC_KEY_PASSWORD 환경변수로 자동 서명.
+  # Hardened Runtime + entitlements — 공증(notarization) 필수 조건이며,
+  # Electron/PyInstaller 바이너리의 JIT·비서명 실행 메모리·dyld 환경변수 사용을 허용한다.
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  # 공증(notarize): 기본 비활성(false)이라 미서명 빌드도 그대로 산출된다.
+  # APPLE_ID + APPLE_APP_SPECIFIC_PASSWORD + APPLE_TEAM_ID 환경변수를 모두 설정하고
+  # release.yml에서 notarize를 켜면 electron-builder(notarytool)가 자동으로 공증한다.
+  # 자격 미제공 시 공증을 건너뛰고 빌드는 계속된다(미서명/미공증 산출물).
+  notarize: false
+
+# PKG 인스톨러 동작 — "더블클릭 → 다음 → (관리자 비밀번호) → 완료"의 표준 설치 경험.
+#   Developer ID Installer 인증서로 서명되면 Gatekeeper 경고 없이 이 흐름이 그대로 성립한다.
+pkg:
+  installLocation: /Applications   # 표준 위치 고정(사용자 홈 산개 방지)
+  isRelocatable: false             # 설치 위치 이동 불가 — 항상 /Applications
+  isVersionChecked: true           # 구버전보다 낮으면 설치 차단
+  overwriteAction: upgrade         # 기존 설치본은 업그레이드로 덮어씀
+  allowAnywhere: false             # "설치 위치 선택" 화면 생략 → 클릭 수 최소화
+  allowCurrentUserHome: false
+  allowRootDirectory: true
+
 win:
   target:
-    - nsis
+    - target: nsis
+      arch: [x64]
+  artifactName: "${productName}-Setup-${version}.${ext}"
+
+nsis:
+  oneClick: false               # 설치 경로 선택 가능
+  perMachine: false             # 사용자 단위 설치(관리자 권한 불필요) — 멀티유저 배포 적합
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  deleteAppDataOnUninstall: false
+
 linux:
   target:
     - AppImage
+  category: Development
+  artifactName: "${productName}-${version}.${ext}"

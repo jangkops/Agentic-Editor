@@ -2,7 +2,6 @@
 import os
 import sys
 import json
-import subprocess
 
 # Add project root to Python path
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -11,24 +10,31 @@ if PROJECT_ROOT not in sys.path:
 
 
 def load_credentials(profile_name: str = "default") -> dict:
-    """Load AWS credentials via `aws configure export-credentials`."""
-    try:
-        result = subprocess.run(
-            ["aws", "configure", "export-credentials", "--profile", profile_name, "--format", "env-no-export"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode != 0:
-            print(f"[start_server] SSO credential export failed: {result.stderr}", file=sys.stderr)
-            return {}
+    """Pre-load AWS credentials via boto3 (dev-only convenience).
 
-        creds = {}
-        for line in result.stdout.strip().split("\n"):
-            if "=" in line:
-                key, val = line.split("=", 1)
-                creds[key.strip()] = val.strip()
+    Uses ``boto3.Session(profile_name=...).get_credentials()`` and maps the
+    resolved credentials onto the same env-var dict keys the previous
+    ``aws configure export-credentials`` shell-out produced. This is a
+    development convenience only; the real credential path is the app's
+    ``/api/reset-cache`` injection at runtime. On any failure this returns an
+    empty dict so that server startup can continue.
+    """
+    try:
+        import boto3
+
+        session = boto3.Session(profile_name=profile_name)
+        frozen = session.get_credentials().get_frozen_credentials()
+        creds = {
+            "AWS_ACCESS_KEY_ID": frozen.access_key,
+            "AWS_SECRET_ACCESS_KEY": frozen.secret_key,
+        }
+        if frozen.token:
+            creds["AWS_SESSION_TOKEN"] = frozen.token
         return creds
     except Exception as e:
-        print(f"[start_server] Error loading credentials: {e}", file=sys.stderr)
+        # DEV-ENTRY convenience only — never crash startup. The real credential
+        # path is the app's /api/reset-cache runtime injection.
+        print(f"[start_server] credential pre-load skipped: {e}", file=sys.stderr)
         return {}
 
 
@@ -80,10 +86,10 @@ def main():
         os.environ[k] = v
 
     # Start uvicorn
-    # reload=True는 개발 편의지만, 파일 수정 시 진행 중인 SSE 스트림이 끊김
-    # → ERR_INCOMPLETE_CHUNKED_ENCODING 유발. reload_dirs를 ai_engine만으로 제한하고,
-    #   환경변수 NO_RELOAD=1 로 완전 비활성화 가능.
-    use_reload = os.environ.get("NO_RELOAD", "") != "1"
+    # reload=True는 개발 편의지만, 파일 수정/생성 감지 시 진행 중인 SSE 스트림(특히
+    # 멀티-에이전트 오케스트레이션)을 끊어 "network error"를 유발한다. 따라서 기본 OFF.
+    # 개발 중 핫리로드가 필요하면 AE_DEV_RELOAD=1로 명시적 opt-in. (NO_RELOAD=1도 계속 존중)
+    use_reload = (os.environ.get("AE_DEV_RELOAD", "") == "1") and (os.environ.get("NO_RELOAD", "") != "1")
     import uvicorn
     uvicorn.run(
         "ai_engine.server:app",

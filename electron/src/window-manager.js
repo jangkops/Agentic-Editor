@@ -23,7 +23,7 @@ class WindowManager {
       minHeight: 600,
       titleBarStyle: 'hiddenInset',
       backgroundColor: '#1a1a1a',
-      title: 'AI 에디터',
+      title: 'Mogam Works',
       webPreferences: {
         preload: path.join(__dirname, '..', 'preload.js'),
         contextIsolation: true,

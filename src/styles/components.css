@@ -986,3 +986,76 @@
 .model-recommend-card.recommend-warning .recommend-title {
   color: var(--color-warning, #ce9178);
 }
+
+/* ===== 생성 패널 통합 레이아웃 (PPTX 템플릿 + 생성 파일 미리보기) ===== */
+/* "생성" 탭 하나에 템플릿 관리(상단, 접이식)와 생성 파일 미리보기(하단)를 함께 표시.
+   pptx-template-styling — 별도 템플릿 탭을 제거하고 생성 탭에 통합. */
+#generated-files-panel {
+  /* index.html 인라인 style이 display를 토글하므로 여기선 내부 레이아웃만 정의 */
+  min-height: 0;
+}
+#gen-template-section {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--color-border, #3c3c3c);
+  /* 템플릿 섹션이 패널을 독점하지 않도록 최대 높이 제한 — 나머지는 파일 미리보기 */
+  max-height: 55%;
+  min-height: 0;
+}
+#gen-template-section.collapsed #gen-template-body {
+  display: none;
+}
+.gen-section-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  background: var(--color-bg-tertiary, #2d2d30);
+  border: none;
+  border-bottom: 1px solid var(--color-border, #3c3c3c);
+  color: var(--color-text-secondary, #9d9d9d);
+  padding: 6px 10px;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  font-family: var(--font-ui, sans-serif);
+  text-align: left;
+  transition: var(--transition, 150ms ease);
+}
+.gen-section-toggle:hover {
+  background: var(--color-bg-hover, #2a2d2e);
+  color: var(--color-text-primary, #cccccc);
+}
+.gen-section-caret {
+  font-size: 9px;
+  line-height: 1;
+  transition: transform 150ms ease;
+}
+#gen-template-section.collapsed .gen-section-caret {
+  transform: rotate(-90deg);
+}
+#gen-template-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+#gen-template-body template-panel {
+  flex: 1;
+  min-height: 0;
+}
+#gen-files-section {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+#gen-files-section file-preview-panel {
+  flex: 1;
+  min-height: 0;
+}

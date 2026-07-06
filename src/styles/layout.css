@@ -26,6 +26,10 @@ html,body{height:100%;overflow:hidden;background:var(--color-bg-primary);color:v
 .app-title{
   color:var(--color-accent);font-weight:700;font-size:14px;
   -webkit-app-region:no-drag;letter-spacing:-0.3px;
+  /* macOS 신호등(닫기/최소화/최대화) 버튼과 겹치지 않도록 좌측 여백 확보.
+     titleBarStyle:hiddenInset 에서 신호등이 좌상단 ~70px를 차지하므로,
+     topbar 좌측 패딩(16px) + 이 여백(60px) = 76px로 안전하게 비워둔다. */
+  margin-left:60px;
 }
 .topbar-btn{
   -webkit-app-region:no-drag;background:transparent;border:1px solid transparent;
@@ -297,7 +301,23 @@ html,body{height:100%;overflow:hidden;background:var(--color-bg-primary);color:v
 .sm-btn:hover{color:var(--color-text-primary);border-color:var(--color-text-muted);background:var(--color-bg-hover);}
 
 /* ===== Attached files preview ===== */
-.attached-files{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;}
+.attached-files{
+  display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;
+  /* Hard cap so the chat-messages area never gets pushed off-screen
+     when many files are attached (e.g. 30+ PDFs). */
+  max-height:140px;       /* roughly 3-4 rows of chips */
+  overflow-y:auto;
+  scrollbar-width:thin;
+}
+.attached-files:empty{
+  display:none;            /* zero footprint when no attachments */
+  margin-bottom:0;
+}
+.attached-files::-webkit-scrollbar{width:6px;}
+.attached-files::-webkit-scrollbar-thumb{
+  background:var(--color-border, #3c3c3c);
+  border-radius:3px;
+}
 .attached-file{
   display:flex;align-items:center;gap:4px;padding:3px 8px;
   background:var(--color-bg-input);border:1px solid var(--color-border);
@@ -371,7 +391,7 @@ html,body{height:100%;overflow:hidden;background:var(--color-bg-primary);color:v
 .dialog h2{font-size:20px;font-weight:700;margin-bottom:4px;color:var(--color-text-primary);letter-spacing:-0.3px;}
 .dialog .subtitle{font-size:12px;color:var(--color-text-muted);margin-bottom:24px;}
 .dialog label{display:block;text-align:left;font-size:12px;color:var(--color-text-secondary);margin-bottom:6px;font-weight:500;}
-.dialog input[type="text"],.dialog select,.dialog textarea{
+.dialog input[type="text"],.dialog input[type="password"],.dialog select,.dialog textarea{
   width:100%;padding:10px 14px;background:var(--color-bg-input);
   border:1px solid var(--color-border);border-radius:var(--radius-md);
   color:var(--color-text-primary);font-size:13px;outline:none;

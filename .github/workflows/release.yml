@@ -1,0 +1,109 @@
+name: Release
+
+# 태그 푸시(v*) 또는 수동 실행 시 macOS/Windows 빌드 → GitHub Releases 업로드.
+# 각 OS 러너에서 PyInstaller 백엔드를 동결한다(크로스컴파일 불가 → matrix 필수).
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write   # 릴리스 자산 업로드에 필요
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            artifact: mac
+          - os: windows-latest
+            artifact: win
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Node deps (rebuilds node-pty for Electron via postinstall)
+        run: npm ci
+
+      # R1.3/R1.6 — 동결 전 필수 모듈 import 게이트.
+      # 백엔드 의존성을 설치한 뒤(동결에 쓰는 것과 동일한 인터프리터) 릴리스 필수 4모듈
+      # (matplotlib, scipy, langgraph, pptx)이 import 가능한지 확인한다. 검사는 인라인
+      # 멀티라인 python -c 대신 커밋된 스크립트(scripts/check_frozen_imports.py)로 수행한다.
+      # 하나라도 없으면 스크립트가 누락 모듈명을 출력하고 종료 코드 1로 잡을 즉시 실패시켜
+      # 값비싼 PyInstaller 동결 이전에 빌드를 중단한다. macos-latest / windows-latest
+      # 두 매트릭스 레그 모두에서 실행된다.
+      - name: Verify release-critical Python modules (pre-build import gate)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r ai_engine/requirements.txt
+          python scripts/check_frozen_imports.py
+
+      - name: Build Python backend (PyInstaller, frozen onedir)
+        run: npm run build:python
+
+      # R3.5 — 미서명 폴백 체크(비차단). 서명·공증에 필요한 시크릿이 설정돼 있는지
+      # 빌드 스텝 앞에서 확인만 한다. 서명 자산이 없으면 "⚠️ 미서명 빌드" 경고를 남기고
+      # 빌드를 그대로 진행한다(실패 아님 — R3.5). 있으면 서명·공증이 활성화됨을 로그로 알린다.
+      # GitHub는 시크릿을 마스킹하므로 값 자체가 아니라 env 매핑 후 비어있는지(-z)로 판정한다.
+      - name: Check signing assets (unsigned fallback, non-blocking)
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        shell: bash
+        run: |
+          if [ -z "$CSC_LINK" ]; then
+            echo "⚠️ 미서명 빌드(서명 자산 미제공)"
+            echo "  CSC_LINK 시크릿이 없어 코드서명 없이 빌드를 계속합니다 (R3.5 비차단 폴백)."
+          else
+            echo "✅ 코드서명 활성화(CSC_LINK 감지됨)"
+            if [ -n "$APPLE_ID" ] && [ -n "$APPLE_APP_SPECIFIC_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
+              echo "✅ 공증 활성화(APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID 감지됨)"
+            else
+              echo "ℹ️ 공증 자산 일부 누락 — 서명은 적용되나 공증은 건너뜁니다."
+            fi
+          fi
+
+      - name: Build & publish Electron app
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # macOS 코드서명: CSC_LINK(인증서 base64/경로) + CSC_KEY_PASSWORD가 있으면
+          # electron-builder가 자동 서명한다(R3.3). 별도 코드 불요 — env 존재만으로 동작.
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          # macOS 공증(R3.2): APPLE_ID + APPLE_APP_SPECIFIC_PASSWORD + APPLE_TEAM_ID가
+          # 있으면 electron-builder가 자동 공증한다. 셋 다 없으면 미서명 빌드로 진행(R3.5).
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: npx electron-builder --${{ matrix.artifact }} --publish always
+
+      - name: Upload build artifacts (백업)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-editor-${{ matrix.artifact }}
+          path: |
+            dist_electron/*.dmg
+            dist_electron/*.zip
+            dist_electron/*.exe
+            dist_electron/*.AppImage
+            dist_electron/latest*.yml
+          if-no-files-found: ignore

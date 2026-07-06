@@ -9,3 +9,29 @@ build/
 스크린샷_resized/
 node_modules
 .rag_cache/
+
+# GCP service account keys — NEVER commit
+*.gcp-key.json
+*-vertex-poc-key*.json
+gcp-credentials/
+*service-account*.json
+
+# Build / packaging artifacts
+dist_electron/
+ai_engine_dist/
+dist-python/
+build-python-work/
+*.spec.bak
+
+# Generated runtime artifacts (decks, docs, audit/render outputs)
+.generated/
+coverage/
+scripts/_audit_out/
+scripts/_render_out/
+
+# Generated demo media at repo root
+/*.pptx
+/*.pdf
+/*.docx
+/*.xlsx
+/agentic-editor-architecture.png

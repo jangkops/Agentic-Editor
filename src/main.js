@@ -1,4 +1,4 @@
-/* ===== AI Editor — Main ===== */
+/* ===== Mogam Works — Main ===== */
 const _sessionStart = Date.now();
 let _ssoExpiry = null;
 
@@ -37,6 +37,69 @@ const _deniedModels = new Set(); // 403 model_denied된 모델 ID 캐시
 function rebuildModelList() {
   ALL_MODELS.length = 0;
   for (const [p, ms] of Object.entries(MODEL_CATALOG)) ms.forEach(m => ALL_MODELS.push({ ...m, provider: p }));
+}
+
+// ===== gateway-openai-models Task 9.1: 선택 보존/복구 순수 함수 =====
+// DOM/타이머와 분리된 순수 로직. 자동 모델 새로고침(9.2) 시 선택 보존/복구에 사용.
+// 카탈로그 형태는 MODEL_CATALOG와 동일: { provider: [ {id, name, capabilities, ...}, ... ] }
+
+// 카탈로그를 표시 정렬 순서(provider 순 → 모델 순)대로 평탄화한다.
+// 각 모델에 provider를 부착해 반환한다. (순수 — 입력 불변)
+function _flattenCatalogForSelection(catalog) {
+  const out = [];
+  if (!catalog || typeof catalog !== 'object') return out;
+  for (const [p, ms] of Object.entries(catalog)) {
+    if (!Array.isArray(ms)) continue;
+    for (const m of ms) {
+      if (m && m.id != null) out.push({ ...m, provider: p });
+    }
+  }
+  return out;
+}
+
+// catalogSignature(catalog): 비교용 시그니처 문자열.
+// 모델 id 집합 기반(중복 제거 + 정렬)으로 결정론적 문자열을 만든다.
+// 의미상 동일한(동일 id 집합) 두 카탈로그는 항상 동일 시그니처를 갖는다.
+function catalogSignature(catalog) {
+  const ids = [];
+  if (catalog && typeof catalog === 'object') {
+    for (const ms of Object.values(catalog)) {
+      if (!Array.isArray(ms)) continue;
+      for (const m of ms) {
+        if (m && m.id != null) ids.push(String(m.id));
+      }
+    }
+  }
+  return Array.from(new Set(ids)).sort().join('\u0001');
+}
+
+// resolveSelection(prevId, prevCatalog, nextCatalog): 결정적 선택 규칙.
+// 반환: 선택할 모델 객체(provider 부착) 또는 null.
+//  1) prevCatalog와 nextCatalog의 id 집합이 동일하면 prevId 유지(선택 불변)
+//  2) prevId가 nextCatalog에 존재하면 그 모델 유지
+//  3) prevId가 부재하면 채팅 가능 모델(capabilities.chat) 중 표시 정렬상 첫 번째,
+//     없으면 첫 모델, 그것도 없으면 null
+function resolveSelection(prevId, prevCatalog, nextCatalog) {
+  const nextModels = _flattenCatalogForSelection(nextCatalog);
+  // 1) 동일 카탈로그 → 선택 불변(prevId가 다음 목록에 있으면 그대로 유지)
+  if (catalogSignature(prevCatalog) === catalogSignature(nextCatalog)) {
+    const keep = nextModels.find(m => m.id === prevId);
+    if (keep) return keep;
+  }
+  // 2) prevId가 다음 카탈로그에 존재 → 유지
+  const still = nextModels.find(m => m.id === prevId);
+  if (still) return still;
+  // 3) 부재 → 채팅 가능 모델 중 첫 번째 → 첫 모델 → null
+  const chat = nextModels.filter(m => m.capabilities && m.capabilities.chat);
+  if (chat.length) return chat[0];
+  if (nextModels.length) return nextModels[0];
+  return null;
+}
+
+// PBT(Property 8) 및 9.2 스케줄러에서 호출 가능하도록 노출
+if (typeof window !== 'undefined') {
+  window.resolveSelection = resolveSelection;
+  window.catalogSignature = catalogSignature;
 }
 // 일시적 호출 실패 시 호출 — 모델 제거는 하지 않음 (영구 denylist 금지)
 // 게이트웨이 일시 에러/quota/max_tokens 한계 등은 자동 복구 가능하므로
@@ -81,6 +144,8 @@ const state = {
   settings:null, authenticated:false, attachedFiles:[],
   // 합의 모델 잠금: 합의 도출 후 사용자가 '이 모델로 계속 대화' 선택 시 단일 모드로 전환되며 기억되는 모델
   lastConsensusModel:null,
+  // 활성 PPTX 템플릿 — <template-panel> 선택 시 갱신. '' → 무템플릿 (pptx-template-styling 요구사항 5.6)
+  activeTemplateId:'',
 };
 
 
@@ -232,7 +297,14 @@ function _updateRemoteIndicator(state) {
 // ===== Fix 1: SSO — select 드롭다운으로 프로파일 선택 =====
 document.addEventListener('DOMContentLoaded', async () => {
   if (window.electronAPI?.loadSettings) state.settings = await window.electronAPI.loadSettings();
-  if (!state.settings?.awsProfile) { showSSODialog(true); return; }
+  if (!state.settings?.awsProfile) {
+    // R4.1: 저장된 프로파일이 없고 ~/.aws/config에도 SSO_Profile이 하나도 없으면(빈 목록)
+    // 로그인 다이얼로그 대신 온보딩 화면을 먼저 표시한다. 목록이 있으면 기존 로그인 흐름 유지.
+    let profiles = [];
+    if (window.electronAPI?.listProfiles) { try { profiles = await window.electronAPI.listProfiles(); } catch {} }
+    if (!profiles.length) { showOnboardingDialog(); return; }
+    showSSODialog(true); return;
+  }
   // 기존 자격증명 유효성 검증
   if (window.electronAPI?.getCredentials) {
     try {
@@ -316,6 +388,9 @@ async function initApp() {
     }
   } catch {}
   await loadModelsFromServer();
+  // gateway-openai-models 9.2: 초기 로드 직후 주기적 자동 새로고침 스케줄러 시작
+  // (게이트웨이에 GPT 등 모델 추가 시 선택 보존하며 목록 자동 반영)
+  try { startModelRefreshScheduler(); } catch(e) { console.warn('[initApp] 모델 새로고침 스케줄러 시작 실패:', e?.message || e); }
   // quota 조회 — loadModelsFromServer 완료 후 즉시 실행
   console.log('[initApp] loadModelsFromServer 완료, updateQuotaBar 직접 호출');
   try { updateQuotaBar(); } catch(e) { console.error('[initApp] updateQuotaBar 에러:', e); }
@@ -376,6 +451,176 @@ async function initApp() {
   document.getElementById('topbar-model-count').textContent = `${ALL_MODELS.length}개 모델`;
 }
 
+// ===== R4: Onboarding_Flow — SSO_Profile이 하나도 없을 때 최초 구성 화면 =====
+// listProfiles()가 빈 배열일 때만 부팅 흐름에서 호출된다. SSO_Profile이 생성되기
+// 전까지는 이 모달을 닫을 수 없어(외부 클릭·닫기 버튼 없음) 게이트웨이 기능 진입을
+// 차단한다(R4.3). 자격증명은 저장하지 않고 SSO 메타데이터만 ~/.aws/config에 기록한다(R4.6).
+async function showOnboardingDialog() {
+  const o = document.getElementById('sso-dialog'); o.style.display = 'block';
+  const inputStyle = 'width:100%;padding:10px 14px;background:var(--color-bg-input);border:1px solid var(--color-border);border-radius:var(--radius-md);color:var(--color-text-primary);font-size:13px;outline:none';
+  const muted = 'font-size:10px;color:var(--color-text-muted)';
+
+  // 조직 기본 SSO 프리셋 — 고급 폼 프리필용. 매니저의 DEFAULT_SSO_PRESET과 값이 동기화되어야 한다
+  // (aws-sso-manager.js DEFAULT_SSO_PRESET / AE_SSO_* override). 일반 사용자는 이 값을 보지 않으며,
+  // 실제 자동 생성은 백엔드 resolveDefaultSsoPreset(process.env)가 env override까지 반영해 수행한다.
+  const ORG_PRESET = {
+    name: 'bedrock-gw',
+    startUrl: 'https://d-906617189d.awsapps.com/start',
+    region: 'us-east-1',
+    accountId: '107650139384',
+    roleName: 'ViewOnlyAccess',
+  };
+
+  // zero-config 온보딩 — 최종 사용자는 아무 값도 입력하지 않는다. 진입 즉시 조직 기본 프로파일을
+  // 자동 생성하고, 성공하면 곧바로 로그인 다이얼로그(showSSODialog)로 진입한다. "다른 조직/관리자
+  // 설정"은 접을 수 있는 고급 토글로 제공하며, 자동 생성 실패 시 폴백 수동 구성으로 펼쳐진다.
+  // SSO_Profile이 생성되기 전까지 닫을 수 없는 고정 모달(overlay click 무효, R4.3).
+  o.innerHTML = `<div class="overlay"><div class="dialog" style="position:relative;max-width:460px">
+    <div class="dialog-icon">◆</div><h2>Mogam Works 시작</h2>
+    <div class="subtitle" id="ob-subtitle">조직 기본 설정을 준비하는 중입니다...</div>
+    <div class="status-text" id="ob-status"></div>
+
+    <button class="btn-primary" id="ob-login-btn" style="display:none">로그인</button>
+
+    <div id="ob-advanced-toggle" style="margin-top:16px;font-size:11px;color:var(--color-text-secondary);cursor:pointer;user-select:none;display:flex;align-items:center;gap:6px">
+      <span id="ob-advanced-caret" style="display:inline-block;transition:transform var(--transition, 150ms ease)">▸</span>
+      <span>다른 조직 / 관리자 설정</span>
+    </div>
+
+    <div id="ob-advanced" style="display:none;margin-top:12px;border-top:1px solid var(--color-border);padding-top:12px">
+      <div class="subtitle" style="margin-top:0">SSO 프로파일을 직접 구성합니다</div>
+      <label>프로파일 이름 <span style="${muted}">(예: bedrock-gw)</span></label>
+      <input type="text" id="ob-name" value="${ORG_PRESET.name}" placeholder="bedrock-gw" style="${inputStyle}">
+      <label style="margin-top:12px">SSO Start URL</label>
+      <input type="text" id="ob-start-url" value="${ORG_PRESET.startUrl}" placeholder="https://your-org.awsapps.com/start" style="${inputStyle}">
+      <label style="margin-top:12px">Region</label>
+      <input type="text" id="ob-region" value="${ORG_PRESET.region}" placeholder="us-east-1" style="${inputStyle}">
+      <label style="margin-top:12px">Account ID <span style="${muted}">(숫자 12자리)</span></label>
+      <input type="text" id="ob-account-id" value="${ORG_PRESET.accountId}" placeholder="123456789012" style="${inputStyle}">
+      <label style="margin-top:12px">Role <span style="${muted}">(일반 사용자: ViewOnlyAccess)</span></label>
+      <select id="ob-role-name" style="${inputStyle}">
+        <option value="ViewOnlyAccess" selected>ViewOnlyAccess (일반 사용자)</option>
+        <option value="AdministratorAccess">AdministratorAccess (관리자)</option>
+      </select>
+      <button class="btn-primary" id="ob-submit-btn" style="margin-top:14px">프로파일 생성</button>
+      <div id="ob-manual-hint" style="display:none;margin-top:10px;font-size:11px;color:var(--color-text-muted);white-space:pre-wrap;background:var(--color-bg-input);border:1px solid var(--color-border);border-radius:var(--radius-md);padding:10px"></div>
+    </div>
+  </div></div>`;
+
+  const st = o.querySelector('#ob-status');
+  const subtitle = o.querySelector('#ob-subtitle');
+  const loginBtn = o.querySelector('#ob-login-btn');
+  const advToggle = o.querySelector('#ob-advanced-toggle');
+  const advPanel = o.querySelector('#ob-advanced');
+  const advCaret = o.querySelector('#ob-advanced-caret');
+
+  // 고급 섹션 토글 (펼침/접힘)
+  const expandAdvanced = (open) => {
+    const willOpen = open === undefined ? advPanel.style.display === 'none' : open;
+    advPanel.style.display = willOpen ? 'block' : 'none';
+    advCaret.style.transform = willOpen ? 'rotate(90deg)' : 'rotate(0deg)';
+  };
+  advToggle.addEventListener('click', () => expandAdvanced());
+
+  // 기본 형식 검증 — 고급 수동 구성 폼에서 재사용(기존 validate 규칙 보존, R4.5)
+  const validate = (v) => {
+    if (!v.name || !/^[A-Za-z0-9._-]+$/.test(v.name)) return '프로파일 이름을 입력하세요 (영문/숫자/._- 만 허용)';
+    if (!/^https?:\/\/.+/.test(v.startUrl)) return 'SSO Start URL 형식이 올바르지 않습니다 (https:// 로 시작)';
+    if (!/^[a-z]{2}-[a-z]+-\d+$/.test(v.region)) return 'Region 형식이 올바르지 않습니다 (예: us-east-1)';
+    if (!/^\d{12}$/.test(v.accountId)) return 'Account ID는 숫자 12자리여야 합니다';
+    if (!/^[\w+=,.@-]+$/.test(v.roleName)) return 'Role 이름을 입력하세요';
+    return null;
+  };
+
+  // 고급 수동 구성 — 기존 aws:write-sso-profile 검증·호출 로직 재사용
+  o.querySelector('#ob-submit-btn').addEventListener('click', async () => {
+    const btn = o.querySelector('#ob-submit-btn');
+    const hint = o.querySelector('#ob-manual-hint');
+    const input = {
+      name: o.querySelector('#ob-name').value.trim(),
+      startUrl: o.querySelector('#ob-start-url').value.trim(),
+      region: o.querySelector('#ob-region').value.trim(),
+      accountId: o.querySelector('#ob-account-id').value.trim(),
+      roleName: o.querySelector('#ob-role-name').value.trim(),
+    };
+    hint.style.display = 'none'; hint.textContent = '';
+    const err = validate(input);
+    if (err) { st.className = 'status-text error'; st.textContent = err; return; }
+    if (!window.electronAPI?.writeSsoProfile) {
+      st.className = 'status-text error'; st.textContent = '프로파일 쓰기 기능을 사용할 수 없습니다.'; return;
+    }
+    btn.textContent = '◌ 생성 중...'; btn.disabled = true;
+    st.className = 'status-text'; st.textContent = '프로파일 생성 중...';
+    const resetBtn = () => { btn.textContent = '프로파일 생성'; btn.disabled = false; };
+
+    try {
+      const r = await window.electronAPI.writeSsoProfile(input);
+      if (!r || !r.success) {
+        // 중복/권한 오류 → 사유 + 수동 구성 힌트 표시(R4.5), 온보딩 유지
+        if (r?.duplicate) {
+          // 이미 존재 — 그대로 로그인으로 진행 가능
+          st.className = 'status-text success';
+          st.textContent = `이미 존재하는 프로파일입니다: ${input.name} — 로그인으로 진행합니다`;
+          setTimeout(() => { showSSODialog(true); }, 600);
+          return;
+        }
+        st.className = 'status-text error';
+        st.textContent = `프로파일 생성 실패: ${r?.error || '알 수 없는 오류'}`;
+        if (r?.manualHint) { hint.style.display = 'block'; hint.textContent = r.manualHint; }
+        resetBtn(); return;
+      }
+      // 성공 → 기존 로그인 흐름으로 진입(R4.4)
+      st.className = 'status-text success';
+      st.textContent = `✓ ${r.profile || input.name} 생성 완료 — 로그인으로 진행합니다`;
+      setTimeout(() => { showSSODialog(true); }, 600);
+    } catch (e) {
+      st.className = 'status-text error'; st.textContent = `프로파일 생성 오류: ${e?.message || e}`;
+      resetBtn();
+    }
+  });
+
+  // 로그인 버튼 — 자동 생성 성공 후 노출. 클릭 시 기존 로그인 다이얼로그로 진입한다.
+  loginBtn.addEventListener('click', () => { showSSODialog(true); });
+
+  // ── 진입 즉시 조직 기본 프로파일 자동 생성 (무입력 zero-config) ──
+  if (!window.electronAPI?.ensureDefaultSsoProfile) {
+    // 자동 생성 기능 미가용 → 고급 수동 구성으로 폴백
+    subtitle.textContent = 'SSO 프로파일을 직접 구성하세요';
+    st.className = 'status-text error';
+    st.textContent = '자동 설정 기능을 사용할 수 없습니다 — 아래에서 직접 구성하세요.';
+    expandAdvanced(true);
+    return;
+  }
+  try {
+    const r = await window.electronAPI.ensureDefaultSsoProfile();
+    if (r && r.success) {
+      // 성공 → 입력 폼 없이 곧바로 로그인 다이얼로그로 진입
+      subtitle.textContent = '조직 기본 설정이 준비되었습니다';
+      st.className = 'status-text success';
+      st.textContent = r.created
+        ? `✓ ${r.profile} 프로파일 준비 완료 — 로그인으로 진행합니다`
+        : `✓ ${r.profile} 프로파일 확인 — 로그인으로 진행합니다`;
+      loginBtn.style.display = 'block';
+      setTimeout(() => { showSSODialog(true); }, 500);
+      return;
+    }
+    // 자동 생성 실패(권한 오류 등) → 고급 폼을 펼쳐 수동 구성 폴백 + 사유/힌트 표시
+    subtitle.textContent = '자동 설정에 실패했습니다 — 직접 구성하세요';
+    st.className = 'status-text error';
+    st.textContent = `자동 프로파일 생성 실패: ${r?.error || '알 수 없는 오류'}`;
+    if (r?.manualHint) {
+      const hint = o.querySelector('#ob-manual-hint');
+      hint.style.display = 'block'; hint.textContent = r.manualHint;
+    }
+    expandAdvanced(true);
+  } catch (e) {
+    subtitle.textContent = '자동 설정에 실패했습니다 — 직접 구성하세요';
+    st.className = 'status-text error';
+    st.textContent = `자동 프로파일 생성 오류: ${e?.message || e}`;
+    expandAdvanced(true);
+  }
+}
+
 async function showSSODialog(isInitial) {
   const o = document.getElementById('sso-dialog'); o.style.display = 'block';
   let profiles = [];
@@ -389,8 +634,8 @@ async function showSSODialog(isInitial) {
 
   o.innerHTML = `<div class="overlay" ${overlayClick}><div class="dialog" style="position:relative">
     ${closeBtn}
-    <div class="dialog-icon">◆</div><h2>AI 에디터</h2>
-    <div class="subtitle">멀티 에이전트 코드 에디터</div>
+    <div class="dialog-icon">◆</div><h2>Mogam Works</h2>
+    <div class="subtitle">멀티 에이전트 워크스페이스</div>
     <label>AWS SSO 프로파일</label>
     <select id="sso-profile-select" style="width:100%;padding:10px 14px;background:var(--color-bg-input);border:1px solid var(--color-border);border-radius:var(--radius-md);color:var(--color-text-primary);font-size:13px;outline:none">
       ${optionsHtml}
@@ -552,6 +797,24 @@ async function showSSODialog(isInitial) {
 }
 
 // ===== GitHub Import =====
+// SSH clone URL(git@host:org/repo, ssh://git@host/org/repo)을 https로 정규화한다.
+// 사내망이 SSH 포트22를 차단하므로, 사용자가 어떤 형식을 붙여넣어도 https로 바꿔
+// clone이 성립하게 한다. 이미 http(s)면 그대로 반환한다. (순수 함수 — 테스트 용이)
+function normalizeGitCloneUrl(raw) {
+  const u = String(raw || '').trim();
+  if (!u) return u;
+  // 이미 http(s)면 변환하지 않음
+  if (/^https?:\/\//i.test(u)) return u;
+  // scp 형식: git@github.com:org/repo(.git)
+  let m = u.match(/^[\w.-]+@([^:/]+):(.+?)(?:\.git)?\/?$/);
+  if (m) return `https://${m[1]}/${m[2]}.git`;
+  // ssh URL 형식: ssh://git@github.com[:22]/org/repo(.git)
+  m = u.match(/^ssh:\/\/[\w.-]+@([^:/]+)(?::\d+)?\/(.+?)(?:\.git)?\/?$/i);
+  if (m) return `https://${m[1]}/${m[2]}.git`;
+  return u;
+}
+if (typeof window !== 'undefined') window.normalizeGitCloneUrl = normalizeGitCloneUrl;
+
 function initGithubImport() {
   document.getElementById('btn-github-import').addEventListener('click', () => {
     const o = document.getElementById('sso-dialog'); o.style.display = 'block';
@@ -559,51 +822,100 @@ function initGithubImport() {
       <div class="dialog" style="text-align:left;position:relative">
         <button class="sm-btn" onclick="document.getElementById('sso-dialog').style.display='none'" style="position:absolute;top:12px;right:12px">닫기</button>
         <h2 style="text-align:center;margin-bottom:16px">GitHub 가져오기</h2>
-      <label>저장소 URL</label><input type="text" id="gh-url" placeholder="https://github.com/user/repo">
-      <label style="margin-top:12px">브랜치</label><input type="text" id="gh-branch" value="main">
+      <label>저장소 URL</label><input type="text" id="gh-url" placeholder="https://github.com/org/repo.git">
+      <label style="margin-top:12px">브랜치 <span style="font-size:10px;color:var(--color-text-muted)">(비우면 기본 브랜치)</span></label><input type="text" id="gh-branch" placeholder="main">
+      <label style="margin-top:12px">Access Token <span style="font-size:10px;color:var(--color-text-muted)">(private 저장소만, 선택)</span></label>
+      <input type="password" id="gh-token" placeholder="ghp_... (저장 안 됨, 1회 사용)" autocomplete="off">
+      <div style="font-size:10px;color:var(--color-text-muted);margin-top:6px;line-height:1.5">
+        · 사내망은 SSH(git@)가 막혀 있을 수 있어 <b>https URL</b> 권장<br>
+        · private 저장소는 GitHub 토큰 필요 (github.com → Settings → Developer settings → Personal access tokens)
+      </div>
       <button class="btn-primary" id="gh-btn">가져오기</button>
       <div class="status-text" id="gh-status"></div></div></div>`;
     o.querySelector('#gh-btn').addEventListener('click', async () => {
-      const url = o.querySelector('#gh-url').value.trim(); if (!url) return;
-      const branch = o.querySelector('#gh-branch').value.trim()||'main';
+      const rawUrl = o.querySelector('#gh-url').value.trim(); if (!rawUrl) return;
+      const branch = o.querySelector('#gh-branch').value.trim(); // 빈 값이면 원격 기본 브랜치
+      const token = o.querySelector('#gh-token')?.value?.trim() || ''; // private 저장소용 (저장 안 함)
       const btn = o.querySelector('#gh-btn'), st = o.querySelector('#gh-status');
-      btn.textContent='가져오는 중...'; btn.disabled=true;
-      const repo = url.split('/').pop().replace('.git','');
+      const resetBtn = () => { btn.textContent = '가져오기'; btn.disabled = false; };
+
+      if (!window.electronAPI?.gitClone) {
+        st.className = 'status-text error'; st.textContent = 'clone 기능을 사용할 수 없습니다.';
+        return;
+      }
+
+      // 사내망 SSH(포트22) 차단 대응 — git@/ssh:// URL을 https로 자동 변환한다.
+      const url = normalizeGitCloneUrl(rawUrl);
+      const urlConverted = url !== rawUrl;
+
+      // repo 이름 추출: https/ssh 모두 지원 (git@github.com:org/repo.git → repo)
+      const repo = url.replace(/\.git$/, '').split(/[/:]/).pop() || 'repo';
       const udp = window.electronAPI?.getUserDataPath ? await window.electronAPI.getUserDataPath() : '/tmp';
       const cp = `${udp}/repos/${repo}`;
-      // 터미널에서 git clone 실행
-      if (state.terminals.length && window.electronAPI?.terminalWrite) {
-        const tid = state.terminals[state.activeTerminalIdx]?.id;
-        if (tid) {
-          await window.electronAPI.terminalWrite(tid, `git clone --branch ${branch} --depth 1 ${url} "${cp}" 2>&1\n`);
-        }
+
+      btn.textContent = '가져오는 중...'; btn.disabled = true;
+      st.className = 'status-text';
+      st.textContent = urlConverted
+        ? `SSH URL을 https로 변환해 가져오는 중...\n  ${url}`
+        : 'clone 중... (인증/네트워크에 따라 시간이 걸릴 수 있습니다)';
+
+      let r;
+      try {
+        // 실제 git clone을 IPC로 실행하고 종료코드/stderr로 성패를 판정한다.
+        // (기존처럼 폴더 존재로 성공을 추측하지 않는다 — 가짜 성공 방지)
+        // token은 private 저장소용 — 어디에도 저장하지 않고 1회 clone에만 사용한다.
+        r = await window.electronAPI.gitClone(url, branch, cp, token);
+      } catch (e) {
+        st.className = 'status-text error'; st.textContent = `clone 오류: ${e?.message || e}`;
+        resetBtn(); return;
       }
-      // 10초 대기 후 폴더 로드 시도 (clone 완료 대기)
-      st.textContent = 'clone 진행 중...';
-      let attempts = 0;
-      const checkClone = async () => {
-        attempts++;
-        try {
-          const entries = await window.electronAPI?.readDir(cp);
-          if (entries && entries.length > 0) {
-            state.folderPath = cp;
-            document.getElementById('file-tree-path-text').textContent = cp;
-            document.getElementById('file-tree-actions').style.display = 'inline-flex';
-            await loadFileTree(cp);
-            st.className='status-text success'; st.textContent=`✓ ${repo} 완료`;
-            setTimeout(()=>{o.style.display='none';},1000);
-            return;
-          }
-        } catch {}
-        if (attempts < 15) {
-          st.textContent = `clone 진행 중... (${attempts}s)`;
-          setTimeout(checkClone, 1000);
-        } else {
-          st.className='status-text error'; st.textContent='clone 시간 초과 — 터미널에서 확인하세요';
-          btn.textContent='가져오기'; btn.disabled=false;
+
+      if (!r || !r.ok) {
+        const err = (r && r.error) || '알 수 없는 오류';
+        st.className = 'status-text error';
+        // SSH 인증 실패는 흔한 케이스 — https 사용을 구체적으로 안내한다.
+        let hint = '';
+        if (/permission denied|publickey|could not read from remote|host key|port 22|timed out|connection refused|connect to host/i.test(err)) {
+          // SSH(git@) 실패 — 사내망에서 포트22 차단이거나 키 미등록. https 사용을 강하게 권장.
+          const org = (url.match(/[:/]([^/:]+)\/[^/]+?(?:\.git)?$/) || [])[1] || '<org>';
+          hint = '\n\n※ SSH(git@, 포트22) 연결에 실패했습니다. 사내 네트워크가 SSH를 차단하거나 '
+            + 'SSH 키가 등록돼 있지 않을 수 있습니다. https URL로 다시 시도하세요:\n'
+            + `  https://github.com/${org}/${repo}.git`;
+        } else if (/remote branch .* not found|not found in upstream/i.test(err)) {
+          hint = '\n\n※ 입력한 브랜치가 없습니다. 브랜치를 비워두면 기본 브랜치를 가져옵니다.';
+        } else if (/classic\)\s*(are|is)?\s*forbidden|forbids access via a personal access token|personal access tokens \(classic\) are forbidden/i.test(err)) {
+          // 조직이 classic PAT(ghp_) 접근을 차단 — fine-grained 토큰을 안내.
+          hint = '\n\n※ 이 조직은 classic 토큰(ghp_...) 접근을 차단합니다. Fine-grained 토큰을 발급해 사용하세요:\n'
+            + '  github.com → Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token\n'
+            + '  · Resource owner: 해당 조직 선택 (예: mogam-ai)\n'
+            + '  · Repository access: 대상 저장소 선택\n'
+            + '  · Permissions: Contents → Read (이상)\n'
+            + '  (조직 설정에 따라 관리자 승인이 필요할 수 있습니다)';
+        } else if (/repository not found|authentication failed|could not read username|invalid username or password|403|401/i.test(err)) {
+          // private 저장소 인증 실패 — Access Token 입력을 구체적으로 안내.
+          hint = '\n\n※ private 저장소이거나 인증에 실패했습니다. https URL을 사용하고 '
+            + '위의 Access Token 칸에 GitHub 토큰을 입력해 다시 시도하세요.\n'
+            + '  (github.com → Settings → Developer settings → Personal access tokens)';
+        } else if (/already exists|이미 존재/i.test(err)) {
+          hint = '\n\n※ 같은 이름의 폴더가 이미 있습니다.';
         }
-      };
-      setTimeout(checkClone, 2000);
+        st.textContent = `clone 실패:\n${err}${hint}`;
+        resetBtn(); return;
+      }
+
+      // 실제 성공 — 폴더 로드
+      try {
+        state.folderPath = cp;
+        document.getElementById('file-tree-path-text').textContent = cp;
+        document.getElementById('file-tree-actions').style.display = 'inline-flex';
+        await loadFileTree(cp);
+        st.className = 'status-text success'; st.textContent = `✓ ${repo} 가져오기 완료`;
+        setTimeout(() => { o.style.display = 'none'; }, 1000);
+      } catch (e) {
+        st.className = 'status-text error';
+        st.textContent = `clone은 됐으나 폴더 로드 실패: ${e?.message || e}\n경로: ${cp}`;
+        resetBtn();
+      }
     });
   });
 }
@@ -862,6 +1174,135 @@ async function loadModelsFromServer(retryCount) {
   }
 }
 
+// ===== gateway-openai-models Task 9.2: Model_Refresh_Scheduler =====
+// 게이트웨이에 모델(OpenAI 포함)이 추가/제거되면 에디터 목록을 주기적으로
+// 자동 갱신한다. 핵심 원칙(순수 add, 비침습):
+//  - /api/models 결과를 9.1 순수 함수(catalogSignature/resolveSelection)로 비교
+//  - 시그니처 동일 → 목록·선택·표시 모두 불변(기존 동작 보존, OpenAI 미구성 시 동일)
+//  - 변경 시에만 MODEL_CATALOG 갱신 + 선택을 보존/유효 복구
+//  - 조회 실패 시 직전 성공 목록 유지, 다음 주기에 재시도(목록 비우지 않음)
+let _modelRefreshTimer = null;
+
+// /api/models를 조회해 denylist 필터까지 적용한 카탈로그 객체를 반환한다.
+// 실패 시 예외를 던진다(호출부에서 직전 목록 유지).
+async function _fetchFilteredModelCatalog() {
+  const profile = state.settings?.awsProfile || 'default';
+  let mr;
+  if (window.electronAPI?.getCredentials) {
+    const creds = await window.electronAPI.getCredentials(profile);
+    if (creds && creds.AWS_ACCESS_KEY_ID) {
+      mr = await fetch(`${apiBase()}/api/models`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          profile, accessKeyId: creds.AWS_ACCESS_KEY_ID,
+          secretAccessKey: creds.AWS_SECRET_ACCESS_KEY,
+          sessionToken: creds.AWS_SESSION_TOKEN || '',
+          region: creds.AWS_DEFAULT_REGION || 'us-west-2',
+        })
+      });
+    }
+  }
+  if (!mr) {
+    mr = await fetch(`${apiBase()}/api/models?profile=${encodeURIComponent(profile)}`);
+  }
+  if (!mr.ok) throw new Error(`HTTP ${mr.status}`);
+  const d = await mr.json();
+  if (d.error) throw new Error(d.error);
+  if (!d.models || Object.keys(d.models).length === 0) throw new Error('empty-catalog');
+
+  const allModels = {};
+  for (const [provider, models] of Object.entries(d.models)) {
+    allModels[provider] = models.map(m => ({
+      ...m,
+      capabilities: { ...(m.capabilities || {}), chat: true },
+    }));
+  }
+  const extraCatalogs = [
+    { data: d.image_models, cap: 'image_gen' },
+    { data: d.video_models, cap: 'video_gen' },
+    { data: d.embed_models, cap: 'embedding' },
+    { data: d.rerank_models, cap: 'rerank' },
+  ];
+  for (const { data, cap } of extraCatalogs) {
+    if (!data) continue;
+    for (const [provider, models] of Object.entries(data)) {
+      if (!allModels[provider]) allModels[provider] = [];
+      const tagged = models.map(m => ({ ...m, capabilities: { ...(m.capabilities || {}), [cap]: true } }));
+      allModels[provider] = allModels[provider].concat(tagged);
+    }
+  }
+  const filtered = {};
+  for (const [provider, models] of Object.entries(allModels)) {
+    const kept = models.filter(m => {
+      const clean = String(m.id || '').replace(/^us\.|^eu\.|^global\./, '');
+      return !_deniedModels.has(clean);
+    });
+    if (kept.length) filtered[provider] = kept;
+  }
+  return filtered;
+}
+
+// 선택 보존 자동 새로고침: 변경이 있을 때만 목록/선택/표시를 갱신한다.
+async function refreshModelsPreservingSelection() {
+  if (!state.authenticated) return;
+  let next;
+  try {
+    next = await _fetchFilteredModelCatalog();
+  } catch (e) {
+    // 조회 실패 → 직전 성공 목록 유지(목록 비우지 않음), 다음 주기 재시도
+    console.warn('[Models] 자동 새로고침 실패 — 직전 목록 유지:', e?.message || e);
+    return;
+  }
+  // 9.1 순수 함수로 변경 여부 판정
+  const prevSig = catalogSignature(MODEL_CATALOG);
+  const nextSig = catalogSignature(next);
+  if (prevSig === nextSig) {
+    // 카탈로그 동일 → 목록·선택·표시 모두 불변(기존 동작 보존)
+    return;
+  }
+  // 변경 감지 → 선택 보존/복구 결정(갱신 전 카탈로그 기준)
+  const prevId = state.selectedModel?.id || null;
+  const resolved = resolveSelection(prevId, MODEL_CATALOG, next);
+  // 카탈로그 교체
+  Object.keys(MODEL_CATALOG).forEach(k => delete MODEL_CATALOG[k]);
+  Object.assign(MODEL_CATALOG, next);
+  rebuildModelList();
+  // 선택 적용(보존 또는 유효 복구)
+  state.selectedModel = resolved;
+  renderModelList('');
+  const btn = document.getElementById('model-dropdown-btn');
+  if (btn) btn.textContent = (state.selectedModel?.name || '모델 선택') + ' ▾';
+  const cnt = document.getElementById('topbar-model-count');
+  if (cnt) cnt.textContent = `${ALL_MODELS.length}개 모델`;
+  const statusModel = document.getElementById('status-model');
+  if (statusModel && state.selectedModel?.name) statusModel.textContent = state.selectedModel.name;
+  console.log(`[Models] 자동 새로고침 — 카탈로그 변경 반영 (${ALL_MODELS.length}개, 선택: ${state.selectedModel?.id || '없음'})`);
+}
+
+// 주기적 자동 새로고침 스케줄러 시작. 기본 300초, settings로 60~3600초 조정.
+// 인증 상태에서만 동작하며 중복 타이머를 방지한다.
+function startModelRefreshScheduler() {
+  let sec = Number(state.settings?.modelRefreshIntervalSec);
+  if (!Number.isFinite(sec)) sec = 300;
+  sec = Math.max(60, Math.min(3600, sec));
+  if (_modelRefreshTimer) {
+    clearInterval(_modelRefreshTimer);
+    _modelRefreshTimer = null;
+  }
+  _modelRefreshTimer = setInterval(() => {
+    if (!state.authenticated) return;
+    refreshModelsPreservingSelection().catch(err =>
+      console.warn('[Models] 새로고침 주기 오류:', err?.message || err));
+  }, sec * 1000);
+  console.log(`[Models] 자동 새로고침 스케줄러 시작 (주기 ${sec}초)`);
+}
+
+if (typeof window !== 'undefined') {
+  window.refreshModelsPreservingSelection = refreshModelsPreservingSelection;
+  window.startModelRefreshScheduler = startModelRefreshScheduler;
+}
+
 // ===== Mode Toggle =====
 let _slotCounter = 0;
 function initModeToggle() {
@@ -1072,6 +1513,11 @@ function initChat() {
   document.getElementById('file-attach-input').onchange=e=>{
     Array.from(e.target.files).forEach(f=>{
       const ext=f.name.split('.').pop().toLowerCase();
+      // ZIP — extract on backend, then attach as a structured listing
+      if (ext === 'zip') {
+        handleZipAttachment(f);
+        return;
+      }
       if(!['pdf','pptx','xlsx','png','jpg','jpeg'].includes(ext))return;
       const reader=new FileReader();
       if (['xlsx'].includes(ext)) {
@@ -1089,6 +1535,72 @@ function initChat() {
     });
     e.target.value='';
   };
+}
+
+// ZIP 첨부 — 백엔드에 업로드 → 임시 디렉토리에 압축 해제 → 파일 목록을
+// state.attachedFiles에 구조화된 형태로 저장. 채팅 전송 시 이 목록이
+// 시스템 프롬프트에 펼쳐져 에이전트가 read_file 도구로 내부 파일에 접근할 수 있다.
+async function handleZipAttachment(file) {
+  if (!file) return null;
+  // Insert a placeholder while extracting so the user gets feedback
+  const placeholder = {
+    name: file.name,
+    ext: 'zip',
+    kind: 'zip',
+    size: file.size,
+    type: 'application/zip',
+    extracting: true,
+  };
+  state.attachedFiles.push(placeholder);
+  renderAttachedFiles();
+  try {
+    const fd = new FormData();
+    fd.append('file', file);
+    const r = await fetch(`${apiBase()}/api/attachments/extract-zip`, {
+      method: 'POST',
+      body: fd,
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      console.warn('[zip-extract] failed:', err);
+      // Drop the placeholder
+      const idx = state.attachedFiles.indexOf(placeholder);
+      if (idx >= 0) state.attachedFiles.splice(idx, 1);
+      renderAttachedFiles();
+      try { addLiveLog && addLiveLog('error', `ZIP 압축 해제 실패: ${file.name} — ${err.error || r.status}`); } catch(_) {}
+      return null;
+    }
+    const data = await r.json();
+    // Replace placeholder with the real attachment record
+    const idx = state.attachedFiles.indexOf(placeholder);
+    const record = {
+      name: file.name,
+      ext: 'zip',
+      kind: 'zip',
+      size: file.size,
+      type: 'application/zip',
+      extractDir: data.extractDir,
+      files: data.files || [],
+      totalFiles: data.totalFiles || 0,
+      totalBytes: data.totalBytes || 0,
+      skipped: data.skipped || [],
+    };
+    if (idx >= 0) state.attachedFiles.splice(idx, 1, record);
+    else state.attachedFiles.push(record);
+    renderAttachedFiles();
+    try {
+      addLiveLog && addLiveLog('system',
+        `ZIP 압축 해제됨 — ${file.name} → ${record.totalFiles}개 파일 (위치: ${record.extractDir})`);
+    } catch(_) {}
+    return record;
+  } catch (e) {
+    console.warn('[zip-extract] error:', e);
+    const idx = state.attachedFiles.indexOf(placeholder);
+    if (idx >= 0) state.attachedFiles.splice(idx, 1);
+    renderAttachedFiles();
+    try { addLiveLog && addLiveLog('error', `ZIP 압축 해제 오류: ${file.name} — ${e.message || e}`); } catch(_) {}
+    return null;
+  }
 }
 function renderAttachedFiles() {
   const c=document.getElementById('attached-files-area');
@@ -1169,12 +1681,136 @@ async function sendMessage() {
     renderMessages();
     return;
   }
+
+  // ===== 자동 대화 인계 (handoff) =====
+  // 누적된 컨텍스트가 임계치를 넘으면:
+  //  1) 현재 대화를 Haiku로 인계 MD 요약 → .generated/handoff/conversation-handoff-<ts>.md
+  //  2) 새 대화 탭 자동 생성
+  //  3) 새 탭의 첫 메시지로 인계 MD를 user 컨텍스트로 주입 → 다음 호출에 자동 전달
+  // 이전 대화는 탭으로 보존 — 사용자가 클릭해 돌아갈 수 있음.
+  // 효과: 단순 짧은 호출이 6분+ 걸리는 누적 문제 원천 차단 + 작업 흐름 끊김 없음.
+  await (async function _maybeHandoff(){
+    try {
+      const cur = chatSessions[activeSessionIdx];
+      if (!cur) return;
+      const msgs = cur.messages || [];
+      // 임계치 — 메시지 16+ OR 60K글자+ OR 병렬/합의 3건+
+      let totalChars = 0;
+      let heavyCount = 0;
+      for (const m of msgs) {
+        if (typeof m.content === 'string') totalChars += m.content.length;
+        if (m.isParallel || m.isConsensus) heavyCount++;
+      }
+      const tooLong = msgs.length >= 16 || totalChars >= 60000 || heavyCount >= 3;
+      if (!tooLong) return;
+      // 같은 세션에서 이미 회전했으면 스킵 (무한 회전 방지)
+      if (cur._handoff_done) return;
+      cur._handoff_done = true;
+      const oldName = cur.name || `대화 ${activeSessionIdx + 1}`;
+      try { addLiveLog && addLiveLog('system', `대화 인계 시작 — ${oldName} (msgs=${msgs.length}, chars=${totalChars}, heavy=${heavyCount})`); } catch(_) {}
+
+      // 1) 서버에 요약 요청 (Haiku, 60초 timeout)
+      let handoffResult = null;
+      try {
+        const handoffPayload = {
+          messages: msgs.filter(m => m.role && m.content).map(m => ({ role: m.role, content: m.content })),
+          sessionId: cur.id || '',
+          projectPath: state.folderPath || '',
+          awsProfile: state.settings?.awsProfile || 'bedrock-gw',
+          bedrockUser: state.settings?.bedrockUser || '',
+        };
+        const r = await fetch(`${apiBase()}/api/conversation/handoff`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(handoffPayload),
+        });
+        if (r.ok) handoffResult = await r.json();
+      } catch (e) {
+        console.warn('[Handoff] 서버 요청 실패:', e);
+      }
+
+      // 2) 새 탭 생성
+      const newIdx = chatSessions.length;
+      const newSession = {
+        id: 's-' + Date.now(),
+        name: `대화 ${newIdx + 1}`,
+        messages: [],
+      };
+
+      // 3) 새 탭 첫 메시지 — 인계 문서를 user 컨텍스트로 주입
+      //    (chatHistory에 자동 포함되어 다음 호출 시 모델이 보고 이어 작업)
+      if (handoffResult && handoffResult.content) {
+        newSession.messages.push({
+          role: 'user',
+          content: '[자동 인계 — 이전 대화 이어가기]\n\n다음은 직전 대화의 요약입니다. 이 컨텍스트를 바탕으로 사용자의 다음 지시를 수행하세요.\n\n' + handoffResult.content,
+          _handoff_marker: true,
+        });
+        newSession.messages.push({
+          role: 'assistant',
+          content: `이전 대화 인계 받았습니다. 이어서 작업할 준비 완료.\n\n인계 문서: \`${handoffResult.path}\``,
+          _handoff_marker: true,
+        });
+        newSession.messages.push({
+          role: 'system',
+          content: `이전 대화 "${oldName}"가 길어져 자동 인계되었습니다. 인계 문서: ${handoffResult.path} (좌측 .generated 패널에서 확인 가능)`,
+        });
+      } else {
+        newSession.messages.push({
+          role: 'system',
+          content: `[자동 새 대화] 이전 대화 "${oldName}"가 길어져서 새 탭으로 이어집니다. (인계 요약 실패 — 이전 탭에서 컨텍스트 확인 가능)`,
+        });
+      }
+
+      chatSessions.push(newSession);
+      activeSessionIdx = newIdx;
+      try { renderChatTabs(); } catch(_) {}
+
+      // 4) .generated 패널 새로고침
+      try {
+        const panel = document.querySelector('file-preview-panel');
+        if (panel && typeof panel._refresh === 'function') panel._refresh();
+        document.dispatchEvent(new CustomEvent('generated-folder:refresh'));
+      } catch(_) {}
+
+      // 5) 세션 저장
+      try { saveConversation(); } catch(_) {}
+
+      try { addLiveLog && addLiveLog('system', `대화 인계 완료 — ${handoffResult?.path || '(요약 실패)'} → 대화 ${newIdx + 1}`); } catch(_) {}
+    } catch(e) { console.warn('[Handoff] 실패:', e); }
+  })();
+
   input.value='';input.style.height='auto';
   // IME 조합 중인 경우 강제 완료
   input.blur(); input.focus();
   let content=text;
   if(state.attachedFiles.length){
     content=state.attachedFiles.map(f=>{
+      if (f.kind === 'zip' || f.ext === 'zip') {
+        // ZIP — 백엔드에서 압축 해제된 파일 목록을 시스템 메시지처럼 노출
+        const lines = [];
+        lines.push(`[첨부 ZIP: ${f.name}]`);
+        if (f.extractDir) {
+          lines.push(`압축 해제 위치: ${f.extractDir}`);
+          lines.push(`총 ${f.totalFiles || 0}개 파일 (${((f.totalBytes||0)/1024).toFixed(0)}KB)`);
+          const previewFiles = (f.files || []).slice(0, 50);
+          if (previewFiles.length) {
+            lines.push('내부 파일 목록:');
+            previewFiles.forEach(pf => {
+              lines.push(`  - ${pf.path} (${pf.size} bytes, ${pf.type})`);
+            });
+            if ((f.files || []).length > previewFiles.length) {
+              lines.push(`  ... 외 ${(f.files.length - previewFiles.length)}개`);
+            }
+          }
+          if (f.skipped && f.skipped.length) {
+            lines.push(`스킵된 항목: ${f.skipped.length}개 (크기/경로 정책)`);
+          }
+          lines.push('필요 시 read_file 도구로 위 경로의 파일을 읽어 작업하세요.');
+        } else if (f.extracting) {
+          lines.push('(압축 해제 진행 중 — 잠시 후 다시 시도하세요)');
+        }
+        return lines.join('\n');
+      }
       if(['png','jpg','jpeg'].includes(f.ext)) return `[이미지: ${f.name}]`;
       if(f.ext==='xlsx') return `[엑셀 파일: ${f.name} (${(f.size/1024).toFixed(0)}KB)]`;
       return `[파일: ${f.name}]`;
@@ -1232,32 +1868,83 @@ async function sendMessage() {
   // (사용자가 의도적으로 모델을 구성한 상태이므로 추천 불필요)
   let recHandled = false;
   const _skipRecommend = state.mode === 'parallel' && Array.isArray(state.parallelSlots) && state.parallelSlots.length >= 2;
+
+  // === 이슈 1: 단일 이미지 생성 의도 — 이미지 특화 모델 추천 카드 표시 ===
+  // 이전에는 추천 카드를 억제하고 텍스트 안내만 띄웠으나, 사용자가 어떤 이미지
+  // 특화 모델(Stable Image / Nova Canvas / Titan)이 선택되는지 카드로 보길 원함.
+  // 카드는 informational 모드(모델 교체 없음)로 표시되고, "생성 진행"을 누르면
+  // 채팅 모델을 유지한 채 정상 흐름으로 진행한다 (generate_image 도구가 자동 라우팅).
+  const _imgGenIntent = /이미지\s*(생성|만들|그려|그리|create|generate)|이미지로\s*(만들|생성|그려|변환)|사진.*만들|일러스트|로고.*디자인|배너.*만들|아이콘.*만들|썸네일/i.test(content)
+    && !/(분석|설명|읽어|읽기|수정|편집|지워|제거|배경|inpaint|outpaint)/i.test(content);
+  const _hasImgAttach = Array.isArray(state.attachedFiles)
+    && state.attachedFiles.some(f => /\.(png|jpg|jpeg|webp|gif|bmp)$/i.test(f.name || ''));
+
   if (!_skipRecommend && typeof getModelRecommendation === 'function') {
     const rec = getModelRecommendation(content, state.selectedModel?.id || '');
     if (rec) {
-      const choice = await showRecommendationCard(rec);
-      if (choice === 'accept') {
+      // === 생성 작업(ppt/pdf/docx/이미지 등) — 파이프라인 자동 실행 ===
+      // 사용자 요구: 어떤 모델로 물어보든 문서/이미지 생성은 파이프라인을 최우선으로
+      // 쓰고 작업이 바로 이루어지게 한다. 카드 클릭 없이 구조→내용→이미지컨셉→
+      // 이미지(Vertex+Stability) 파이프라인을 즉시 실행한다. 단, 사용자가 직접
+      // 병렬 모드를 구성한 경우는 존중한다.
+      if (rec.pipelineFirst && rec.options && rec.options.pipeline
+          && state.mode !== 'parallel' && typeof runPipeline === 'function') {
+        rec.recommend = 'pipeline-run';
+        rec.pipelineStages = rec.options.pipeline.stages;
+        const _stageLabels = rec.options.pipeline.stages.map(s => s.label).join(' → ');
+        state.messages.push({
+          role: 'system',
+          content: `파이프라인 자동 실행 (${rec.description}) — ${_stageLabels}`,
+        });
+        renderMessages();
+        addLiveLog('system', `파이프라인 자동 실행 — ${_stageLabels}`);
         const applied = applyRecommendation(rec);
-        if (applied && applied.type === 'parallel') {
-          await runParallel(content);
-          recHandled = true;
-        } else if (applied && applied.type === 'pipeline') {
+        if (applied && applied.type === 'pipeline') {
           await runPipeline(content, applied.stages);
           recHandled = true;
         }
-        // single 전환은 아래 기본 흐름에서 처리됨
+      } else {
+        const choice = await showRecommendationCard(rec);
+        if (choice === 'accept') {
+          if (rec.recommend === 'image-proceed') {
+            // 이미지 생성 — 모델 교체 없이 안내만 남기고 기본 흐름으로 진행
+            addLiveLog('system', '이미지 생성 — 특화 모델 자동 선택(generate_image)');
+          } else {
+            const applied = applyRecommendation(rec);
+            if (applied && applied.type === 'parallel') {
+              await runParallel(content);
+              recHandled = true;
+            } else if (applied && applied.type === 'pipeline') {
+              await runPipeline(content, applied.stages);
+              recHandled = true;
+            }
+            // single 전환은 아래 기본 흐름에서 처리됨
+          }
+        }
       }
+    } else if (_imgGenIntent && !_hasImgAttach && state.mode !== 'parallel') {
+      // 추천 후보가 없으면(이미지 모델이 카탈로그에 없을 때) 최소한 텍스트 안내
+      state.messages.push({
+        role: 'system',
+        content: '이미지 작업 감지 — 이미지 특화 모델(Stable Image / Nova Canvas / Titan 등)로 생성합니다. 채팅 모델은 작업을 지휘하고, 실제 이미지는 최적 이미지 모델이 자동 선택되어 생성됩니다.',
+      });
+      renderMessages();
+      addLiveLog('system', '이미지 생성 의도 감지 — generate_image 도구가 이미지 특화 모델 자동 선택');
     }
   }
 
   if (!recHandled) {
     // === Intent Classifier 기반 라우팅 ===
     // LLM으로 의도를 분류하고, 결과에 따라 최적 실행 경로를 선택한다.
-    // 분류 실패 시 기존 모드 기반 fallback. 3초 타임아웃.
+    // 분류 실패 시 기존 모드 기반 fallback.
+    // 타임아웃은 백엔드 classify_intent의 게이트웨이 타임아웃(10초)보다 약간 길게(12초)
+    // 잡아, 정상적인 게이트웨이 지연(콜드스타트/네트워크)에서 프론트가 먼저 abort해
+    // 불필요한 fallback으로 빠지는 것을 막는다. 백엔드는 어떤 경우에도 안전한 기본값
+    // JSON을 반환하므로(SSO 만료 포함), 12초 안에는 거의 항상 응답이 온다.
     let intent = null;
     try {
       const _classifyCtrl = new AbortController();
-      const _classifyTimeout = setTimeout(() => _classifyCtrl.abort(), 3000);
+      const _classifyTimeout = setTimeout(() => _classifyCtrl.abort(), 12000);
       const classifyResp = await fetch(`${apiBase()}/api/agents/classify-intent`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt: content, awsProfile: state.settings?.awsProfile || 'bedrock-gw', bedrockUser: state.settings?.bedrockUser || '' }),
@@ -1266,31 +1953,62 @@ async function sendMessage() {
       clearTimeout(_classifyTimeout);
       if (classifyResp.ok) intent = await classifyResp.json();
     } catch (e) {
-      console.warn('[Intent] 분류 실패/타임아웃, fallback 사용:', e.message);
+      // AbortError(타임아웃)와 네트워크 오류를 구분해 사용자 친화 메시지로 안내.
+      // 의도 분류 실패는 치명적이지 않다 — 아래에서 모드 기반 fallback으로 정상 진행한다.
+      const _isAbort = e && (e.name === 'AbortError' || /aborted/i.test(e.message || ''));
+      if (_isAbort) {
+        console.warn('[Intent] 분류 타임아웃(12초 초과) — 기본 라우팅으로 진행. '
+          + '게이트웨이 지연 또는 AWS SSO 세션 만료 가능성. 지속되면 재로그인하세요.');
+      } else {
+        console.warn('[Intent] 분류 실패 — 기본 라우팅으로 진행:', e && e.message);
+      }
     }
 
     if (intent && intent.intent) {
+      // 백엔드가 SSO/자격증명 만료를 감지하면 needsReauth=true로 표시한다.
+      // 의도 분류는 fallback으로 진행하되, 사용자에게 재로그인을 1회 안내한다
+      // (반복 안내 방지를 위해 세션당 1번만). 실제 게이트웨이 호출도 곧 실패하므로
+      // 선제적으로 알려주는 게 정확하다.
+      if (intent.needsReauth && !state._reauthNotified) {
+        state._reauthNotified = true;
+        addLiveLog('error', 'AWS SSO 세션 만료 감지 — 재로그인이 필요합니다', intent.reasoning || '');
+        try {
+          state.messages.push({
+            role: 'system',
+            content: '⚠️ AWS SSO 세션이 만료되었습니다. 정확한 의도 분류·생성을 위해 재로그인해 주세요. (상단 프로파일 → 재로그인)',
+          });
+          renderMessages();
+        } catch (_) {}
+        try { if (typeof showSSODialog === 'function') showSSODialog(false); } catch (_) {}
+      } else if (!intent.degraded) {
+        // 정상 분류가 한 번이라도 성공하면 재안내 플래그를 리셋(재로그인 후 정상 복귀).
+        state._reauthNotified = false;
+      }
       addLiveLog('system', `의도 분류: ${intent.intent} (tools=${intent.needs_tools}, parallel=${intent.parallel_useful})`);
+      // _apiBody가 다음 호출에서 task 라우팅에 사용
+      state._lastIntent = intent;
+
+      // 사용자가 단일 모드면 오케스트레이터 우회 — 단일 모델로만 응답.
+      // 사용자가 모델 선택 후 단일 모드를 골랐다면 그 모델이 답변하길 기대하는 것.
+      const userPickedSingle = state.mode === 'single';
 
       if (intent.needs_tools && (intent.intent === 'file_generation' || intent.intent === 'code_change')) {
-        // 도구가 필요한 작업 → 오케스트레이터 또는 에이전트
-        if (intent.complexity === 'complex' || (intent.file_types && intent.file_types.length > 1)) {
+        // 도구가 필요한 작업
+        if (!userPickedSingle && (intent.complexity === 'complex' || (intent.file_types && intent.file_types.length > 1))) {
+          // 사용자가 병렬 모드일 때만 오케스트레이터 자동 활성
           await runOrchestrated(content);
         } else {
-          await runSingle(content); // runSingle → runAgentWorkflow (tool_use 포함)
+          await runSingle(content); // 사용자 선택 모델이 도구 호출
         }
       } else if (intent.parallel_useful && state.mode === 'parallel') {
-        // 병렬 비교가 유용한 작업 + 사용자가 병렬 모드 선택
         await runParallel(content);
       } else if (state.mode === 'parallel' && !intent.needs_tools) {
-        // 병렬 모드이지만 도구 불필요 → 병렬 텍스트 비교
         await runParallel(content);
       } else {
-        // 기본: 단일 모드
         await runSingle(content);
       }
     } else {
-      // 분류 실패 fallback — 기존 모드 기반
+      // 분류 실패 fallback
       if (state.mode === 'parallel') await runParallel(content);
       else await runSingle(content);
     }
@@ -1341,9 +2059,20 @@ function _apiBody(extra) {
   const profile = state.settings?.awsProfile || 'bedrock-gw';
   const user = state.settings?.bedrockUser || '';
   const body = { awsProfile: profile, bedrockUser: user, ...extra };
+  // intent classifier 결과 전달 — 서버가 task별로 다양한 모델로 라우팅 가능하게.
+  // (e.g. reasoning → DeepSeek-R1, long_context → Qwen3, simple_qa → Nova Lite)
+  if (state._lastIntent && typeof state._lastIntent === 'object') {
+    if (state._lastIntent.intent) body.intent = state._lastIntent.intent;
+    if (typeof state._lastIntent.needs_tools === 'boolean') body.needs_tools = state._lastIntent.needs_tools;
+  }
   // 프로젝트 컨텍스트
   if (state.folderPath) {
     body.projectPath = state.folderPath;
+  }
+  // 활성 템플릿(있으면) 전달 — pptx-template-styling 요구사항 5.1.
+  // 빈 문자열/미설정 → 무템플릿(기존 동작 보존, 요구사항 5.2).
+  if (state.activeTemplateId) {
+    body.templateId = state.activeTemplateId;
   }
   // 원격 모드 표시 — ai_engine이 로컬에서 실행 중일 때 원격 경로 접근 불가 알림
   const remote = (typeof window !== 'undefined' && window.__remoteStatus) || null;
@@ -1415,21 +2144,33 @@ function _apiBody(extra) {
     return _sanitizeAssistant(c).substring(0, 4000);
   };
   const history = (state.messages || [])
-    .filter(m =>
-      m.role === 'user' ||
-      (m.role === 'assistant' && m.content && !m.content.includes('[오류:') && !m.content.includes('[합의 오류:'))
-    )
+    .filter(m => {
+      // handoff_marker는 한 번만(가장 최근) 포함 — 누적되면 컨텍스트 폭발
+      if (m._handoff_marker) return true;
+      if (m.role === 'user') return true;
+      if (m.role === 'assistant' && m.content && !m.content.includes('[오류:') && !m.content.includes('[합의 오류:')) return true;
+      return false;
+    })
     .slice(-10)
-    .map(m => ({ role: m.role, content: _truncateMsg(m) }));
+    .map(m => {
+      // handoff_marker 메시지는 그대로 (잘림 없음 — 이미 요약된 인계 문서)
+      if (m._handoff_marker) {
+        return { role: m.role, content: (m.content || '').substring(0, 4000) };
+      }
+      return { role: m.role, content: _truncateMsg(m) };
+    });
   if (history.length) body.chatHistory = history;
   // 세션 ID
   body.sessionId = chatSessions[activeSessionIdx]?.id || 'default';
   return body;
 }
 
-// [Fix #2] SSE idle timeout 헬퍼 — 서버가 응답 중 끊겨도 60초 내 감지
-//   reader.read()를 60초 내에 해결 못 하면 강제로 에러 발생 → catch에서 UI 알림
-async function _readWithIdleTimeout(reader, idleMs = 180000) {
+// [Fix #2] SSE idle timeout 헬퍼 — 서버가 응답 중 끊겨도 감지
+//   reader.read()를 idleMs 내에 해결 못 하면 강제로 에러 발생 → catch에서 UI 알림.
+//   기본값을 10분으로 둔다: 서버가 thinking/도구 실행 중 ~12초마다 heartbeat를
+//   보내므로 정상 작업은 절대 idle하지 않고, 이 백스톱은 *진짜* 죽은 연결만 잡는다.
+//   (이전 180초는 reasoning 모델/긴 이미지 생성 중 거짓 "끊김"을 유발했음)
+async function _readWithIdleTimeout(reader, idleMs = 600000) {
   let timer;
   const timeoutP = new Promise((_, reject) => {
     timer = setTimeout(() => reject(new Error(`스트림 ${Math.floor(idleMs/1000)}초 무응답 — 끊김 감지`)), idleMs);
@@ -1492,8 +2233,14 @@ function isSimpleQuery(prompt) {
 }
 
 async function runSingle(prompt) {
-  // 모든 호출을 에이전트 모드로 통일 — 도구 사용 가능
-  await runAgentWorkflow(prompt);
+  // simple_qa나 일반 채팅이면 도구 없는 채팅으로, 코드/파일 작업은 에이전트로
+  // intent가 안 잡히면 무조건 에이전트 모드 (기존 동작 유지)
+  const looksSimple = isSimpleQuery(prompt);
+  if (looksSimple) {
+    await runSimpleChat(prompt);
+  } else {
+    await runAgentWorkflow(prompt);
+  }
 }
 
 // 멀티-에이전트 오케스트레이터 호출 (Planner → N agents with tools → Merger)
@@ -1862,7 +2609,21 @@ async function runPipeline(prompt, stages) {
 
   for (let i = 0; i < stages.length; i++) {
     const s = stages[i];
-    const target = ALL_MODELS.find(m => m.id === s.model.id) || s.model;
+    let target = ALL_MODELS.find(m => m.id === s.model.id);
+    // 이미지/비디오 단계 또는 카탈로그에 없는(가상 Vertex 등) 모델 id는 채팅이
+    // 불가능하다(이미지 모델을 채팅 모델로 쓰면 게이트웨이가 거부 → 단계 실패).
+    // 이런 단계는 실제 채팅 모델로 도구(generate_image/generate_pptx 등)를 호출하게 하고,
+    // 실제 이미지 엔진(Vertex Nano Banana Pro / Stability)은 generate_image 내부에서
+    // 자동 선택된다(서버 라우팅). 사용자 요구: 이미지 특화 모델 필수 사용.
+    const _isMediaStage = s.task === 'image-gen' || s.task === 'video-gen'
+      || /^(vertex\.|stability\.|amazon\.(nova-canvas|titan-image)|amazon\.nova-reel|luma\.)/.test(String(s.model.id || ''));
+    if (!target || _isMediaStage) {
+      target = originalModel
+        || ALL_MODELS.find(m => /claude-sonnet-4/.test(m.id))
+        || ALL_MODELS.find(m => /claude/.test(m.id))
+        || ALL_MODELS[0]
+        || s.model;
+    }
     state.selectedModel = target;
     const btn = document.getElementById('model-dropdown-btn');
     if (btn) btn.textContent = (target.name || target.id) + ' ▾';
@@ -1940,6 +2701,15 @@ async function runSimpleChat(prompt) {
         if (d === '[DONE]') continue;
         try {
           const p = JSON.parse(d);
+          if (p.heartbeat) {
+            // 모델 thinking 중 — idle 워치독 리셋용. 콘텐츠 아님(렌더 안 함).
+            continue;
+          }
+          if (p.thinking) {
+            // reasoning(생각 과정) — 본문에 누적하지 않고 별도 보관.
+            msg._reasoning = (msg._reasoning || '') + p.thinking;
+            continue;
+          }
           if (p.tool) {
             // 도구 실행 이벤트 — 채팅에 표시하지 않음 (로그만)
             continue;
@@ -1986,7 +2756,7 @@ async function runSimpleChat(prompt) {
             }
             // 기타 일반 에러 — 로그에만 기록, UI는 간단한 안내
             addLiveLog('error', `내부 오류: ${p.error}`);
-            msg.content = '일시적인 오류가 발생했습니다. 다시 시도해 주세요.';
+            msg.content = `오류가 발생했습니다: ${String(p.error).slice(0, 500)}`;
             continue;
           }
           if (p.text) { msg.content += p.text; continue; }
@@ -2110,7 +2880,7 @@ async function runAgentWorkflow(prompt) {
             }
             // 기타 에러는 로그에만, UI는 친화적 안내
             addLiveLog('error', `내부 오류: ${p.error}`);
-            msg.content = '일시적인 오류가 발생했습니다. 다시 시도해 주세요.';
+            msg.content = `오류가 발생했습니다: ${String(p.error).slice(0, 500)}`;
             continue;
           }
           else if (p.tool && p.status === 'running') {
@@ -2139,6 +2909,36 @@ async function runAgentWorkflow(prompt) {
               }
             }
           }
+          else if (p.verifiedFiles) {
+            // 이슈 2 — 백엔드가 디스크에서 검증한 실제 생성 파일 목록.
+            // 강제 생성 폴백으로 만들어진 파일도 여기로 통지된다.
+            try {
+              const arr = Array.isArray(p.verifiedFiles) ? p.verifiedFiles : [];
+              msg._verifiedFiles = arr;
+              if (arr.length) {
+                // 생성 파일 패널 즉시 새로고침 (fs.watch 누락 대비)
+                document.dispatchEvent(new CustomEvent('generated-folder:refresh'));
+              }
+            } catch (_) {}
+          }
+          else if (p.heartbeat) {
+            // 모델이 thinking 중이거나 도구가 길게 실행 중 — idle 워치독 리셋 + 진행 표시.
+            // (오래 걸려도 끊김으로 오판하지 않도록 서버가 주기적으로 보냄)
+            const sec = p.elapsed || 0;
+            const tt = sec >= 60 ? `${Math.floor(sec/60)}m ${sec%60}s` : `${sec}s`;
+            if (p.phase === 'tool') {
+              wf.steps[1].detail = `작업 실행 중... (${p.tool || ''} ${tt})`;
+            } else {
+              if (wf.steps[1].status !== 'running') { wf.steps[1].status = 'running'; wf.steps[1].startedAt = Date.now(); }
+              wf.steps[1].detail = `생각 중... (${tt})`;
+            }
+          }
+          else if (p.thinking) {
+            // reasoning(생각 과정) — ChatGPT/Gemini처럼 노출. 본문에 누적하지 않는다.
+            msg._reasoning = (msg._reasoning || '') + p.thinking;
+            const tail = msg._reasoning.replace(/\s+/g, ' ').slice(-90);
+            wf.steps[1].detail = `생각 중: ${tail}`;
+          }
           else if (p.text) { msg.content += p.text; }
           else { msg.content += d; }
         } catch { msg.content += d; }
@@ -2152,6 +2952,21 @@ async function runAgentWorkflow(prompt) {
     for (const t of msg.toolUses) { if (t.status === 'running') { t.status = 'done'; t.endedAt = Date.now(); } }
     trackUsage(prompt.length, msg.content.length);
     addLiveLog('response', `에이전트 완료: ${state.selectedModel.name}`, `${msg.content.length}자`);
+    // 이슈 2 — 단일 호출에서도 생성 파일 패널을 확실히 새로고침.
+    // 도구 정상 호출/강제 폴백 어느 경로든 .generated/ 변경을 반영한다.
+    try {
+      const panel = document.querySelector('file-preview-panel');
+      if (panel) {
+        const cur = panel.getAttribute('project-path') || '';
+        const want = state.folderPath || window.__workstationCwd || '';
+        if (want && cur !== want) {
+          if (window.__workstationCwd && !panel._workstationCwd) panel._workstationCwd = window.__workstationCwd;
+          panel.setAttribute('project-path', want);
+        }
+        if (typeof panel._refresh === 'function') await panel._refresh();
+      }
+      document.dispatchEvent(new CustomEvent('generated-folder:refresh'));
+    } catch (_e) { /* best-effort */ }
   } catch (e) {
     clearTimeout(timeoutId);
     const errMsg = e.name === 'AbortError' ? '요청 시간 초과 또는 취소됨' : e.message;
@@ -3914,16 +4729,35 @@ function renderToolSummary(c, toolUses) {
           const imgItems = items.filter(it => isImg(it.path));
           const docItems = items.filter(it => !isImg(it.path));
 
-          const resolveFullPath = (relPath) => {
+          // TASK 8 근본수정 — 채팅 카드 경로를 백엔드 absPath 우선으로 해석.
+          // 기존엔 state.folderPath + 상대경로로 추측 조립 → 원격세션/패키징/폴더미오픈
+          // 시 백엔드 실제 저장 위치(_resolve_local_root)와 갈려서 "보이는데 다운로드 없음".
+          // 이제 도구 응답의 it.absPath(절대경로)를 최우선 사용한다.
+          //   1) it.absPath (백엔드가 실제 저장한 절대경로) — 가장 정확
+          //   2) state.folderPath + 상대경로 (로컬 폴더 작업, 하위호환)
+          //   3) window.__workstationCwd + 상대경로 (debug/cwd generatedRoot, 패널과 동일 후보)
+          //   4) 상대경로 그대로 (최후)
+          const resolveItemPath = (item) => {
+            if (item && typeof item.absPath === 'string' && item.absPath) return item.absPath;
+            const relPath = (item && typeof item === 'object') ? (item.path || '') : (item || '');
             if (state.folderPath) return `${state.folderPath.replace(/\/$/, '')}/${relPath}`;
+            if (typeof window !== 'undefined' && window.__workstationCwd) {
+              return `${window.__workstationCwd.replace(/\/$/, '')}/${relPath}`;
+            }
             return relPath;
           };
 
           // ── 이미지 갤러리 (최대 4개) ─────────────────────────────
           if (imgItems.length) {
             const MAX_DISPLAY = 4;
-            const displayed = imgItems.slice(0, MAX_DISPLAY);
-            const overflow = imgItems.length - MAX_DISPLAY;
+            // 표시 개수/초과분/더보기 텍스트 계산은 순수 함수로 분리되어 있다
+            // (Property 10: 채팅 이미지 표시 개수 제한 — Validates Requirements 6.6).
+            // src/lib/image-thumbnails.js, 테스트: tests/unit/image-thumbnails.test.js
+            const _thumbList = (typeof buildImageThumbnailList === 'function')
+              ? buildImageThumbnailList(imgItems, MAX_DISPLAY)
+              : { displayed: imgItems.slice(0, MAX_DISPLAY), overflow: Math.max(0, imgItems.length - MAX_DISPLAY) };
+            const displayed = _thumbList.displayed;
+            const overflow = _thumbList.overflow;
 
             const gallery = document.createElement('div');
             gallery.className = 'tool-images';
@@ -3957,9 +4791,14 @@ function renderToolSummary(c, toolUses) {
 
               // 비동기 base64 로드 → <img>로 교체 (object-fit: contain)
               (async () => {
-                const fp = resolveFullPath(it.path);
+                const fp = resolveItemPath(it);
                 try {
-                  const b64 = await window.electronAPI.readFileBase64(fp);
+                  // 사용자 정책: 생성 파일은 로컬에만 저장 → 로컬 IPC 우선
+                  let b64 = null;
+                  if (window.electronAPI?.readFileBase64Local) {
+                    b64 = await window.electronAPI.readFileBase64Local(fp).catch(() => null);
+                  }
+                  if (!b64) b64 = await window.electronAPI.readFileBase64(fp);
                   const frame = thumb.querySelector('.tit-frame');
                   if (!frame) return;
                   if (b64) {
@@ -3986,7 +4825,7 @@ function renderToolSummary(c, toolUses) {
               // 썸네일 클릭 → 에디터 영역에서 전체 보기 + file-preview-panel 선택 동기화 (12.2)
               thumb.addEventListener('click', (ev) => {
                 ev.stopPropagation();
-                const fp = resolveFullPath(it.path);
+                const fp = resolveItemPath(it);
                 if (typeof openMediaPreview === 'function') openMediaPreview(fp, fileName);
                 // file-preview-panel과 동기화 — 패널이 열려 있으면 해당 항목 활성화
                 document.dispatchEvent(new CustomEvent('preview-panel:select', {
@@ -4001,7 +4840,7 @@ function renderToolSummary(c, toolUses) {
                 folderBtn.addEventListener('click', (ev) => {
                   ev.stopPropagation();
                   ev.preventDefault();
-                  const fp = resolveFullPath(it.path);
+                  const fp = resolveItemPath(it);
                   if (window.electronAPI && window.electronAPI.showItemInFolder) {
                     window.electronAPI.showItemInFolder(fp);
                   }
@@ -4012,7 +4851,7 @@ function renderToolSummary(c, toolUses) {
               if (editBtn) {
                 editBtn.addEventListener('click', (ev) => {
                   ev.stopPropagation();
-                  const fp = resolveFullPath(it.path);
+                  const fp = resolveItemPath(it);
                   _attachGeneratedFileForEdit({ path: fp, name: fileName, ext });
                 });
               }
@@ -4022,7 +4861,7 @@ function renderToolSummary(c, toolUses) {
                 deleteBtn.addEventListener('click', async (ev) => {
                   ev.stopPropagation();
                   if (!confirm(`"${fileName}" 파일을 삭제하시겠습니까?`)) return;
-                  const fp = resolveFullPath(it.path);
+                  const fp = resolveItemPath(it);
                   try {
                     if (window.electronAPI?.deleteFile) {
                       await window.electronAPI.deleteFile(fp);
@@ -4037,7 +4876,7 @@ function renderToolSummary(c, toolUses) {
               if (dlBtnMeta) {
                 dlBtnMeta.addEventListener('click', async (ev) => {
                   ev.stopPropagation();
-                  const fp = resolveFullPath(it.path);
+                  const fp = resolveItemPath(it);
                   try {
                     const r = await window.electronAPI.showSaveDialog({
                       defaultPath: fileName, sourcePath: fp,
@@ -4065,7 +4904,7 @@ function renderToolSummary(c, toolUses) {
               dlBtn.addEventListener('click', async (ev) => {
                 ev.stopPropagation();
                 ev.preventDefault();
-                const fp = resolveFullPath(it.path);
+                const fp = resolveItemPath(it);
                 try {
                   const r = await window.electronAPI.showSaveDialog({
                     defaultPath: fileName,
@@ -4093,7 +4932,7 @@ function renderToolSummary(c, toolUses) {
                 // 12.x에서 file-preview-panel과 연동할 예정 — 현재는 첫 초과 항목으로 점프
                 const first = imgItems[MAX_DISPLAY];
                 if (first && typeof openMediaPreview === 'function') {
-                  openMediaPreview(resolveFullPath(first.path), first.path.split('/').pop());
+                  openMediaPreview(resolveItemPath(first), first.path.split('/').pop());
                 }
               });
               gallery.appendChild(more);
@@ -4126,7 +4965,7 @@ function renderToolSummary(c, toolUses) {
             `;
             const open = (ev) => {
               ev.stopPropagation();
-              const fp = resolveFullPath(it.path);
+              const fp = resolveItemPath(it);
               if (typeof openMediaPreview === 'function') openMediaPreview(fp, fileName);
               document.dispatchEvent(new CustomEvent('preview-panel:select', {
                 detail: { path: it.path, fullPath: fp, name: fileName },
@@ -4137,7 +4976,7 @@ function renderToolSummary(c, toolUses) {
             card.querySelector('.tmc-thumb').addEventListener('click', open);
             card.querySelector('.tmc-download').addEventListener('click', async (ev) => {
               ev.stopPropagation();
-              const fp = resolveFullPath(it.path);
+              const fp = resolveItemPath(it);
               try {
                 const r = await window.electronAPI.showSaveDialog({
                   defaultPath: fileName,
@@ -4689,7 +5528,7 @@ function initMonaco() {
     window.monaco = monaco;
     console.log('[Monaco] 에디터 초기화 시작');
     monacoEditor = monaco.editor.create(document.getElementById('editor-content'), {
-      value: '// AI Editor\n// 파일이나 폴더를 열어 시작하세요.\n',
+      value: '// Mogam Works\n// 파일이나 폴더를 열어 시작하세요.\n',
       language: 'javascript',
       theme: 'vs-dark',
       automaticLayout: true,
@@ -5054,6 +5893,7 @@ function initTopbar() {
     document.getElementById('btn-source-control').classList.add('active');
     document.getElementById('file-tree').style.display = 'none';
     document.getElementById('source-control-panel').style.display = '';
+    const gfpSc = document.getElementById('generated-files-panel'); if (gfpSc) gfpSc.style.display = 'none';
     document.querySelector('.skills-section').style.display = 'none';
     document.getElementById('file-tree-path').style.display = 'none';
     renderSourceControlPanel();
@@ -5081,7 +5921,7 @@ function initTopbar() {
     document.getElementById('file-tree-path').style.display = 'none';
     renderRemoteExplorer();
   });
-  // Generated Files 탭 전환
+  // Generated Files 탭 전환 (PPTX 템플릿 관리 + 생성 파일 미리보기 통합)
   document.getElementById('btn-generated-files')?.addEventListener('click', () => {
     document.querySelectorAll('.lp-btn').forEach(b => b.classList.remove('active'));
     document.getElementById('btn-generated-files').classList.add('active');
@@ -5092,6 +5932,9 @@ function initTopbar() {
     if (gfp) {
       gfp.style.display = 'flex';
       gfp.style.flexDirection = 'column';
+      // 템플릿 패널 목록 갱신 (pptx-template-styling 요구사항 8.1)
+      const tplPanel = document.getElementById('template-panel');
+      if (tplPanel && typeof tplPanel._refresh === 'function') tplPanel._refresh();
       const panel = document.getElementById('file-preview-panel');
       if (panel) {
         // Always set workstation cwd so remote-mode falls back to local
@@ -5109,8 +5952,15 @@ function initTopbar() {
     document.querySelector('.skills-section').style.display = 'none';
     document.getElementById('file-tree-path').style.display = 'none';
   });
+  // 생성 패널 내 템플릿 섹션 접기/펼치기 토글 (pptx-template-styling)
+  document.getElementById('gen-template-toggle')?.addEventListener('click', () => {
+    const section = document.getElementById('gen-template-section');
+    if (!section) return;
+    const collapsed = section.classList.toggle('collapsed');
+    const toggle = document.getElementById('gen-template-toggle');
+    if (toggle) toggle.setAttribute('aria-expanded', String(!collapsed));
+  });
 }
-
 // ===== Remote Explorer (VS Code 스타일) =====
 // 로컬 ~/.ssh/config에서 호스트 목록을 읽어 사이드바 트리로 표시.
 // 호스트 항목: 클릭 시 연결 / 우클릭 시 컨텍스트 메뉴.
@@ -5473,7 +6323,7 @@ function renderSettingsTab(o, profiles) {
         <div style="display:flex;align-items:center;gap:12px">
           <div style="width:40px;height:40px;border-radius:50%;background:var(--color-accent-subtle);display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:700;color:var(--color-accent)">U</div>
           <div style="flex:1">
-            <div style="font-size:14px;font-weight:700;color:var(--color-text-primary)">${esc(bu || 'AI 에디터')}</div>
+            <div style="font-size:14px;font-weight:700;color:var(--color-text-primary)">${esc(bu || 'Mogam Works')}</div>
             <div style="font-size:11px;color:${ALL_MODELS.length > 0 ? 'var(--color-success)' : 'var(--color-error)'}">● ${ALL_MODELS.length > 0 ? '연결됨' : '연결 안 됨'}</div>
           </div>
           <span style="font-size:11px;color:var(--color-text-muted)"></span>
@@ -5555,14 +6405,14 @@ function renderSettingsTab(o, profiles) {
 // ===== About 다이얼로그 =====
 function showAboutDialog() {
   const o = document.getElementById('sso-dialog'); o.style.display = 'block';
-  const folderName = state.folderPath ? state.folderPath.split('/').pop() : 'AI 에디터';
+  const folderName = state.folderPath ? state.folderPath.split('/').pop() : 'Mogam Works';
   o.innerHTML = `<div class="overlay" onclick="if(event.target===this)document.getElementById('sso-dialog').style.display='none'">
     <div class="about-dialog">
       <button class="sm-btn" onclick="document.getElementById('sso-dialog').style.display='none'" style="position:absolute;top:16px;right:16px;font-size:14px">✕</button>
       <div class="about-logo">◆</div>
-      <div class="about-name">AI 에디터</div>
+      <div class="about-name">Mogam Works</div>
       <div class="about-version">v1.0.0</div>
-      <div class="about-desc">멀티 에이전트 코드 에디터<br>Bedrock Gateway를 통한 LLM 호출</div>
+      <div class="about-desc">멀티 에이전트 워크스페이스<br>Bedrock Gateway를 통한 LLM 호출</div>
       <div style="font-size:11px;color:var(--color-text-muted);margin-bottom:12px">macOS 전용</div>
       <div style="text-align:left">
         <div style="font-size:11px;color:var(--color-text-muted);font-weight:600;margin-bottom:6px">런타임 환경</div>
@@ -5574,7 +6424,7 @@ function showAboutDialog() {
           <tr><td>모델 수</td><td>${ALL_MODELS.length}개</td></tr>
         </table>
       </div>
-      <div style="font-size:10px;color:var(--color-text-muted);margin-top:16px">© 2026 AI Editor. All rights reserved.</div>
+      <div style="font-size:10px;color:var(--color-text-muted);margin-top:16px">© 2026 Mogam Works. All rights reserved.</div>
     </div></div>`;
 }
 
@@ -6129,12 +6979,79 @@ async function indexProjectForRAG(projectPath) {
 
 // ===== Generated File Preview =====
 // Open generated images/PDF/PPTX in the editor area using viewer Web Components.
-async function openMediaPreview(filePath, fileName) {
+async function openMediaPreview(filePath, fileName, knownSize) {
   if (!filePath || !window.electronAPI) return;
   const ext = (fileName || filePath.split('/').pop() || '').split('.').pop().toLowerCase();
   const editorArea = document.getElementById('editor-area');
   const editorContent = document.getElementById('editor-content');
   if (!editorArea || !editorContent) return;
+
+  // Req 7.6 — 50MB 초과 파일은 미리보기 차단, 다운로드만 허용
+  // Use known size from caller (file-preview-panel passes item.size); fall back to
+  // listFilesWithStats lookup on the parent dir if size is not provided.
+  const MAX_PREVIEW_BYTES = 50 * 1024 * 1024;
+  let fileSize = (typeof knownSize === 'number' && knownSize >= 0) ? knownSize : -1;
+  if (fileSize < 0 && typeof window.electronAPI.listFilesWithStats === 'function') {
+    try {
+      const sep = filePath.includes('\\') && !filePath.includes('/') ? '\\' : '/';
+      const dir = filePath.substring(0, filePath.lastIndexOf(sep));
+      const base = filePath.substring(filePath.lastIndexOf(sep) + 1);
+      if (dir) {
+        const items = await window.electronAPI.listFilesWithStats(dir);
+        const match = (items || []).find(it => it.name === base);
+        if (match && typeof match.size === 'number') fileSize = match.size;
+      }
+    } catch {}
+  }
+  if (fileSize > MAX_PREVIEW_BYTES) {
+    // Hide other views, show editor area
+    ['structure', 'dependencies', 'stats', 'search', 'git', 'review', 'consensus'].forEach(v => {
+      const el = document.getElementById('view-' + v);
+      if (el) el.style.display = 'none';
+    });
+    editorArea.style.display = 'flex';
+    if (monacoEditor) {
+      try { monacoEditor.getDomNode().style.display = 'none'; } catch {}
+    }
+    let wrapper = document.getElementById('media-preview-wrapper');
+    if (wrapper) wrapper.remove();
+    wrapper = document.createElement('div');
+    wrapper.id = 'media-preview-wrapper';
+    wrapper.style.cssText = 'position:absolute;inset:0;overflow:auto;background:var(--color-bg-primary);display:flex;align-items:center;justify-content:center;';
+    editorContent.appendChild(wrapper);
+    const sizeMb = (fileSize / 1024 / 1024).toFixed(1);
+    const safeName = String(fileName || filePath).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+    wrapper.innerHTML = `
+      <div style="max-width:480px;padding:30px;text-align:center;color:var(--color-text-primary,#ccc);">
+        <div style="font-size:14px;font-weight:600;margin-bottom:12px;">파일 크기 초과</div>
+        <div style="font-size:12px;color:var(--color-text-secondary,#9d9d9d);margin-bottom:6px;">${safeName}</div>
+        <div style="font-size:12px;color:var(--color-warning,#ce9178);margin-bottom:18px;">${sizeMb} MB · 미리보기 한도 50 MB 초과</div>
+        <div style="font-size:11px;color:var(--color-text-muted,#6a6a6a);margin-bottom:20px;">미리보기는 차단되며 다운로드만 가능합니다.</div>
+        <button id="media-preview-download-btn" type="button" style="background:var(--color-accent,#007acc);color:#fff;border:none;padding:8px 16px;border-radius:3px;font-size:12px;cursor:pointer;">다운로드</button>
+      </div>
+    `;
+    const btn = wrapper.querySelector('#media-preview-download-btn');
+    if (btn) {
+      btn.addEventListener('click', async () => {
+        try {
+          const r = await window.electronAPI.showSaveDialog({
+            defaultPath: fileName || filePath.split('/').pop(),
+            sourcePath: filePath,
+            filters: [{ name: ext.toUpperCase(), extensions: [ext] }],
+          });
+          if (r && r.ok && typeof addLiveLog === 'function') {
+            addLiveLog('system', `다운로드 완료: ${r.path}`);
+          }
+        } catch (e) { console.error('[openMediaPreview] download failed', e); }
+      });
+    }
+    state.activeTab = filePath;
+    if (!state.openTabs.find(t => t.path === filePath)) {
+      state.openTabs.push({ path: filePath, name: fileName || filePath.split('/').pop(), preview: true });
+    }
+    if (typeof renderEditorTabs === 'function') renderEditorTabs();
+    return;
+  }
 
   // Hide other views, show editor area
   ['structure', 'dependencies', 'stats', 'search', 'git', 'review', 'consensus'].forEach(v => {
@@ -6145,8 +7062,15 @@ async function openMediaPreview(filePath, fileName) {
   document.getElementById('parallel-results')?.classList.remove('visible');
   document.querySelectorAll('.cv-tab').forEach(t => t.classList.toggle('active', t.dataset.view === 'editor'));
 
-  // Read file as base64
-  const b64 = await window.electronAPI.readFileBase64(filePath).catch(() => null);
+  // Read file as base64. 사용자 정책: 생성 파일은 로컬에만 저장되므로 로컬 IPC를
+  // 먼저 시도해 SFTP 우회 (원격 활성 시 일반 read는 SFTP 라우팅됨).
+  let b64 = null;
+  if (window.electronAPI?.readFileBase64Local) {
+    b64 = await window.electronAPI.readFileBase64Local(filePath).catch(() => null);
+  }
+  if (!b64) {
+    b64 = await window.electronAPI.readFileBase64(filePath).catch(() => null);
+  }
   if (!b64) {
     editorContent.innerHTML = `<div style="padding:30px;color:var(--color-error);">파일 읽기 실패: ${fileName || filePath}</div>`;
     return;
@@ -6209,9 +7133,9 @@ function _hideMediaPreview() {
 
 // Listen for preview-file events from <file-preview-panel>
 document.addEventListener('preview-file', (e) => {
-  const { path, name } = e.detail || {};
+  const { path, name, size } = e.detail || {};
   if (!path) return;
-  openMediaPreview(path, name);
+  openMediaPreview(path, name, size);
 });
 
 // 수정 버튼: 파일을 채팅 첨부로 등록 + 컨텍스트 메시지 추가
@@ -6223,19 +7147,24 @@ document.addEventListener('preview-file:edit', async (e) => {
     const isImage = ['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(ext);
     let dataUrl = '';
     let size = 0;
-    if (window.electronAPI?.readFileBase64) {
-      const b64 = await window.electronAPI.readFileBase64(path);
-      if (b64) {
-        const mime = isImage
-          ? `image/${ext === 'jpg' ? 'jpeg' : ext}`
-          : (ext === 'pdf' ? 'application/pdf'
-            : ext === 'pptx' ? 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
-            : ext === 'docx' ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-            : ext === 'xlsx' ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-            : 'application/octet-stream');
-        dataUrl = `data:${mime};base64,${b64}`;
-        size = Math.floor(b64.length * 3 / 4);
-      }
+    // 사용자 정책: 생성 파일은 로컬에만 저장 → 로컬 IPC 우선
+    let b64 = null;
+    if (window.electronAPI?.readFileBase64Local) {
+      b64 = await window.electronAPI.readFileBase64Local(path).catch(() => null);
+    }
+    if (!b64 && window.electronAPI?.readFileBase64) {
+      b64 = await window.electronAPI.readFileBase64(path).catch(() => null);
+    }
+    if (b64) {
+      const mime = isImage
+        ? `image/${ext === 'jpg' ? 'jpeg' : ext}`
+        : (ext === 'pdf' ? 'application/pdf'
+          : ext === 'pptx' ? 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+          : ext === 'docx' ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+          : ext === 'xlsx' ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+          : 'application/octet-stream');
+      dataUrl = `data:${mime};base64,${b64}`;
+      size = Math.floor(b64.length * 3 / 4);
     }
     if (!dataUrl) {
       alert('파일을 읽을 수 없습니다. 다시 시도하세요.');
@@ -6308,3 +7237,10 @@ if (typeof openFileInEditor === 'function') {
     }
   });
 }
+
+// <template-panel> 선택 이벤트 수신 — 활성 템플릿 갱신 (pptx-template-styling 요구사항 5.6)
+// detail.templateId가 ''이면 "템플릿 없음" → 무템플릿 (요구사항 5.2 동작 보존)
+document.addEventListener('template:selected', (e) => {
+  const tid = (e && e.detail && e.detail.templateId) || '';
+  state.activeTemplateId = tid;
+});

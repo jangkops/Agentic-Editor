@@ -12,6 +12,57 @@ from botocore.awsrequest import AWSRequest
 
 
 # ─────────────────────────────────────────────────────────────────
+# OpenAI Responses 라우트 통합 — 예외 타입 (순수 add)
+# 기존 Bedrock 경로에는 영향 없음. OpenAI 경로 전용.
+# ─────────────────────────────────────────────────────────────────
+class QuotaExceededError(Exception):
+    """403 권한·쿼터 거부 — 기존 403 처리 흐름(ApprovalRequestDialog)과 연결."""
+    pass
+
+
+class OpenAISurfaceError(Exception):
+    """422 등 사용자에게 표시 가능한 OpenAI 라우트 오류 (원인 ≤200자)."""
+    pass
+
+
+class SyncTimeout(Exception):
+    """동기 OpenAI_Responses_Route 호출 타임아웃 — 라우터가 jobs 경로로 폴백."""
+    pass
+
+
+class JobTimeout(Exception):
+    """비동기 잡 폴링이 최대 대기 시간을 초과."""
+    pass
+
+
+class JobFailed(Exception):
+    """비동기 잡이 failed/cancelled/error 상태로 종결."""
+    pass
+
+
+class OpenAIModelUnsupported(Exception):
+    """게이트웨이가 해당 OpenAI 모델 식별자를 미지원으로 거부."""
+    pass
+
+
+def mask_token(token) -> str:
+    """API 토큰 로그 마스킹 — 앞 4자만 남기고 나머지를 가린다.
+
+    - 4자 초과: token[:4] + "****"
+    - 4자 이하(빈값/None 포함): 원문을 노출하지 않도록 "****" 반환
+    """
+    if not token or not isinstance(token, str):
+        return "****"
+    if len(token) > 4:
+        return token[:4] + "****"
+    return "****"
+
+
+# 참고: OpenAI input 정규화는 GatewayClient._to_openai_input 메서드가 단일 진입점이다.
+# (설계 5절 — _build_openai_payload가 self._to_openai_input을 사용)
+
+
+# ─────────────────────────────────────────────────────────────────
 # Per-model max_tokens limits (Bedrock Converse / ConverseStream)
 # Source: AWS Bedrock model documentation. Update when new models are added.
 # Conservative defaults are used — stay under documented limits to avoid
@@ -659,6 +710,323 @@ class GatewayClient:
             except Exception:
                 continue
         return ""
+
+    # ─────────────────────────────────────────────────────────────────
+    # OpenAI Responses 라우트 통합 — 신규 메서드 (순수 add)
+    # 기존 converse/invoke/스트리밍 메서드의 시그니처·동작은 불변.
+    # 기존 _sign / _get_creds / force_refresh_creds / _is_expired_error 재사용.
+    # ─────────────────────────────────────────────────────────────────
+    def _build_openai_payload(self, model_id, messages, system_prompt=""):
+        """OpenAI Responses 표준 요청 본문 구성.
+
+        - {"model": model_id}
+        - messages가 str이면 그대로 "input"에, 아니면 _to_openai_input로 정규화
+        - system_prompt가 있으면 "instructions"로 부착
+
+        주의(라이브 확인 2026-06): 동기 라우트(/openai/responses)는 본문을 그대로
+        OpenAI/mantle 백엔드로 전달하므로 'modelId' 같은 게이트웨이 전용 필드를
+        넣으면 'Unknown parameter: modelId'로 거부(502)된다. 따라서 여기서는
+        OpenAI 표준 필드(model/input/instructions)만 구성한다. 비동기 잡 라우트가
+        요구하는 'modelId'는 openai_responses_job_submit에서만 별도로 부착한다.
+        """
+        body = {"model": model_id}
+        if isinstance(messages, str):
+            body["input"] = messages
+        else:
+            body["input"] = self._to_openai_input(messages)
+        if system_prompt:
+            body["instructions"] = system_prompt
+        return body
+
+    def _to_openai_input(self, messages):
+        """Bedrock 스타일 messages를 OpenAI Responses ``input`` 형태로 정규화.
+
+        - messages가 str이면 그대로 반환(단순 텍스트 입력).
+        - list이면 각 메시지를
+          ``{"role": <role>, "content": [{"type": <input_text|output_text>, "text": ...}]}``
+          형태로 변환한다. assistant 역할은 ``output_text``, 그 외는 ``input_text``.
+        - 텍스트가 비는 메시지는 건너뛴다. 방어적으로 비정형 입력도 흡수한다.
+
+        반환: list[dict] | str
+        """
+        if messages is None:
+            return []
+        if isinstance(messages, str):
+            return messages
+        if not isinstance(messages, (list, tuple)):
+            return []
+
+        normalized = []
+        for msg in messages:
+            # 비정형 항목(문자열 등)은 user 메시지로 흡수
+            if not isinstance(msg, dict):
+                if isinstance(msg, str) and msg:
+                    normalized.append({
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": msg}],
+                    })
+                continue
+            role = msg.get("role") or "user"
+            content = msg.get("content")
+            text = ""
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, (list, tuple)):
+                parts = []
+                for block in content:
+                    if isinstance(block, dict):
+                        t = block.get("text")
+                        if isinstance(t, str):
+                            parts.append(t)
+                    elif isinstance(block, str):
+                        parts.append(block)
+                text = "".join(parts)
+            elif content is not None:
+                text = str(content)
+            if not text:
+                continue
+            block_type = "output_text" if role == "assistant" else "input_text"
+            normalized.append({
+                "role": role,
+                "content": [{"type": block_type, "text": text}],
+            })
+        return normalized
+
+    def _openai_request_blocking(self, method, url, body_bytes, timeout):
+        """urllib 동기 호출 — 상태코드/본문을 그대로 반환(에러 매핑은 호출자가 수행).
+
+        반환: {"status": int, "body": str, "json": dict|None} 또는
+              {"status": -1, "error": str}  (네트워크/타임아웃 등)
+        """
+        import urllib.request, urllib.error
+        import socket
+        headers = self._sign(method, url, body_bytes)
+        req = urllib.request.Request(url, data=body_bytes, method=method)
+        for k, v in headers.items():
+            req.add_header(k, v)
+        try:
+            resp = urllib.request.urlopen(req, timeout=timeout)
+            raw = resp.read().decode()
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                parsed = None
+            return {"status": getattr(resp, "status", 200) or 200, "body": raw, "json": parsed}
+        except urllib.error.HTTPError as e:
+            try:
+                err_body = e.read().decode()
+            except Exception:
+                err_body = ""
+            return {"status": e.code, "body": err_body, "json": None}
+        except (TimeoutError, socket.timeout) as e:
+            return {"status": -1, "error": f"timeout: {e}", "timeout": True}
+        except Exception as e:
+            return {"status": -1, "error": str(e)}
+
+    def _looks_unsupported_model(self, status, body_text):
+        """게이트웨이 응답이 '미지원 모델' 거부인지 방어적으로 판정."""
+        low = (body_text or "").lower()
+        return (
+            "unsupported" in low and "model" in low
+        ) or "model not found" in low or "unknown model" in low or "not in allowed" in low
+
+    async def _openai_post_with_retry(self, url, body_bytes, timeout, label="openai"):
+        """OpenAI 라우트 POST 공통 처리.
+
+        에러 규칙 (요구사항 7 / gateway.md):
+        - 403 → QuotaExceededError
+        - 422 → OpenAISurfaceError(원인 ≤200자)
+        - 500 → 1s/2s/4s 지수 백오프 최대 3회
+        - 토큰 만료(_is_expired_error) → force_refresh_creds 후 최대 3회 재시도
+        - 타임아웃 → SyncTimeout
+        - 미지원 모델 응답 → OpenAIModelUnsupported (호출자가 model_id 부착)
+        반환: 게이트웨이 원본 응답 dict
+        """
+        loop = asyncio.get_event_loop()
+        backoff = [1, 2, 4]
+        last_err = ""
+        for attempt in range(3):
+            result = await loop.run_in_executor(
+                None, self._openai_request_blocking, "POST", url, body_bytes, timeout
+            )
+            status = result.get("status")
+
+            # 네트워크 계층 (타임아웃 등)
+            if status == -1:
+                if result.get("timeout"):
+                    raise SyncTimeout(f"{label} sync timeout: {result.get('error','')[:200]}")
+                err_str = result.get("error", "")
+                last_err = err_str
+                if self._is_expired_error(err_str) and attempt < 2:
+                    print(f"[GW {label}] 토큰 만료 감지 (시도 {attempt+1}/3) — 자격증명 갱신 후 재시도")
+                    self.force_refresh_creds()
+                    await asyncio.sleep(0.5)
+                    continue
+                # 일반 네트워크 오류는 백오프 재시도
+                if attempt < 2:
+                    await asyncio.sleep(backoff[attempt])
+                    continue
+                raise OpenAISurfaceError(f"{label} 호출 실패: {err_str[:200]}")
+
+            body_text = result.get("body", "") or ""
+
+            if status in (200, 202):
+                # 200: 동기 완료 응답. 202: 비동기 잡 ACCEPTED(job_id 포함).
+                if self._looks_unsupported_model(status, body_text):
+                    raise OpenAIModelUnsupported(body_text[:200])
+                return result.get("json") if result.get("json") is not None else {"body": body_text}
+
+            # 토큰 만료
+            if self._is_expired_error(body_text):
+                if attempt < 2:
+                    print(f"[GW {label}] 토큰 만료 감지 (시도 {attempt+1}/3) — 자격증명 갱신 후 재시도")
+                    self.force_refresh_creds()
+                    await asyncio.sleep(0.5)
+                    continue
+
+            if status == 403:
+                raise QuotaExceededError(f"{label} 403: {body_text[:200]}")
+            if status == 422:
+                if self._looks_unsupported_model(status, body_text):
+                    raise OpenAIModelUnsupported(body_text[:200])
+                raise OpenAISurfaceError(body_text[:200])
+            if status == 404 and self._looks_unsupported_model(status, body_text):
+                raise OpenAIModelUnsupported(body_text[:200])
+            if status >= 500:
+                last_err = f"HTTP {status}: {body_text[:200]}"
+                if attempt < 2:
+                    print(f"[GW {label}] HTTP {status} — {backoff[attempt]}s 후 재시도 (시도 {attempt+1}/3)")
+                    await asyncio.sleep(backoff[attempt])
+                    continue
+                raise OpenAISurfaceError(last_err)
+            # 기타 4xx
+            raise OpenAISurfaceError(f"HTTP {status}: {body_text[:200]}")
+
+        raise OpenAISurfaceError(f"{label} 최대 재시도 횟수 초과: {last_err[:200]}")
+
+    async def openai_responses_sync(self, model_id, messages, system_prompt="", timeout=120):
+        """POST {gateway_url}/openai/responses (동기).
+
+        반환: 게이트웨이 원본 응답 dict (어댑터가 후처리).
+        에러 매핑은 _openai_post_with_retry 참조. 미지원 모델 → OpenAIModelUnsupported(model_id).
+        Runtime_Credentials만 사용하며 자격증명을 저장하지 않는다.
+        """
+        url = f"{self.gateway_url}/openai/responses"
+        body = self._build_openai_payload(model_id, messages, system_prompt)
+        body_bytes = json.dumps(body).encode()
+        try:
+            return await self._openai_post_with_retry(url, body_bytes, timeout, label="responses")
+        except OpenAIModelUnsupported:
+            raise OpenAIModelUnsupported(model_id)
+
+    async def openai_responses_call(self, body: dict, timeout=120):
+        """임의 본문으로 POST /openai/responses (도구 실행 루프 전용).
+
+        body는 호출자가 구성한다({"model","input","tools","tool_choice","instructions"} 등).
+        에러 매핑/재시도/토큰갱신은 _openai_post_with_retry를 그대로 재사용한다.
+        Runtime_Credentials만 사용하며 자격증명을 저장하지 않는다.
+        """
+        url = f"{self.gateway_url}/openai/responses"
+        body_bytes = json.dumps(body).encode()
+        return await self._openai_post_with_retry(url, body_bytes, timeout, label="responses-tools")
+
+    async def openai_responses_job_submit(self, model_id, messages, system_prompt="", timeout=30):
+        """POST {gateway_url}/openai/responses-jobs 제출 → job_id 반환.
+
+        제출 응답에서 job_id를 방어적으로 추출(후보 키 job_id/jobId/id/job/task_id).
+        동일한 403/422/500/토큰만료 처리 규칙 적용.
+        """
+        url = f"{self.gateway_url}/openai/responses-jobs"
+        body = self._build_openai_payload(model_id, messages, system_prompt)
+        # 비동기 잡 라우트는 게이트웨이 레벨에서 'modelId'를 요구한다(라이브 확인:
+        # 누락 시 400 'modelId is required'). 동기 라우트와 달리 게이트웨이가 이
+        # 필드를 소비/제거 후 백엔드를 호출하므로 여기서만 부착한다.
+        body = {**body, "modelId": model_id}
+        body_bytes = json.dumps(body).encode()
+        try:
+            raw = await self._openai_post_with_retry(url, body_bytes, timeout, label="responses-jobs")
+        except OpenAIModelUnsupported:
+            raise OpenAIModelUnsupported(model_id)
+
+        job_id = self._extract_job_id(raw)
+        if not job_id:
+            raise OpenAISurfaceError(f"job_id 추출 실패: {str(raw)[:200]}")
+        return job_id
+
+    @staticmethod
+    def _extract_job_id(raw):
+        """잡 제출 응답에서 job_id 방어적 추출."""
+        if not isinstance(raw, dict):
+            return ""
+        for key in ("job_id", "jobId", "id", "job", "task_id"):
+            val = raw.get(key)
+            if isinstance(val, str) and val:
+                return val
+            if isinstance(val, dict):
+                # 중첩된 경우 한 단계 더 탐색
+                for k2 in ("job_id", "jobId", "id"):
+                    v2 = val.get(k2)
+                    if isinstance(v2, str) and v2:
+                        return v2
+        return ""
+
+    @staticmethod
+    def _extract_job_status(raw):
+        """잡 상태 응답에서 status 방어적 추출(소문자)."""
+        if not isinstance(raw, dict):
+            return ""
+        for key in ("status", "state", "job_status"):
+            val = raw.get(key)
+            if isinstance(val, str) and val:
+                return val.lower()
+        return ""
+
+    async def _openai_poll_job(self, job_id, poll_interval=5, max_wait=300):
+        """잡 상태 폴링.
+
+        - status ∈ {completed, succeeded} → 결과 dict 반환
+        - status ∈ {failed, cancelled, canceled, error} → JobFailed(status)
+        - 그 외(queued/in_progress/running 등) → poll_interval 만큼 sleep 후 재조회
+        - 누적 대기 > max_wait → JobTimeout
+        """
+        url = f"{self.gateway_url}/openai/responses-jobs/{job_id}"
+        loop = asyncio.get_event_loop()
+        elapsed = 0
+        while True:
+            # GET 상태 조회 (서명은 빈 본문)
+            result = await loop.run_in_executor(
+                None, self._openai_request_blocking, "GET", url, b"", 30
+            )
+            status_code = result.get("status")
+            if status_code == 200:
+                raw = result.get("json")
+                if not isinstance(raw, dict):
+                    raw = {"body": result.get("body", "")}
+                job_status = self._extract_job_status(raw)
+                if job_status in ("completed", "succeeded"):
+                    return raw
+                if job_status in ("failed", "cancelled", "canceled", "error"):
+                    raise JobFailed(job_status)
+                # 진행중 — 계속 폴링
+            elif status_code == 403:
+                raise QuotaExceededError(f"job poll 403: {result.get('body','')[:200]}")
+            elif status_code and status_code >= 400 and status_code != -1:
+                body_text = result.get("body", "") or ""
+                if self._is_expired_error(body_text):
+                    self.force_refresh_creds()
+                # 일시 오류로 보고 계속 폴링
+            # -1(네트워크 오류)도 폴링 지속
+
+            if elapsed >= max_wait:
+                raise JobTimeout(f"job {job_id[:12]}... 폴링 {max_wait}s 초과")
+            await asyncio.sleep(poll_interval)
+            elapsed += poll_interval
+
+    async def openai_responses_job_submit_and_poll(self, model_id, messages, system_prompt="",
+                                                   poll_interval=5, max_wait=300):
+        """비동기 잡 제출 + 폴링 결합. 완료 결과 dict 반환."""
+        job_id = await self.openai_responses_job_submit(model_id, messages, system_prompt)
+        return await self._openai_poll_job(job_id, poll_interval, max_wait)
 
     async def close(self):
         self._creds = None

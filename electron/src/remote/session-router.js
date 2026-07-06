@@ -397,6 +397,11 @@ class SessionRouter extends EventEmitter {
     const options = opts || {};
     const useRemote = this.isRemoteActive({ forceLocal: Boolean(options.forceLocal) });
 
+    // options.env: 추가 환경변수 맵. 셸 문자열에 `VAR=val cmd` 프리픽스를 넣으면
+    // POSIX 셸에서만 동작하고 Windows cmd.exe에서 깨진다. 그래서 env는 항상 셸 밖에서
+    // 주입한다 — 원격(bash)은 `export`로, 로컬은 execSync의 env 옵션으로.
+    const envMap = (options.env && typeof options.env === 'object') ? options.env : null;
+
     if (useRemote) {
       const active = this.getActive();
       const client = active && active.client;
@@ -404,7 +409,16 @@ class SessionRouter extends EventEmitter {
         throw this._notRouted('active session has no usable ssh2 client');
       }
       const cwd = options.cwd ? String(options.cwd) : '';
-      const fullCmd = cwd ? `cd ${shellQuote(cwd)} && ${cmd}` : cmd;
+      // 원격 셸(bash)에서 env를 확실히 적용 — ssh 서버가 AcceptEnv를 제한할 수 있어
+      // exec env 옵션 대신 `export`를 명령 앞에 인라인한다.
+      let prefix = '';
+      if (envMap) {
+        for (const [k, v] of Object.entries(envMap)) {
+          if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) prefix += `export ${k}=${shellQuote(String(v))}; `;
+        }
+      }
+      const base = cwd ? `cd ${shellQuote(cwd)} && ${cmd}` : cmd;
+      const fullCmd = prefix + base;
       const execOpts = cwd ? { env: { PWD: cwd } } : {};
       return sshExec(client, fullCmd, execOpts);
     }
@@ -414,6 +428,8 @@ class SessionRouter extends EventEmitter {
       const execSyncOpts = {};
       if (options.cwd) execSyncOpts.cwd = options.cwd;
       if (Number.isFinite(options.timeout)) execSyncOpts.timeout = options.timeout;
+      // env는 셸 밖에서 주입 → Windows cmd.exe / POSIX sh 모두에서 동일하게 동작.
+      if (envMap) execSyncOpts.env = { ...process.env, ...envMap };
       // Capture stdout/stderr separately — default execSync inherits
       // stderr; we redirect to 'pipe' so callers can inspect it.
       execSyncOpts.stdio = ['ignore', 'pipe', 'pipe'];

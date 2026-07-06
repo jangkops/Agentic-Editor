@@ -6,15 +6,15 @@ AI 에디터의 이미지 편집(inpaint/outpaint) 도구 추가, 기존 생성 
 
 ## Tasks
 
-- [ ] 1. GatewayClient.invoke_model() 메서드 추가 및 edit_image 도구 등록
-  - [ ] 1.1 GatewayClient에 invoke_model 메서드 구현
+- [x] 1. GatewayClient.invoke_model() 메서드 추가 및 edit_image 도구 등록
+  - [x] 1.1 GatewayClient에 invoke_model 메서드 구현
     - `ai_engine/gateway_module.py`에 `invoke_model(model_id, body, timeout=30)` async 메서드 추가
     - 기존 `_get_creds()` / `_sign()` 메서드를 재사용하여 SigV4 서명 처리
     - 성공 시 `{"images": [...]}`, 실패 시 `{"error": "..."}` 반환
     - 타임아웃 30초 설정, httpx.AsyncClient 사용
     - _Requirements: 2.6, 3.6_
 
-  - [ ] 1.2 AGENT_TOOLS에 edit_image toolSpec 등록
+  - [x] 1.2 AGENT_TOOLS에 edit_image toolSpec 등록
     - `ai_engine/server.py`의 `AGENT_TOOLS["tools"]` 배열에 edit_image 스키마 추가
     - mode(enum: inpaint/outpaint), image_path, prompt 필수 파라미터 정의
     - mask_path(inpaint용), direction/extend_pixels(outpaint용) 조건부 파라미터 정의
@@ -25,11 +25,11 @@ AI 에디터의 이미지 편집(inpaint/outpaint) 도구 추가, 기존 생성 
     - `asyncio.run(_tool_edit_image(tool_input, project_path))` 호출
     - _Requirements: 8.1, 8.6_
 
-  - [ ]* 1.4 AGENT_TOOLS 스키마 단위 테스트 작성
+  - [x]* 1.4 AGENT_TOOLS 스키마 단위 테스트 작성
     - **Property 11: edit_image mode 유효성 검증**
     - **Validates: Requirements 8.5**
 
-- [ ] 2. _tool_edit_image() inpaint 모드 구현
+- [x] 2. _tool_edit_image() inpaint 모드 구현
   - [x] 2.1 입력 유효성 검증 로직 구현
     - mode 검증: "inpaint"/"outpaint" 외 값 → "invalid-mode" 에러
     - image_path 파일 존재 여부 → "file-not-found" 에러
@@ -48,20 +48,20 @@ AI 에디터의 이미지 편집(inpaint/outpaint) 도구 추가, 기존 생성 
     - 모든 모델 실패 시 "model-unavailable" 에러 반환
     - _Requirements: 2.1, 2.6, 2.7_
 
-  - [ ] 2.3 inpaint 결과 저장 및 응답 구성
+  - [x] 2.3 inpaint 결과 저장 및 응답 구성
     - 성공 시 `.generated/inpaint_{timestamp}.png` 파일 저장
     - 응답 JSON: `{"path", "model", "width", "height"}` 반환
     - _Requirements: 2.3, 8.6_
 
-  - [ ]* 2.4 inpaint 입력 유효성 검증 Property 테스트
+  - [x]* 2.4 inpaint 입력 유효성 검증 Property 테스트
     - **Property 4: edit_image inpaint 입력 유효성 검증**
     - **Validates: Requirements 2.2, 2.8, 2.9**
 
-  - [ ]* 2.5 편집 폴백 체인 Property 테스트
+  - [x]* 2.5 편집 폴백 체인 Property 테스트
     - **Property 6: 이미지 편집 폴백 체인 정확성**
     - **Validates: Requirements 2.6, 3.6**
 
-- [ ] 3. _tool_edit_image() outpaint 모드 구현
+- [x] 3. _tool_edit_image() outpaint 모드 구현
   - [x] 3.1 outpaint 입력 유효성 검증 로직 구현
     - image_path 파일 존재 여부 → "file-not-found" 에러
     - 이미지 형식 검증 (PNG/JPEG/WEBP 허용) → "invalid-input" 에러
@@ -83,14 +83,14 @@ AI 에디터의 이미지 편집(inpaint/outpaint) 도구 추가, 기존 생성 
     - 응답 JSON: `{"path", "model", "width", "height"}` 반환 (최종 이미지 크기 포함)
     - _Requirements: 3.3_
 
-  - [ ]* 3.4 outpaint 입력 유효성 검증 Property 테스트
+  - [x]* 3.4 outpaint 입력 유효성 검증 Property 테스트
     - **Property 5: edit_image outpaint 입력 유효성 검증**
     - **Validates: Requirements 3.2, 3.5, 3.7**
 
-- [ ] 4. Checkpoint — 백엔드 편집 도구 검증
+- [x] 4. Checkpoint — 백엔드 편집 도구 검증
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 5. generate_image 폴백 체인 검증 및 개선
+- [x] 5. generate_image 폴백 체인 검증 및 개선
   - [x] 5.1 기존 _tool_generate_image 폴백 로직 검증 및 개선
     - 폴백 체인 순서 확인: SD3.5 → Stable Image Core → Titan Image v2
     - prompt 빈 문자열/누락 시 에러 응답 검증 (Req 1.6)
@@ -99,15 +99,15 @@ AI 에디터의 이미지 편집(inpaint/outpaint) 도구 추가, 기존 생성 
     - 성공 응답에 path, model, size 필드 포함 확인 (Req 1.3)
     - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7_
 
-  - [ ]* 5.2 이미지 생성 폴백 체인 Property 테스트
+  - [x]* 5.2 이미지 생성 폴백 체인 Property 테스트
     - **Property 1: 이미지 생성 폴백 체인 정확성**
     - **Validates: Requirements 1.1**
 
-  - [ ]* 5.3 이미지 생성 입력 유효성 검증 Property 테스트
+  - [x]* 5.3 이미지 생성 입력 유효성 검증 Property 테스트
     - **Property 2: generate_image 입력 유효성 검증**
     - **Validates: Requirements 1.4, 1.7**
 
-  - [ ]* 5.4 이미지 생성 성공 응답 구조 Property 테스트
+  - [x]* 5.4 이미지 생성 성공 응답 구조 Property 테스트
     - **Property 3: 이미지 생성 성공 시 응답 구조 완전성**
     - **Validates: Requirements 1.3**
 
@@ -121,7 +121,7 @@ AI 에디터의 이미지 편집(inpaint/outpaint) 도구 추가, 기존 생성 
     - 파일 저장 실패 시 "pdf-generation-failed" + detail 확인 (Req 4.7)
     - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7_
 
-  - [ ]* 6.2 PDF 생성 라운드트립 Property 테스트
+  - [x]* 6.2 PDF 생성 라운드트립 Property 테스트
     - **Property 7: PDF 생성 라운드트립**
     - **Validates: Requirements 4.1, 4.3**
 
@@ -137,11 +137,11 @@ AI 에디터의 이미지 편집(inpaint/outpaint) 도구 추가, 기존 생성 
     - 파일 저장 실패 시 "pptx-generation-failed" + detail 확인 (Req 5.8)
     - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.7, 5.8_
 
-  - [ ]* 7.2 PPTX 슬라이드 수 Property 테스트
+  - [x]* 7.2 PPTX 슬라이드 수 Property 테스트
     - **Property 8: PPTX 생성 슬라이드 수 정확성**
     - **Validates: Requirements 5.1, 5.3, 5.4**
 
-- [ ] 8. Checkpoint — 백엔드 생성 도구 검증 완료
+- [x] 8. Checkpoint — 백엔드 생성 도구 검증 완료
   - Ensure all tests pass, ask the user if questions arise.
 
 - [x] 9. 채팅 인라인 이미지 렌더러 구현
@@ -164,7 +164,7 @@ AI 에디터의 이미지 편집(inpaint/outpaint) 도구 추가, 기존 생성 
     - 320px × 80px 영역에 파일 경로 텍스트 표시
     - _Requirements: 6.4_
 
-  - [ ]* 9.4 채팅 이미지 표시 개수 제한 Property 테스트
+  - [x]* 9.4 채팅 이미지 표시 개수 제한 Property 테스트
     - **Property 10: 채팅 이미지 표시 개수 제한**
     - **Validates: Requirements 6.6**
 
@@ -196,11 +196,11 @@ AI 에디터의 이미지 편집(inpaint/outpaint) 도구 추가, 기존 생성 
     - `disconnectedCallback()`에서 watcher 해제
     - _Requirements: 7.10_
 
-  - [ ]* 10.5 formatFileSize 함수 Property 테스트
+  - [x]* 10.5 formatFileSize 함수 Property 테스트
     - **Property 9: 파일 크기 포맷팅 정확성**
     - **Validates: Requirements 7.2**
 
-  - [ ]* 10.6 파일 목록 정렬 및 제한 Property 테스트
+  - [x]* 10.6 파일 목록 정렬 및 제한 Property 테스트
     - **Property 12: 파일 목록 정렬 및 제한**
     - **Validates: Requirements 7.1**
 
@@ -236,7 +236,7 @@ AI 에디터의 이미지 편집(inpaint/outpaint) 도구 추가, 기존 생성 
     - CustomEvent 기반 컴포넌트 간 통신
     - _Requirements: 6.2, 7.3_
 
-- [ ] 13. Final Checkpoint — 전체 기능 검증
+- [x] 13. Final Checkpoint — 전체 기능 검증
   - Ensure all tests pass, ask the user if questions arise.
 
 ## Notes

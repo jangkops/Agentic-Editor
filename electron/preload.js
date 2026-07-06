@@ -3,7 +3,9 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('electronAPI', {
   // File system
   openFolder: () => ipcRenderer.invoke('openFolder'),
-  openFile: () => ipcRenderer.invoke('fs:open-file'),
+  // opts (optional): { filters: [{ name, extensions: [...] }] } — e.g. .pptx filter.
+  // Backward-compatible: openFile() with no arg → opts undefined → handler uses no filter.
+  openFile: (opts) => ipcRenderer.invoke('fs:open-file', opts),
   readFile: (p) => ipcRenderer.invoke('fs:read-file', p),
   writeFile: (p, content) => ipcRenderer.invoke('fs:write-file', p, content),
   rename: (oldP, newP) => ipcRenderer.invoke('fs:rename', oldP, newP),
@@ -13,6 +15,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Media file preview support
   readFileBase64: (p) => ipcRenderer.invoke('fs:read-file-base64', p),
   listFilesWithStats: (p) => ipcRenderer.invoke('fs:list-files-with-stats', p),
+  // Local-only variants — bypass SFTP bridge so panel can see workstation
+  // ~/.agentic-editor/.generated/ files while a remote SSH session is active.
+  listFilesWithStatsLocal: (p) => ipcRenderer.invoke('fs:list-files-with-stats-local', p),
+  readFileBase64Local: (p) => ipcRenderer.invoke('fs:read-file-base64-local', p),
+  // 로컬 전용 삭제 — listFilesWithStatsLocal로 읽은 워크스테이션 .generated/ 파일을
+  // 원격 SFTP 브리지 우회로 확실히 삭제. (이슈 3: 목록은 로컬, 삭제는 원격 경유 불일치 수정)
+  deleteFileLocal: (p) => ipcRenderer.invoke('fs:delete-file-local', p),
   watchDirectory: (p) => ipcRenderer.invoke('fs:watch-directory', p),
   unwatchDirectory: (p) => ipcRenderer.invoke('fs:unwatch-directory', p),
   showSaveDialog: (opts) => ipcRenderer.invoke('fs:show-save-dialog', opts),
@@ -56,6 +65,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getCredentials: (profile) => ipcRenderer.invoke('sso:get-credentials', profile),
   getBedrockUsername: (profile) => ipcRenderer.invoke('sso:get-bedrock-username', profile),
   getSSOExpiry: (profile) => ipcRenderer.invoke('sso:get-expiry', profile),
+  // Onboarding — ~/.aws/config에 SSO 프로파일 블록 기록 (spec app-deployment-readiness §6.1/6.2).
+  // input: { name, startUrl, region, accountId, roleName } (secret-free)
+  // returns: {success:true, profile} | {success:false, duplicate?, error, manualHint?}
+  writeSsoProfile: (input) => ipcRenderer.invoke('aws:write-sso-profile', input),
+  // Zero-config 온보딩 — 조직 기본 SSO 프리셋으로 프로파일 자동 생성(무입력).
+  // returns: {success:true, profile, created} | {success:false, profile?, error, manualHint?}
+  ensureDefaultSsoProfile: () => ipcRenderer.invoke('aws:ensure-default-sso-profile'),
 
   // Terminal
   terminalCreate: (id, opts) => ipcRenderer.invoke('terminal:create', id, opts),
@@ -78,6 +94,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   gitStashPop: (dirPath) => ipcRenderer.invoke('git:stash-pop', dirPath),
   gitStashList: (dirPath) => ipcRenderer.invoke('git:stash-list', dirPath),
   gitDiscardAll: (dirPath) => ipcRenderer.invoke('git:discard-all', dirPath),
+  // 저장소 clone — 종료코드/stderr로 성패 판정 (GitHub 가져오기). url/branch/dest/token.
+  // token은 private 저장소용(선택) — 메인 프로세스에서 1회 사용, 저장/로깅 안 함.
+  gitClone: (url, branch, dest, token) => ipcRenderer.invoke('git:clone', url, branch, dest, token),
 
   // Search
   projectSearch: (dirPath, query, options) => ipcRenderer.invoke('git:search', dirPath, query, options),
@@ -128,4 +147,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('remote:event:connected', h);
     return () => ipcRenderer.removeListener('remote:event:connected', h);
   },
+
+  // Slides — HTML → PNG capture via hidden BrowserWindow (Genspark/Gamma-class).
+  // opts: { html, width=1920, height=1080, outputPath, timeoutMs=30000 }
+  // returns: { ok, path, width, height, sizeBytes } or { ok:false, error }
+  renderSlideToPng: (opts) => ipcRenderer.invoke('slides:render-html-to-png', opts),
+
+  // Templates (pptx-template-styling) — whitelisted proxies to template:* IPC
+  // handlers (registered in main process only). Never expose ipcRenderer.
+  registerTemplate: (payload) => ipcRenderer.invoke('template:register', payload),
+  listTemplates: () => ipcRenderer.invoke('template:list'),
+  getTemplate: (id) => ipcRenderer.invoke('template:get', id),
+  getTemplateStyleProfile: (id) => ipcRenderer.invoke('template:get-style-profile', id),
+  deleteTemplate: (id) => ipcRenderer.invoke('template:delete', id),
 });

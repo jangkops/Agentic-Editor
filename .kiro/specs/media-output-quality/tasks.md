@@ -1,0 +1,125 @@
+# Implementation Plan
+
+## Tasks
+
+- [x] 1. Write bug condition exploration property test
+  - **Property 1: Bug Condition** - Native-Only Manifestation, Heuristic Over-Match, Silent Short-Circuit, Diagnostic Endpoint Absent
+  - **CRITICAL**: This test MUST FAIL on unfixed code — failure confirms the bug exists
+  - **DO NOT attempt to fix the test or the code when it fails**
+  - **NOTE**: This test encodes the expected behavior — it will validate the fix when it passes after implementation
+  - **GOAL**: Surface counterexamples that demonstrate the three-surface bug exists (`_looks_structural` over-match, silent circuit short-circuit, diagnostic endpoint absent, native-only meta)
+  - **Scoped PBT Approach**: Bug is largely deterministic, so each case is scoped to a concrete failing input rather than free-form generation
+  - File: `scripts/test_media_output_quality_bug_condition.py`
+  - Test 1 (native-only manifestation): monkeypatch `_get_gw().invoke_model` to return access-denied for all `IMAGE_MODELS` ids → call `_force_generate_from_text` with body "프로젝트 아키텍처 다이어그램을 PPTX 로 만들어줘" → assert every embedded image meta `model` field equals `"matplotlib (native)"` and zero metas match `stability.*` / `amazon.titan-image-generator-v2:0` / `amazon.nova-canvas-v1:0`
+  - Test 2 (`_looks_structural` over-match): assert `_looks_structural("프로젝트 구조 보고서", "흐름도", "이번 분기 변경") == True` on unfixed code (no `/`, no `->`/`→`, no `|...|` in inputs)
+  - Test 3 (silent short-circuit): set `_IMAGE_GEN_CIRCUIT["disabled_at"] = time.time()` → call `_tool_generate_image(...)` → assert response dict does NOT contain `"actionable"` key AND does NOT contain `"recentAttempts"` key (or `recentAttempts` is empty)
+  - Test 4 (diagnostic endpoint 404): use FastAPI `TestClient(app)` to `GET /api/debug/image-gen-status` → assert HTTP status code == 404
+  - Run test on UNFIXED code
+  - **EXPECTED OUTCOME**: All 4 cases FAIL/error in the sense that they ASSERT the buggy behavior currently holds (so they actually PASS on unfixed code, then FAIL on fixed code — this is the inverted exploration pattern). Document the four counterexamples observed: native-only meta list, `_looks_structural` returning True without signals, short-circuit response missing both keys, route 404.
+  - Mark task complete when test is written, run, and the four counterexamples are documented
+  - _Requirements: 1.1, 1.2, 1.3, 1.4_
+
+- [x] 2. Add `_IMAGE_GEN_ATTEMPTS` ring buffer and `_record_image_attempt` helper
+  - File: `ai_engine/server.py` (~line 683, immediately after `_IMAGE_GEN_CIRCUIT` declaration)
+  - Ensure `from collections import deque` is imported at the top of the file (add if missing)
+  - Declare module-level `_IMAGE_GEN_ATTEMPTS: deque = deque(maxlen=10)`
+  - Add helper `_record_image_attempt(model: str, status: str, reason: str, duration_ms: int) -> None`
+  - Helper appends `{"ts": time.time(), "model": model, "status": status, "reason": reason, "durationMs": duration_ms}` to the deque
+  - `status` is one of `"ok"` / `"error"` / `"exception"`; `reason` is empty string on success
+  - This is foundation work — no behavioral change yet, but unblocks tasks 3, 4, and 6
+  - _Bug_Condition: groundwork for `isBugCondition(input)` where `input.scenario == "circuit_short_circuit"` enrichment_
+  - _Expected_Behavior: enables `recentAttempts` field required by Property 2 and Property 4_
+  - _Preservation: no behavioral change — pure additive module-level state_
+  - _Requirements: 2.3_
+
+- [x] 3. Wire `_record_image_attempt` calls into `_tool_generate_image` parallel result handling
+  - File: `ai_engine/server.py` (~line 884–895, after `asyncio.gather(...)` resolves)
+  - For each `(model_id, result_or_exception)` pair returned by `asyncio.gather`, call `_record_image_attempt` exactly once
+  - Success path → `status="ok"`, `reason=""`, `duration_ms=` measured per-model elapsed
+  - Gateway-returned access-denied / error response → `status="error"`, `reason=<detail>`, `duration_ms=` measured
+  - Python exception path → `status="exception"`, `reason=str(exc)`, `duration_ms=` measured
+  - Do NOT alter the existing `_image_gen_trip_circuit` invocation point or the parallel best-of-N control flow
+  - Depends on task 2 (helper must exist)
+  - _Bug_Condition: isBugCondition(input) where input.scenario in {"render_pptx", "circuit_short_circuit"} — populates the data source consumed by Property 2 and Property 4_
+  - _Expected_Behavior: every image-gen attempt is observable through `_IMAGE_GEN_ATTEMPTS`_
+  - _Preservation: parallel best-of-N path, `_select_image_models` ordering, `_image_gen_trip_circuit` trigger all unchanged_
+  - _Requirements: 2.3, 2.5_
+
+- [x] 4. Enrich circuit-breaker short-circuit JSON response
+  - File: `ai_engine/server.py` (~line 884, the `_tool_generate_image` early-return branch when `_image_gen_is_circuit_broken()` is True)
+  - Add `recentAttempts` key to the response JSON: value = `list(_IMAGE_GEN_ATTEMPTS)[-5:]`
+  - Compute `denied_ids` = unique `model` values from `recentAttempts` items where `_image_gen_error_is_access_denied(item["reason"]) == True`
+  - If `denied_ids` is non-empty, add `actionable` key with bilingual string: `f"Bedrock 게이트웨이가 image-gen 라우트를 거부했습니다 — 권한 필요 모델: {ids} / Bedrock gateway denied image-gen route — admin must grant invoke permission for: {ids}"` where `{ids}` = comma-joined `denied_ids`
+  - If `denied_ids` is empty, OMIT the `actionable` key entirely (do not emit a noisy message with empty ids)
+  - Preserve all existing keys in the short-circuit response (`fallback`, `model`, etc.) unchanged
+  - Depends on tasks 2 and 3 (ring buffer must be populated for `recentAttempts` to be meaningful)
+  - _Bug_Condition: isBugCondition(input) where input.scenario == "circuit_short_circuit" AND ("actionable" NOT IN response OR "recentAttempts" NOT IN response)_
+  - _Expected_Behavior: short-circuit response contains `recentAttempts` (last 5) and conditional bilingual `actionable` message naming denied model ids_
+  - _Preservation: existing short-circuit keys preserved; circuit trip mechanism (Req 3.3) unchanged_
+  - _Requirements: 2.3, 2.5_
+
+- [x] 5. Rewrite `_looks_structural` predicate from keyword matching to signal matching
+  - File: `ai_engine/server.py` (~line 1130)
+  - Remove all generic Korean keyword matching ("프로젝트", "구조", "흐름도", "트리", "다이어그램") and English keyword matching ("diagram", "architecture", etc.)
+  - Implement three regex signals on the joined `description + title + body` text:
+    - Path token: `re.search(r"[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+", text)`
+    - Arrow chain: `re.search(r"\S+\s*(->|→|⇒)\s*\S+", text)`
+    - Markdown table row (per line): `re.match(r"^\s*\|.+\|\s*$", line)` AND `line.count("|") >= 3`
+  - Return `True` if any signal matches, `False` otherwise
+  - Function signature `_looks_structural(description: str, title: str, body: str) -> bool` is preserved exactly so that callers `_force_generate_from_text:6050` and `_classify_section_diagram:2136` need no change
+  - Independent of tasks 2/3/4 — can be done in parallel with task 3 and task 4
+  - _Bug_Condition: isBugCondition(input) where input.scenario == "looks_structural" — generic keywords cause false positive_
+  - _Expected_Behavior: text without path/arrow/table signals returns False; text with at least one signal returns True_
+  - _Preservation: real structural inputs (paths, arrows, tables) still route to matplotlib (Req 3.1); `AE_FORCE_NATIVE_DIAGRAM=1` is checked elsewhere and still wins (Req 3.2)_
+  - _Requirements: 2.2, 3.1_
+
+- [x] 6. Add `GET /api/debug/image-gen-status` diagnostic endpoint
+  - File: `ai_engine/server.py` (~line 3798, between `debug_cwd` at line 3786 and `debug_bridge` at line 3799)
+  - Register route `@app.get("/api/debug/image-gen-status")` with handler `debug_image_gen_status`
+  - Build response with exactly these 5 top-level keys:
+    - `circuit`: `{"disabled_at": float, "ttl": int, "ttlRemainingSec": float, "isBroken": bool}` — `ttlRemainingSec` = `max(0, ttl - (time.time() - disabled_at))` when `disabled_at > 0` else `0`; `isBroken` calls `_image_gen_is_circuit_broken()`
+    - `models`: current `IMAGE_MODELS` chain as a list
+    - `selectPreview`: result of `_select_image_models("test architecture diagram", None)` (literal sample prompt)
+    - `env`: `{"AE_IMAGE_PARALLEL_N": ..., "AE_IMAGE_QUALITY_THRESHOLD": ..., "AE_FORCE_NATIVE_DIAGRAM": ..., "AE_DISABLE_HTML_SLIDES": ...}` — each value read FRESH per-call via `os.getenv(name)` (no module-level caching)
+    - `recentAttempts`: `list(_IMAGE_GEN_ATTEMPTS)` (last 10)
+  - Return HTTP 200 regardless of circuit state — diagnostic surface must never be blocked by the circuit it diagnoses
+  - Depends on task 2 (`_IMAGE_GEN_ATTEMPTS` must exist)
+  - _Bug_Condition: isBugCondition(input) where the diagnostic surface is absent (Req 1.4 → 404)_
+  - _Expected_Behavior: GET returns 5-key JSON with `circuit`, `models`, `selectPreview`, `env`, `recentAttempts`; HTTP 200 in both healthy and broken circuit states_
+  - _Preservation: existing `debug_cwd` and `debug_bridge` routes unchanged_
+  - _Requirements: 2.4_
+
+- [x] 7. * Write fix-checking property tests (F1–F4)
+  - **Property 1: Expected Behavior** - Visual-Intent Routing, Signal-Based Heuristic, Diagnostic Endpoint Schema
+  - **IMPORTANT**: These tests MUST PASS after the fix (tasks 2–6) is applied
+  - **GOAL**: Validate Properties 1, 3, 4, 5 from design.md across the input domain via hypothesis
+  - File: `scripts/test_media_output_quality_fix_pbt.py`
+  - F1 (Property 1, Req 2.1): hypothesis-generate visual-intent PPTX/PDF inputs with mocked healthy gateway returning a valid PNG for at least one Bedrock model id → assert `_force_generate_from_text` output contains at least one embedded image whose meta `model` matches `stability.*` OR `amazon.titan-image-generator-v2:0` OR `amazon.nova-canvas-v1:0`
+  - F2 (Property 3, Req 2.2): hypothesis-generate text containing zero `/` path tokens, zero arrow chains (`->`/`→`/`⇒`), zero markdown table rows (generic keywords like "프로젝트"/"구조"/"흐름도"/"diagram"/"architecture" allowed) → assert `_looks_structural(description, title, body) == False`
+  - F3 (Property 5, Req 3.1): hypothesis-generate text containing at least one of the three signals → assert `_looks_structural(...) == True` (regression sentinel pairing F2)
+  - F4 (Property 4, Req 2.4): use `TestClient` to `GET /api/debug/image-gen-status` in two states — (a) healthy circuit (`_IMAGE_GEN_CIRCUIT["disabled_at"] = 0`), (b) broken circuit (`_IMAGE_GEN_CIRCUIT["disabled_at"] = time.time()`) → assert HTTP 200, JSON contains all 5 keys (`circuit`, `models`, `selectPreview`, `env`, `recentAttempts`), `circuit.isBroken` is bool, `circuit.disabled_at` and `circuit.ttl` are numbers, `env` contains all 4 expected variable keys
+  - Run after tasks 2–6 are complete
+  - **EXPECTED OUTCOME**: All four properties PASS — confirms the fix satisfies the expected behavior across the input domain
+  - _Requirements: 2.1, 2.2, 2.4, 3.1_
+
+- [x] 8. * Write preservation property tests (P1–P4)
+  - **Property 2: Preservation** - Circuit Trip, Non-Visual Routing, PPTX Layout Coordinates, TTL Auto-Recovery
+  - **IMPORTANT**: Follow observation-first methodology — observe behavior on UNFIXED code before writing assertions, then verify tests pass on both unfixed and fixed code
+  - File: `scripts/test_media_output_quality_preservation_pbt.py`
+  - P1 (Req 3.3): hypothesis-generate inputs where mock gateway returns access-denied for every Bedrock image model in `IMAGE_MODELS` → call `_tool_generate_image` once → assert `_IMAGE_GEN_CIRCUIT["disabled_at"] != 0` (circuit tripped). Must hold on both unfixed and fixed code.
+  - P2 (Req 3.4): hypothesis-generate non-visual-intent PPTX/PDF requests (plain text bodies — monthly report text, code change logs) → spy/wrap `gw.invoke_model` → assert spy call count with image model ids (`stability.*`, `amazon.nova-canvas-v1:0`, `amazon.titan-image-generator-v2:0`) == 0
+  - P3 (Req 3.5): hypothesis-generate slides with both text and image → inspect generated PPTX → assert body placeholder positioned at `(left=Inches(0.6), top=Inches(1.6), width=Inches(6.0), height=Inches(5.4))` AND image positioned at `x == Inches(7.0)`
+  - P4 (Req 3.7): force-trip circuit then set `_IMAGE_GEN_CIRCUIT["disabled_at"] = time.time() - 301` (TTL elapsed) → assert `_image_gen_is_circuit_broken() == False` → invoke `_tool_generate_image` again with healthy gateway mock → assert `gw.invoke_model` is re-called with image model ids (retry attempts re-fire)
+  - Run on UNFIXED code first to capture baseline (P1–P4 should already pass — they describe behavior the fix MUST preserve), then re-run after the fix to confirm no regressions
+  - **EXPECTED OUTCOME**: All four properties PASS on both unfixed and fixed code
+  - _Requirements: 3.3, 3.4, 3.5, 3.7_
+
+- [x] 9. Final checkpoint — Ensure all tests pass and verify diagnostic surface end-to-end
+  - Re-run `scripts/test_media_output_quality_bug_condition.py` (task 1): all four cases now FAIL on fixed code (inverted from initial PASS on unfixed) — this confirms the bug is resolved
+  - Re-run `scripts/test_media_output_quality_fix_pbt.py` (task 7) if implemented: all properties PASS
+  - Re-run `scripts/test_media_output_quality_preservation_pbt.py` (task 8) if implemented: all properties PASS
+  - Manual verification (operator surface):
+    - 재시작: ai_engine 서버를 재시작
+    - 진단 엔드포인트: `curl http://localhost:8765/api/debug/image-gen-status` 응답이 `circuit` / `models` / `selectPreview` / `env` / `recentAttempts` 5-key JSON 인지 육안 확인
+    - 사용자 경험: 사용자가 PPTX 1번 생성 → 응답에 `actionable` 메시지 또는 `recentAttempts` 가 보이는지 확인 → 게이트웨이 access-denied 인지 의도된 폴백인지 사용자 측에서 확정 가능한지 확인
+  - 모든 테스트가 통과하지 않거나 진단 응답이 5-key JSON 이 아니면 사용자에게 질문 후 진행

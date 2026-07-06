@@ -92,7 +92,9 @@ function registerGitHandlers() {
       // diff 조회
       let diff = '';
       try {
-        diff = await run(`git diff ${hash}~1 ${hash} 2>/dev/null || git show ${hash} --format=""`, {
+        // `2>/dev/null` 제거 — exec가 stderr를 분리 캡처하므로 Windows(cmd.exe)에서
+        // 깨지는 Unix 리다이렉트가 불필요하다. `||` 폴백은 cmd.exe·sh 모두 지원.
+        diff = await run(`git diff ${hash}~1 ${hash} || git show ${hash} --format=""`, {
           cwd: dirPath,
           timeout: 10000,
         });
@@ -126,51 +128,34 @@ function registerGitHandlers() {
    */
   ipcMain.handle('git:search', async (_, dirPath, query, options) => {
     try {
-      const caseSensitiveFlag = options?.caseSensitive ? '' : '-i';
-      const flags = `${caseSensitiveFlag} -n --include="*"`;
-      const cmd = `grep -r ${flags} --color=never -l "${query.replace(/"/g, '\\"')}" . 2>/dev/null | head -50`;
+      if (!dirPath || !query) return [];
+      const ci = options?.caseSensitive ? '' : '-i';
+      const q = String(query).replace(/"/g, '\\"');
+      // `git grep`은 크로스플랫폼(Windows용 Git 포함)이라 Unix 전용 grep/head/파이프/
+      // `2>/dev/null` 없이 동작한다. 원격(SSH linux)에서도 동일하게 실행된다.
+      // 출력 형식은 "path:line:text". 매치가 없으면 git grep이 비-영으로 종료 →
+      // run()이 throw → 아래 catch에서 [] 반환(정상 흐름).
+      // (참고: git 워크트리 밖 폴더는 검색되지 않는다 — .gitignore/바이너리 자동 제외 이점.)
+      const cmd = `git grep --no-color -n -I ${ci} -e "${q}"`.replace(/\s+/g, ' ').trim();
+      const result = await run(cmd, { cwd: dirPath, timeout: 15000 });
 
-      const result = await run(cmd, {
-        cwd: dirPath,
-        timeout: 15000,
-      });
-
-      const files = result.split('\n').filter(Boolean);
-      const matches = [];
-
-      for (const file of files.slice(0, 30)) {
-        try {
-          const grepCmd = `grep -n ${
-            options?.caseSensitive ? '' : '-i'
-          } --color=never "${query.replace(/"/g, '\\"')}" "${file}" 2>/dev/null | head -10`;
-          const grepLines = await run(grepCmd, {
-            cwd: dirPath,
-            timeout: 5000,
-          });
-
-          const fileMatches = grepLines
-            .split('\n')
-            .filter(Boolean)
-            .map((line) => {
-              const match = line.match(/^(\d+):(.*)$/);
-              return match ? { line: +match[1], text: match[2].trim() } : null;
-            })
-            .filter(Boolean);
-
-          if (fileMatches.length > 0) {
-            matches.push({
-              file: file.replace(/^\.\//, ''),
-              matches: fileMatches,
-            });
-          }
-        } catch {
-          // 개별 파일 검색 실패는 무시
+      const byFile = new Map();
+      for (const line of result.split('\n')) {
+        if (!line) continue;
+        const m = line.match(/^(.+?):(\d+):(.*)$/); // path:line:text
+        if (!m) continue;
+        const file = m[1];
+        if (!byFile.has(file)) {
+          if (byFile.size >= 30) continue; // 최대 30개 파일
+          byFile.set(file, []);
         }
+        const arr = byFile.get(file);
+        if (arr.length < 10) arr.push({ line: +m[2], text: m[3].trim() }); // 파일당 최대 10
       }
 
-      return matches;
-    } catch (error) {
-      console.error('[git:search] Error:', error.message);
+      return Array.from(byFile.entries()).map(([file, matches]) => ({ file, matches }));
+    } catch (_error) {
+      // 매치 없음(git grep exit 1)·비-git 폴더 포함 → 조용히 빈 결과
       return [];
     }
   });
@@ -381,6 +366,94 @@ function registerGitHandlers() {
       return { ok: true };
     } catch (error) {
       const msg = String(error.stdout || error.stderr || error.message || error);
+      return { ok: false, error: msg };
+    }
+  });
+
+  /**
+   * 저장소 clone (GitHub 가져오기).
+   *
+   * 기존 구현은 터미널에 `git clone`을 문자열로 흘려보내고 대상 폴더에 파일이
+   * 생기면 "성공"으로 오판했다. git clone은 실패해도 대상 디렉터리와 .git을 먼저
+   * 만들기 때문에 인증 실패에도 "성공"으로 표시되는 버그가 있었다. 이 핸들러는
+   * clone을 직접 실행하고 종료코드/stderr로 성패를 정확히 판정한다.
+   *
+   * 비대화식 강제(무한 대기 방지):
+   *   - GIT_TERMINAL_PROMPT=0 : HTTPS 자격증명 프롬프트에서 멈추지 않고 즉시 실패
+   *   - GIT_SSH_COMMAND (BatchMode=yes) : SSH 키/호스트키 프롬프트에서 멈추지 않음
+   *     (StrictHostKeyChecking=accept-new 로 최초 호스트키는 자동 수용, 이후 검증)
+   *
+   * private 저장소 지원(token):
+   *   token이 주어지고 URL이 https(github.com 등)면
+   *   `https://x-access-token:<token>@host/...` 형태로 인증 URL을 만들어 clone한다.
+   *   토큰은 어디에도 저장하지 않고 이 호출에서 1회만 사용하며, 반환하는
+   *   output/error 문자열에서 토큰을 마스킹하여 로그/화면 노출을 막는다.
+   *
+   * @param {string} url    저장소 URL (https 또는 git@ SSH)
+   * @param {string} branch 브랜치명 (빈 문자열이면 원격 기본 브랜치)
+   * @param {string} dest   clone 대상 절대경로
+   * @param {string} [token] private 저장소용 access token (선택, 저장 안 함)
+   * @returns {{ok:boolean, dest?:string, error?:string}}
+   */
+  ipcMain.handle('git:clone', async (_, url, branch, dest, token) => {
+    // 반환/로그 직전 토큰을 마스킹. 인증 URL(x-access-token:TOKEN@)과 토큰 원문
+    // 모두를 가려 stderr에 자격증명이 새지 않게 한다.
+    const rawToken = String(token || '').trim();
+    const maskSecrets = (s) => {
+      let out = String(s || '');
+      // https://user:pass@host → https://***@host (자격증명 부분 마스킹)
+      out = out.replace(/(https?:\/\/)[^/@\s]+@/gi, '$1***@');
+      // 토큰 원문이 남아있으면 제거
+      if (rawToken) out = out.split(rawToken).join('***');
+      return out;
+    };
+
+    try {
+      if (!url || !dest) return { ok: false, error: 'url과 dest가 필요합니다' };
+
+      // 입력 인용 — 셸 인젝션 방지(큰따옴표 감싸고 위험문자 제거).
+      const safeUrl = String(url).trim().replace(/["`$\\]/g, '');
+      const safeDest = String(dest).replace(/"/g, '\\"');
+      const safeBranch = String(branch || '').trim().replace(/[^\w.\-/]/g, '');
+      // 토큰은 URL basic-auth로만 사용 — 셸/URL을 깨뜨리는 문자를 제거해 인젝션 방지.
+      const safeToken = rawToken.replace(/[^\w.\-~+/=]/g, '');
+
+      // 대상 디렉터리가 이미 존재하고 비어있지 않으면 git이 실패한다. 사전에 명확히 안내.
+      // (존재 여부 확인은 fs로 직접 — 로컬 기준. 원격 세션이면 git 에러 메시지로 표면화됨)
+      try {
+        const fs = require('fs');
+        if (fs.existsSync(dest) && fs.readdirSync(dest).length > 0) {
+          return { ok: false, error: `대상 폴더가 이미 존재하며 비어있지 않습니다:\n${dest}\n(기존 폴더를 지우거나 다른 위치를 사용하세요)` };
+        }
+      } catch (_) { /* fs 확인 실패는 무시하고 git에 위임 */ }
+
+      // token이 있고 https URL이면 인증 URL로 변환. (git@ SSH URL은 토큰과 무관하므로 그대로 둠)
+      let cloneUrl = safeUrl;
+      if (safeToken && /^https:\/\//i.test(safeUrl)) {
+        // 기존에 자격증명이 박혀 있으면 제거 후 재주입.
+        const bare = safeUrl.replace(/^https:\/\/[^/@]+@/i, 'https://');
+        cloneUrl = bare.replace(/^https:\/\//i, `https://x-access-token:${safeToken}@`);
+      }
+
+      const branchArg = safeBranch ? `--branch "${safeBranch}"` : '';
+      // 비대화식 강제 환경변수는 셸 프리픽스(`VAR=val cmd`)로 넣지 않는다 — 그 문법은
+      // POSIX 셸 전용이라 Windows cmd.exe에서 실행 자체가 실패한다. run()→exec의
+      // `env` 옵션으로 셸 밖에서 주입해 win/mac/원격 모두에서 동일하게 동작하게 한다.
+      const cloneEnv = {
+        GIT_TERMINAL_PROMPT: '0',
+        GIT_SSH_COMMAND: 'ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10',
+      };
+      // `--` 로 옵션/URL 경계를 명확히 하여 URL이 옵션으로 오인되지 않게 한다.
+      // (`2>&1` 제거 — exec가 stdout/stderr를 분리 캡처하므로 리다이렉트 불필요.
+      //  실패 시 run()이 stderr로 throw → 아래 catch에서 정확한 사유를 반환한다.)
+      const cmd = `git clone ${branchArg} --depth 1 -- "${cloneUrl}" "${safeDest}"`;
+
+      // clone은 네트워크/인증이 걸리므로 넉넉히(120초). 비대화식이라 실패 시 빨리 끝난다.
+      const output = await run(cmd, { timeout: 120000, env: cloneEnv });
+      return { ok: true, dest, output: maskSecrets(String(output || '').trim()) };
+    } catch (error) {
+      const msg = maskSecrets(String(error.stdout || error.stderr || error.message || error).trim());
+      console.error('[git:clone] Error:', msg);
       return { ok: false, error: msg };
     }
   });

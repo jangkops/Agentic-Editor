@@ -10,8 +10,20 @@ numpy>=1.26.0
 scikit-learn>=1.4.0
 langgraph>=0.2.0
 langchain-core>=0.3.0
+# 로컬 다국어 신경망 임베딩 — ONNX Runtime 기반(PyTorch 불필요, CPU).
+# 한국어 질의 ↔ 영문 코드 교차언어 검색. 모델(예: paraphrase-multilingual-MiniLM,
+# 0.22GB)은 최초 사용 시 캐시 다운로드 → 동결 배포 시 사전 캐시/번들 필요.
+fastembed>=0.8.0
 reportlab>=4.0.0
 python-pptx>=1.0.0
 openpyxl>=3.1.0
 python-docx>=1.0.0
 Pillow>=10.0.0
+matplotlib>=3.7.0
+
+# Optional — Vertex AI image gen (Nano Banana Pro / Imagen 4)
+# 키가 Secrets Manager/env/캐시에서 해석되면 자동 활성(별도 플래그 불필요).
+# google.auth.transport.requests 가 'requests'를 필요로 하므로 함께 설치해야
+# Vertex가 활성화된다(누락 시 _GOOGLE_AUTH_AVAILABLE=False로 영구 비활성 → 이미지 실패).
+google-auth>=2.30.0
+requests>=2.31.0

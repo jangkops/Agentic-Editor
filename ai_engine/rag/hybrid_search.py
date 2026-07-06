@@ -89,7 +89,8 @@ class HybridSearcher:
                score_threshold: float = 0.05,
                use_mmr: bool = True,
                mmr_lambda: float = 0.5,
-               file_filter: Optional[Callable[[str], bool]] = None) -> List[Tuple[Chunk, float]]:
+               file_filter: Optional[Callable[[str], bool]] = None,
+               fusion: str = "weighted") -> List[Tuple[Chunk, float]]:
         """하이브리드 검색 + MMR + score threshold + metadata 필터.
 
         Args:
@@ -99,12 +100,18 @@ class HybridSearcher:
             use_mmr: True면 Maximal Marginal Relevance로 다양성 확보
             mmr_lambda: MMR balance — 1.0=정확도만, 0.0=다양성만, 0.5=균형
             file_filter: chunk.file_path를 받아서 True 반환하면 포함 (metadata 필터)
+            fusion: "weighted"(기본, 기존 동작) | "rrf"(순위 기반 융합, opt-in).
+                RRF는 시맨틱 벡터 랭커가 있을 때 스케일 차이에 견고하다. 기본값을
+                rrf로 전환하는 것은 평가 하네스(semantic embedding)로 정밀도 우위를
+                실측한 뒤 수행한다(무회귀 우선).
         """
         if not self.chunks:
             return []
 
         query_tokens = tokenize(query)
-        scores: Dict[int, float] = {}
+        weighted_scores: Dict[int, float] = {}
+        bm25_order: List[int] = []
+        vec_order: List[int] = []
 
         # candidate pool — top_k * 4로 늘려 MMR이 다양성을 확보할 여지 제공
         pool_k = top_k * 4
@@ -114,7 +121,8 @@ class HybridSearcher:
         if bm25_results:
             max_bm25 = max(s for _, s in bm25_results) or 1
             for idx, s in bm25_results:
-                scores[idx] = scores.get(idx, 0) + (1 - self.alpha) * (s / max_bm25)
+                weighted_scores[idx] = weighted_scores.get(idx, 0) + (1 - self.alpha) * (s / max_bm25)
+            bm25_order = [idx for idx, _ in bm25_results]
 
         # 2. 벡터 검색 (임베더가 있을 때만)
         query_vec = None
@@ -131,14 +139,23 @@ class HybridSearcher:
                     for meta, s in vec_results:
                         idx = meta.get("chunk_idx", -1)
                         if 0 <= idx < len(self.chunks):
-                            scores[idx] = scores.get(idx, 0) + self.alpha * s
-        elif not self.vector_store:
-            scores = {}
-            for idx, s in bm25_results:
-                max_bm25 = max(s2 for _, s2 in bm25_results) or 1
-                scores[idx] = s / max_bm25
+                            weighted_scores[idx] = weighted_scores.get(idx, 0) + self.alpha * s
+                            vec_order.append(idx)
 
-        # 3. metadata filter (예: 특정 파일 경로/확장자 제외)
+        # 3. 융합 방식 선택 — 기본 weighted(기존 동작 보존), opt-in rrf.
+        if str(fusion).lower() == "rrf":
+            rank_lists = [o for o in (bm25_order, vec_order) if o]
+            fused = rrf_fuse(rank_lists)
+            max_rrf = (max((s for _, s in fused), default=0.0)) or 1.0
+            scores: Dict[int, float] = {idx: s / max_rrf for idx, s in fused}  # [0,1] 정규화
+        else:
+            # weighted 경로 — 기존 로직 정확히 보존.
+            scores = dict(weighted_scores)
+            if not self.vector_store and bm25_results:
+                max_bm25 = max(s2 for _, s2 in bm25_results) or 1
+                scores = {idx: s / max_bm25 for idx, s in bm25_results}
+
+        # 3b. metadata filter (예: 특정 파일 경로/확장자 제외)
         if file_filter is not None:
             scores = {idx: s for idx, s in scores.items()
                       if file_filter(self.chunks[idx].file_path)}
@@ -228,3 +245,40 @@ class HybridSearcher:
 
         return selected
 
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Reciprocal Rank Fusion (RRF) — 순수 함수 (Requirements 4.1, 4.2 / Property 1,2)
+#
+# 점수 스케일이 다른 여러 검색기(BM25/벡터)의 결과를 "순위" 기반으로 융합한다.
+# 가중합(alpha)과 달리 점수 절대값에 무관하므로 스케일 차이에 견고하다.
+#   RRF(d) = Σ_r 1 / (k + rank_r(d))
+# rank는 1-based. k는 상위권 지배를 완화하는 상수(기본 60, TREC 관례).
+#
+# search() 흐름 통합은 평가 하네스(task 9.2)로 무회귀를 확인한 뒤 단계적으로
+# 반영한다. 본 함수는 그 전에도 단독으로 테스트·사용 가능하다.
+# ─────────────────────────────────────────────────────────────────────────
+def rrf_fuse(rank_lists, k: int = 60):
+    """여러 랭크 리스트(각 리스트는 관련성 높은 순의 문서 인덱스)를 RRF로 융합.
+
+    Args:
+        rank_lists: List[List[int]] — 각 검색기의 순위 리스트(중복 인덱스는 리스트
+            내 첫 등장 순위만 사용).
+        k: RRF 상수(기본 60). k>0.
+
+    Returns:
+        List[Tuple[int, float]] — (문서 인덱스, RRF 점수) 내림차순.
+        동점은 인덱스 오름차순으로 안정 정렬(결정론적).
+    """
+    if k <= 0:
+        k = 60
+    scores = {}
+    for rl in rank_lists or []:
+        seen = set()
+        for rank, idx in enumerate(rl or []):
+            if idx in seen:
+                continue
+            seen.add(idx)
+            scores[idx] = scores.get(idx, 0.0) + 1.0 / (k + rank + 1)  # rank는 0-based → +1
+    # 점수 내림차순, 동점은 인덱스 오름차순(결정론)
+    return sorted(scores.items(), key=lambda x: (-x[1], x[0]))

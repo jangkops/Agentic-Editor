@@ -23,7 +23,6 @@ class ProcessManager {
 
   startPython() {
     if (this._pythonProcess) return;
-    const scriptPath = path.join(__dirname, '..', '..', 'scripts', 'start_server.py');
     console.log('[ProcessManager] Starting Python backend...');
     const env = { ...process.env, PYTHONUNBUFFERED: '1' };
     if (this._bridgeUrl) env.AE_BRIDGE_URL = this._bridgeUrl;
@@ -31,10 +30,10 @@ class ProcessManager {
 
     // 사용자별 쓰기 가능한 .generated 루트 — 30명 배포 시 앱 설치 폴더가 읽기 전용일 수 있어
     // userData 경로(또는 ~/.agentic-editor)를 명시적으로 주입한다.
+    let electronApp = null;
+    try { electronApp = require('electron').app; } catch (_) { electronApp = null; }
     try {
-      const electronApp = require('electron').app;
       if (electronApp && typeof electronApp.getPath === 'function') {
-        // userData/generated/ — OS가 사용자별로 자동 격리
         env.AE_GENERATED_ROOT = path.join(electronApp.getPath('userData'), 'generated');
       } else {
         env.AE_GENERATED_ROOT = path.join(require('os').homedir(), '.agentic-editor');
@@ -43,14 +42,46 @@ class ProcessManager {
       env.AE_GENERATED_ROOT = path.join(require('os').homedir(), '.agentic-editor');
     }
 
-    this._pythonProcess = spawn('python3', [scriptPath], {
-      cwd: path.join(__dirname, '..', '..'),
-      env,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    this._pythonProcess.stdout.on('data', (d) => console.log(`[dev:python] ${d.toString().trim()}`));
-    this._pythonProcess.stderr.on('data', (d) => console.error(`[dev:python] ${d.toString().trim()}`));
-    this._pythonProcess.on('exit', (code) => { console.log(`[ProcessManager] Python exited with code ${code}`); this._pythonProcess = null; });
+    const isWin = process.platform === 'win32';
+    const isPackaged = !!(electronApp && electronApp.isPackaged);
+
+    let cmd, args, cwd;
+    if (isPackaged) {
+      // 패키징 — PyInstaller 동결 바이너리 실행(Python 설치 불필요, Windows 동일).
+      // electron-builder.yml의 extraResources(ai_engine_dist) → process.resourcesPath 하위에 복사됨.
+      const binName = isWin ? 'ai-engine-server.exe' : 'ai-engine-server';
+      const binPath = path.join(process.resourcesPath, 'ai_engine_dist', 'ai-engine-server', binName);
+      cmd = binPath;
+      args = [];
+      cwd = path.dirname(binPath);
+      console.log(`[ProcessManager] packaged backend binary: ${binPath}`);
+    } else {
+      // 개발 — venv/시스템 python으로 스크립트 실행.
+      const repoRoot = path.join(__dirname, '..', '..');
+      const venvPy = isWin
+        ? path.join(repoRoot, 'ai_engine', '.venv', 'Scripts', 'python.exe')
+        : path.join(repoRoot, 'ai_engine', '.venv', 'bin', 'python');
+      cmd = require('fs').existsSync(venvPy) ? venvPy : (isWin ? 'python' : 'python3');
+      args = [path.join(repoRoot, 'scripts', 'start_server.py')];
+      cwd = repoRoot;
+    }
+
+    try {
+      this._pythonProcess = spawn(cmd, args, {
+        cwd,
+        env,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
+    } catch (e) {
+      console.error('[ProcessManager] backend spawn 실패:', e.message);
+      this._pythonProcess = null;
+      return;
+    }
+    this._pythonProcess.stdout.on('data', (d) => console.log(`[backend] ${d.toString().trim()}`));
+    this._pythonProcess.stderr.on('data', (d) => console.error(`[backend] ${d.toString().trim()}`));
+    this._pythonProcess.on('error', (e) => { console.error('[ProcessManager] backend error:', e.message); this._pythonProcess = null; });
+    this._pythonProcess.on('exit', (code) => { console.log(`[ProcessManager] backend exited with code ${code}`); this._pythonProcess = null; });
   }
 
   stopPython() {

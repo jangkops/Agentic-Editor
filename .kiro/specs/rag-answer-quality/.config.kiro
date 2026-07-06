@@ -1,0 +1,7 @@
+{
+  "specType": "feature",
+  "workflowType": "requirements-first",
+  "featureName": "rag-answer-quality",
+  "createdBy": "orchestrator",
+  "description": "Ultra production-grade answer quality: anti-hallucination grounding, retrieval precision (RRF + LLM reranker), factuality verification node, pluggable semantic embeddings, and an eval harness with quality gates."
+}
