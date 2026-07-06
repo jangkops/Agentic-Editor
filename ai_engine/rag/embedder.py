@@ -367,14 +367,36 @@ class LsaEmbeddingProvider:
 # E5 계열은 "query:" / "passage:" 프리픽스가 필수(문서 규정). BGE-M3는 프리픽스 불요.
 # fastembed 미설치/모델 미가용 시 is_ready=False → 상위에서 TF-IDF 폴백.
 # ─────────────────────────────────────────────────────────────────────────
+def _bundled_fastembed_cache() -> Optional[str]:
+    """PyInstaller 동결 실행 시 실행파일 옆 fastembed_models 디렉터리를 캐시로 사용.
+
+    build-python.js가 빌드 시 번들 모델을 여기에 사전 다운로드한다. 존재하지 않으면
+    None을 반환해 기본 캐시(런타임 다운로드)로 폴백한다.
+    """
+    import sys
+    if not getattr(sys, "frozen", False):
+        return None
+    try:
+        base = os.path.dirname(os.path.abspath(sys.executable))
+        cand = os.path.join(base, "fastembed_models")
+        return cand if os.path.isdir(cand) else None
+    except Exception:
+        return None
+
+
 class FastEmbedProvider:
     """fastembed(ONNX) 다국어 임베딩. query/passage 비대칭 프리픽스 지원."""
 
     # 기본: multilingual-e5-small (경량, 다국어). 필요시 bge-m3 등으로 교체.
     def __init__(self, model_name: str = "intfloat/multilingual-e5-small",
-                 use_e5_prefix: bool = True, gateway_client=None):
+                 use_e5_prefix: bool = True, gateway_client=None,
+                 cache_dir: Optional[str] = None):
         self._model_name = model_name
         self._use_prefix = use_e5_prefix and ("e5" in model_name.lower())
+        # 오프라인/동결 배포: 번들된 모델 캐시 경로. 우선순위:
+        #   명시 인자 > AE_FASTEMBED_CACHE env > 동결 실행파일 옆 fastembed_models > 기본 캐시
+        self._cache_dir = (cache_dir or os.environ.get("AE_FASTEMBED_CACHE")
+                           or _bundled_fastembed_cache() or None)
         self._model = None
         self._dim = 0
         self._ready = False
@@ -383,7 +405,10 @@ class FastEmbedProvider:
     def _init(self):
         try:
             from fastembed import TextEmbedding
-            self._model = TextEmbedding(model_name=self._model_name)
+            kwargs = {"model_name": self._model_name}
+            if self._cache_dir:
+                kwargs["cache_dir"] = self._cache_dir
+            self._model = TextEmbedding(**kwargs)
             # 차원 파악용 워밍업 1회
             import numpy as _np
             v = list(self._model.embed(["passage: warmup"]))[0]

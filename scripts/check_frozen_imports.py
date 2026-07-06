@@ -35,6 +35,12 @@ import sys
 # entries annotated in ``ai-engine-server.spec`` (_THIRD_PARTY).
 REQUIRED_MODULES = ("matplotlib", "scipy", "langgraph", "pptx")
 
+# OPTIONAL modules — nice-to-have for enhanced features but NOT build-blocking.
+# fastembed/onnxruntime power the multilingual neural RAG embedding; when absent,
+# the retriever safely falls back to TF-IDF (see embedder.get_embedding_provider).
+# We report their presence for CI visibility but never fail the build on them.
+OPTIONAL_MODULES = ("fastembed", "onnxruntime")
+
 
 def check_modules(module_names):
     """Attempt to import each module name.
@@ -56,6 +62,13 @@ def check_modules(module_names):
 
 def main():
     present, missing = check_modules(REQUIRED_MODULES)
+
+    # Optional modules — soft report only (never affects exit code).
+    opt_present, opt_missing = check_modules(OPTIONAL_MODULES)
+    if opt_present:
+        print("[import-gate] optional present: " + ", ".join(opt_present))
+    for name, reason in opt_missing:
+        print(f"[import-gate] optional missing (TF-IDF fallback active): {name} ({reason})")
 
     if present:
         print("[import-gate] present: " + ", ".join(present))

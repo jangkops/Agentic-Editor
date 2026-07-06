@@ -11,7 +11,7 @@ Requirements: 5.2, 6.2, 10.1  /  Property 5(폴백)
 """
 import os
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from ai_engine.rag.hybrid_search import rrf_fuse
 from ai_engine.rag.reranker import rerank as _rerank, parse_rerank_order  # noqa: F401
@@ -36,6 +36,8 @@ class RetrievalConfig:
     use_mmr: bool = False
     rerank_timeout: float = 8.0
     expand_timeout: float = 6.0
+    # metadata 필터(파일 경로 → 포함 여부). rerank/융합 이전에 적용해 낭비·오염 방지.
+    file_filter: Optional[Callable[[str], bool]] = None
 
     @classmethod
     def from_env(cls, env=None):
@@ -102,14 +104,15 @@ async def retrieve_evidence(query: str, searcher, *, gw=None,
         if len(queries) == 1:
             results = searcher.search(queries[0], top_k=cfg.candidate_k,
                                       use_mmr=cfg.use_mmr, score_threshold=cfg.score_threshold,
-                                      fusion=cfg.fusion)
+                                      file_filter=cfg.file_filter, fusion=cfg.fusion)
         else:
             # 다중 쿼리 결과를 인덱스 랭크 리스트로 만들어 RRF 융합
             id_to_item = {}
             rank_lists = []
             for q in queries:
                 r = searcher.search(q, top_k=cfg.candidate_k, use_mmr=False,
-                                    score_threshold=cfg.score_threshold, fusion=cfg.fusion)
+                                    score_threshold=cfg.score_threshold,
+                                    file_filter=cfg.file_filter, fusion=cfg.fusion)
                 order = []
                 for chunk, score in r:
                     cid = _cid(chunk)

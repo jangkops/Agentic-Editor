@@ -11,6 +11,10 @@ from ai_engine.rag.hybrid_search import HybridSearcher
 from ai_engine.rag.embedder import BedrockEmbedder, VectorStore
 
 
+def _truthy(v) -> bool:
+    return str(v or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 # 전역 캐시
 _indexer_cache: Dict[str, ProjectIndexer] = {}
 _searcher_cache: Dict[str, HybridSearcher] = {}
@@ -228,15 +232,43 @@ def build_context(
         )
         return not any(ex in file_path for ex in excluded_substrings)
 
-    results = searcher.search(
-        query, top_k=8,
-        score_threshold=score_threshold,
-        use_mmr=use_mmr,
-        mmr_lambda=mmr_lambda,
-        file_filter=_file_filter,
-    )
+    # 근거 파이프라인 배선 — 플래그 게이트(AE_RETRIEVAL_PIPELINE), 기본 off=무회귀.
+    # on + 게이트웨이 있을 때만 query확장→하이브리드→RRF→LLM리랭크 경로를 사용하고,
+    # 실패 시 기존 searcher.search로 안전 폴백한다. file_filter는 rerank 이전 적용.
+    results = None
+    retrieval_mode = "MMR(다양성)" if use_mmr else "Similarity(관련성)"
+    if _truthy(os.environ.get("AE_RETRIEVAL_PIPELINE")) and gateway_client is not None:
+        try:
+            from ai_engine.rag.retrieval_pipeline import (
+                retrieve_evidence_sync, RetrievalConfig,
+            )
+            cfg = RetrievalConfig.from_env(os.environ)
+            cfg.top_k = 8
+            cfg.score_threshold = score_threshold
+            cfg.use_mmr = False  # 파이프라인은 rerank로 정밀도 확보(MMR 대체)
+            cfg.file_filter = _file_filter
+            bundle = retrieve_evidence_sync(
+                query, searcher, gw=gateway_client, config=cfg, env=os.environ,
+            )
+            results = bundle.chunks
+            retrieval_mode = (
+                f"Pipeline(fusion={cfg.fusion}"
+                f"{',expand' if cfg.use_query_expand else ''}"
+                f"{',rerank' if cfg.use_rerank else ''})"
+            )
+        except Exception as e:
+            print(f"[RAG] 근거 파이프라인 실패 (기존 검색 폴백): {e}")
+            results = None
+
+    if results is None:
+        results = searcher.search(
+            query, top_k=8,
+            score_threshold=score_threshold,
+            use_mmr=use_mmr,
+            mmr_lambda=mmr_lambda,
+            file_filter=_file_filter,
+        )
     if results:
-        retrieval_mode = "MMR(다양성)" if use_mmr else "Similarity(관련성)"
         parts.append(f"## 관련 코드 ({retrieval_mode}, threshold={score_threshold})")
         for chunk, score in results:
             if used_chars > max_context_chars:

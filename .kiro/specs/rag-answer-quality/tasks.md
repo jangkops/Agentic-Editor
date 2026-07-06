@@ -65,13 +65,19 @@ RAG Answer Quality (Ultra Production).
   - 범위 밖/중복/누락 인덱스 → [0,n) 유효 순열 — `scripts/test_reranker_parse_pbt.py`
   - _Requirements: 5.2, 5.5_
 
-- [ ] 5.2 context_builder에 리랭커 배선 (opt-in, 폴백)
-  - 융합 상위 후보 재정렬, `AE_RERANK_*` 게이트, 실패 시 원순위
+- [x] 5.2 context_builder에 리랭커 배선 (opt-in, 폴백)
+  - `retrieve_evidence_sync`를 `build_context`에 `AE_RETRIEVAL_PIPELINE` 게이트로 배선
+    (기본 off=기존 searcher.search 무회귀). on + 게이트웨이 시 query확장→하이브리드→
+    RRF→LLM리랭크 경로 사용, 파이프라인 예외 시 기존 검색으로 안전 폴백
+  - `file_filter`를 rerank 이전에 적용하도록 `RetrievalConfig.file_filter`로 통과
+  - 검증: `scripts/test_context_builder_pipeline_wiring.py`(기본 off/on/무게이트웨이/예외폴백),
+    `scripts/test_retrieval_pipeline_pbt.py`(file_filter 단일·확장·noop)
   - _Requirements: 5.1, 5.3, 5.4, 10.1_
 
 - [x] 6. 쿼리 확장 모듈 `ai_engine/rag/query_expand.py` (opt-in, 기본 off)
   - `should_expand`/`parse_expansions`(순수), `expand_query`(async, 폴백) — `scripts/test_query_expand_pbt.py`
-  - (원+확장 결과 RRF 융합은 context_builder 배선 시 연결)
+  - 원+확장 결과 RRF 융합을 `retrieve_evidence`에 연결하고 `build_context` 배선 완료
+    (`AE_QUERY_EXPAND` 게이트, file_filter 통과) — `scripts/test_retrieval_pipeline_pbt.py`
   - _Requirements: 6.1, 6.2, 6.3, 6.4_
 
 ### Phase 3 — 교체 가능한 임베딩 (인터페이스 우선, 모델 번들 격리)
@@ -171,8 +177,10 @@ flowchart TD
 - 자격증명은 어떤 파일에도 저장하지 않으며, 로그에 토큰/키를 남기지 않는다.
 
 ### 런타임 게이트(라이브 백엔드+게이트웨이 필요) 잔여 작업
-- **5.2 리랭커 → context_builder 배선**: `reranker.rerank`는 async인데 `build_context`는 sync. 리트리벌 경로를 async로 전환(모든 호출부 영향)해야 안전 배선 가능 → 백엔드 기동 검증 전제.
-- **6(확장 결과 RRF 융합) context_builder 연결**: 위 async 전환과 동일 제약.
+- ~~**5.2 리랭커 → context_builder 배선**~~ ✅ 완료: async `retrieve_evidence` + sync 어댑터
+  (`retrieve_evidence_sync`, 러닝루프 내 별도 스레드)로 sync/async 충돌 해소. `build_context`에
+  `AE_RETRIEVAL_PIPELINE` 게이트로 배선, 예외 시 기존 검색 폴백. 파일 테스트로 검증(라이브 불요).
+- ~~**6(확장 결과 RRF 융합) context_builder 연결**~~ ✅ 완료: 다중 쿼리 RRF 융합 + file_filter 통과.
 - **11 합의 교차 검증**: `server.py` 합의/병렬 경로 실배선 + 라이브 게이트웨이 검증 필요.
 - **스트리밍 Bedrock 엔드포인트(run_agent_stream/run_agent_with_tools)** 응답에 `answerQuality` 부착 + 교정 재생성 루프: SSE 계약 변경이라 프론트 연동 + 런타임 스모크 전제.
 - 진행 방법: 8765 dev 서버 정리 후 게이트웨이 자격증명 주입 상태로 기동 → 엔드포인트별 플래그 off 기본 → 스모크 → 점진 활성.

@@ -81,3 +81,39 @@ def test_config_from_env():
                                     "AE_FUSION": "rrf", "AE_TOP_K": "6"})
     assert cfg.use_rerank and cfg.use_query_expand
     assert cfg.fusion == "rrf" and cfg.top_k == 6
+
+
+def test_file_filter_applied_single_query():
+    """file_filter가 단일 쿼리 경로에서 검색 결과를 제한한다."""
+    s = _searcher()
+    # embedder.py 파일만 허용
+    cfg = RetrievalConfig(top_k=8, file_filter=lambda p: p.endswith("embedder.py"))
+    bundle = asyncio.run(retrieve_evidence("embedding provider", s, gw=None, config=cfg))
+    assert bundle.chunks, "필터 통과 결과가 있어야 함"
+    assert all(c.file_path.endswith("embedder.py") for c, _ in bundle.chunks)
+
+
+def test_file_filter_applied_multi_query_expand():
+    """확장(다중 쿼리) 경로에서도 file_filter가 적용된다."""
+    s = _searcher()
+
+    class _ExpandGW:
+        async def converse(self, **kwargs):
+            # 확장 쿼리 2개 반환
+            return {"output": {"message": {"content": [
+                {"text": "embedding vector\nsemantic search"}]}}}
+
+    cfg = RetrievalConfig(top_k=8, use_query_expand=True,
+                          file_filter=lambda p: p.endswith("hybrid_search.py"))
+    bundle = asyncio.run(retrieve_evidence("검색", s, gw=_ExpandGW(), config=cfg))
+    # 확장이 동작하지 않아도(should_expand False 등) 필터는 유지되어야 함
+    assert all(c.file_path.endswith("hybrid_search.py") for c, _ in bundle.chunks)
+
+
+def test_file_filter_none_is_noop():
+    """file_filter=None이면 기존 동작과 동일(무회귀)."""
+    s = _searcher()
+    a = asyncio.run(retrieve_evidence("rrf", s, gw=None, config=RetrievalConfig(top_k=5)))
+    b = asyncio.run(retrieve_evidence("rrf", s, gw=None,
+                                      config=RetrievalConfig(top_k=5, file_filter=None)))
+    assert [c.file_path for c, _ in a.chunks] == [c.file_path for c, _ in b.chunks]

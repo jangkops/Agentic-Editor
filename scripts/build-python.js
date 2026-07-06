@@ -62,6 +62,33 @@ try {
   if (!fs.existsSync(binPath)) {
     throw new Error(`frozen binary not found: ${binPath}`);
   }
+  console.log(`[build-python] ✓ frozen binary: ${binPath}`);
+
+  // ── 오프라인 RAG 임베딩 모델 사전 번들 ──────────────────────────
+  // fastembed는 런타임에 모델을 다운로드하므로, 오프라인/사내망 배포를 위해 선택한
+  // 다국어 모델을 실행파일 옆 fastembed_models/ 에 사전 다운로드한다. 런타임에는
+  // FastEmbedProvider가 이 디렉터리를 자동 인식(_bundled_fastembed_cache)한다.
+  // 기본 모델은 벤치 승자(용량/품질 균형)인 MiniLM(0.22GB). AE_BUNDLE_EMBED_MODEL로 교체.
+  const bundleModel = process.env.AE_BUNDLE_EMBED_MODEL
+    || 'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2';
+  const modelCacheDir = path.join(outDir, 'ai-engine-server', 'fastembed_models');
+  try {
+    console.log(`[build-python] pre-downloading embed model → ${modelCacheDir}`);
+    fs.mkdirSync(modelCacheDir, { recursive: true });
+    const dlCode = [
+      'import sys',
+      'from fastembed import TextEmbedding',
+      `m = TextEmbedding(model_name=${JSON.stringify(bundleModel)}, cache_dir=${JSON.stringify(modelCacheDir)})`,
+      'v = list(m.embed(["passage: warmup"]))[0]',
+      'print("[build-python] model ready, dim=", len(v))',
+    ].join('; ');
+    execSync(`"${py}" -c ${JSON.stringify(dlCode)}`, { cwd: root, stdio: 'inherit' });
+    console.log('[build-python] ✓ embed model bundled (offline-ready)');
+  } catch (e) {
+    // 모델 번들 실패는 치명적이지 않다 — 런타임에 TF-IDF로 폴백(무회귀).
+    console.warn('[build-python] ⚠ embed model bundle skipped (runtime TF-IDF fallback):', e.message);
+  }
+
   console.log(`[build-python] ✓ done: ${binPath}`);
 } catch (err) {
   console.error('[build-python] FAILED:', err.message);
