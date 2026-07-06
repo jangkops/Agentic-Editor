@@ -2939,6 +2939,25 @@ async function runAgentWorkflow(prompt) {
             const tail = msg._reasoning.replace(/\s+/g, ' ').slice(-90);
             wf.steps[1].detail = `생각 중: ${tail}`;
           }
+          else if (p.answerQuality) {
+            // 근거 품질 메타데이터 (플래그 게이트, additive). 본문에 섞지 않고 별도 보관.
+            // citation: {citations_total, verified, unverified[]}, faithfulness: {score, degraded, feedback}
+            try {
+              msg._answerQuality = p.answerQuality;
+              const c = p.answerQuality.citation || {};
+              const f = p.answerQuality.faithfulness || {};
+              const parts = [];
+              if (typeof c.verified === 'number' && typeof c.citations_total === 'number' && c.citations_total > 0) {
+                parts.push(`인용 ${c.verified}/${c.citations_total} 검증`);
+              }
+              if (f && typeof f.score === 'number' && !f.degraded) {
+                parts.push(`충실도 ${(f.score * 100).toFixed(0)}%`);
+              }
+              if (parts.length) {
+                addLiveLog('system', `근거 품질: ${parts.join(', ')}`);
+              }
+            } catch (_) {}
+          }
           else if (p.text) { msg.content += p.text; }
           else { msg.content += d; }
         } catch { msg.content += d; }

@@ -187,5 +187,11 @@ flowchart TD
 - ~~**6(확장 결과 RRF 융합) context_builder 연결**~~ ✅ 완료: 다중 쿼리 RRF 융합 + file_filter 통과.
 - ~~**11 합의 교차 검증**~~ ✅ 배선 완료: `cross_verify.py` + server.py 합의 경로
   `AE_CONSENSUS_CROSSVERIFY` 게이트(additive·비차단). 라이브 게이트웨이 end-to-end 채점은 런타임 게이트.
-- **스트리밍 Bedrock 엔드포인트(run_agent_stream/run_agent_with_tools)** 응답에 `answerQuality` 부착 + 교정 재생성 루프: SSE 계약 변경이라 프론트 연동 + 런타임 스모크 전제.
+- ~~**스트리밍 Bedrock 엔드포인트(run_agent_stream/run_agent_with_tools) `answerQuality` 부착**~~ ✅ 완료:
+  두 스트리밍 경로가 `build_system_prompt(return_evidence=True)`로 근거(chunks/context)를 재검색 없이
+  캡처하고, `[DONE]` 직전 `enhance_answer`로 인용·충실도를 채점해 `answerQuality` SSE 이벤트를 1회 방출
+  (`AE_ANSWER_QUALITY` 게이트, additive·비차단). 프론트(`src/main.js`)가 이벤트를 파싱해 본문 오염 없이
+  품질 배지/라이브로그로 표시. 부팅 스모크 `/health` 200 OK(AE_ANSWER_QUALITY=1) 실검증.
+  - 검증: `scripts/test_context_builder_evidence.py`(return_evidence 계약), import/boot 스모크
+  - (교정 재생성 루프·라이브 게이트웨이 실채점 수치는 자격증명 주입 후 런타임 게이트)
 - 진행 방법: 8765 dev 서버 정리 후 게이트웨이 자격증명 주입 상태로 기동 → 엔드포인트별 플래그 off 기본 → 스모크 → 점진 활성.

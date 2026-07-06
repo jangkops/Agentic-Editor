@@ -171,10 +171,15 @@ def build_context(
     bedrock_user: str = "",
     gateway_client=None,
     max_context_chars: int = 24000,
-) -> str:
-    """하이브리드 RAG 기반 컨텍스트 생성."""
+    return_chunks: bool = False,
+):
+    """하이브리드 RAG 기반 컨텍스트 생성.
+
+    return_chunks=True면 (context_str, results) 튜플 반환 — results는 [(chunk, score), ...].
+    기본(False)은 기존과 동일하게 context_str만 반환(무회귀).
+    """
     if not project_path:
-        return ""
+        return ("", []) if return_chunks else ""
 
     idx = get_indexer(project_path)
     searcher = get_searcher(project_path, aws_profile, bedrock_user, gateway_client)
@@ -280,7 +285,10 @@ def build_context(
                 parts.append(section)
                 used_chars += len(section)
 
-    return '\n'.join(parts)
+    context_str = '\n'.join(parts)
+    if return_chunks:
+        return context_str, (results or [])
+    return context_str
 
 
 def build_system_prompt(
@@ -292,12 +300,26 @@ def build_system_prompt(
     aws_profile: str = "",
     bedrock_user: str = "",
     gateway_client=None,
-) -> str:
-    """최종 시스템 프롬프트 생성."""
-    context = build_context(
-        project_path, query, open_file, open_file_content,
-        aws_profile, bedrock_user, gateway_client,
-    )
+    return_evidence: bool = False,
+):
+    """최종 시스템 프롬프트 생성.
+
+    return_evidence=True면 (prompt, evidence) 튜플 반환 —
+    evidence = {"context": <RAG 컨텍스트 문자열>, "chunks": [(chunk, score), ...]}.
+    스트리밍 경로가 answer_quality(인용/충실도) 검증에 재검색 없이 재사용하도록 한다.
+    기본(False)은 기존과 동일하게 prompt 문자열만 반환(무회귀).
+    """
+    if return_evidence:
+        context, _chunks = build_context(
+            project_path, query, open_file, open_file_content,
+            aws_profile, bedrock_user, gateway_client, return_chunks=True,
+        )
+    else:
+        context = build_context(
+            project_path, query, open_file, open_file_content,
+            aws_profile, bedrock_user, gateway_client,
+        )
+        _chunks = []
     prompt_parts = []
     if base_system_prompt:
         prompt_parts.append(base_system_prompt)
@@ -333,4 +355,7 @@ def build_system_prompt(
 - 핵심만 간결하게""")
     if context:
         prompt_parts.append(f"\n---\n{context}")
-    return '\n\n'.join(prompt_parts)
+    prompt = '\n\n'.join(prompt_parts)
+    if return_evidence:
+        return prompt, {"context": context, "chunks": _chunks}
+    return prompt
