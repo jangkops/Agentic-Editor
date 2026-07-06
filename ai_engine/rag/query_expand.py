@@ -68,9 +68,10 @@ async def expand_query(gw, model_id: str, query: str, timeout: float = 6.0) -> L
     try:
         import asyncio
         messages = build_expand_prompt(query)
-        coro = gw.converse(model_id=model_id, messages=messages,
-                           inference_config={"maxTokens": 200})
+        coro = gw.converse(model_id=model_id, messages=messages)
         resp = await asyncio.wait_for(coro, timeout=timeout)
+        if isinstance(resp, dict) and resp.get("decision") not in (None, "ALLOW"):
+            return [query]  # 에러/거부 → 원 쿼리만(비차단)
         text = _extract_text(resp)
         return parse_expansions(text, query)
     except Exception:

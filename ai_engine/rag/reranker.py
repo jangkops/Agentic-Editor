@@ -66,10 +66,10 @@ async def rerank(gw, model_id: str, query: str, candidates: Sequence[str],
     try:
         import asyncio
         messages = build_rerank_prompt(query, candidates)
-        # gw.converse 시그니처는 프로젝트마다 다를 수 있어 방어적으로 호출
-        coro = gw.converse(model_id=model_id, messages=messages,
-                           inference_config={"maxTokens": 200})
+        coro = gw.converse(model_id=model_id, messages=messages)
         resp = await asyncio.wait_for(coro, timeout=timeout)
+        if isinstance(resp, dict) and resp.get("decision") not in (None, "ALLOW"):
+            return identity  # 에러/거부 → 원 순위 유지(비차단)
         text = _extract_text(resp)
         return parse_rerank_order(text, n)
     except Exception:

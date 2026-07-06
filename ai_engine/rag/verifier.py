@@ -61,9 +61,12 @@ async def verify_faithfulness(gw, model_id: str, answer: str, context: str,
     try:
         import asyncio
         messages = build_verify_prompt(answer, context)
-        coro = gw.converse(model_id=model_id, messages=messages,
-                           inference_config={"maxTokens": 300})
+        coro = gw.converse(model_id=model_id, messages=messages)
         resp = await asyncio.wait_for(coro, timeout=timeout)
+        # 게이트웨이 에러/거부 응답은 degraded로 처리(가짜 점수 방지).
+        if isinstance(resp, dict) and resp.get("decision") not in (None, "ALLOW"):
+            return VerifyResult(score=None, degraded=True,
+                                feedback=f"gateway {resp.get('decision')}: {str(resp.get('error') or resp.get('denial_reason') or '')[:200]}")
         text = _extract_text(resp)
         return VerifyResult(
             score=parse_faithfulness(text),
