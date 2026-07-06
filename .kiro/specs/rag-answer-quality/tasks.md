@@ -122,8 +122,12 @@ RAG Answer Quality (Ultra Production).
 
 ### Phase 5 — 멀티에이전트 교차 검증 (opt-in)
 
-- [ ] 11. 합의 경로 교차 검증 배선
-  - 병합 전 검증자 모델이 후보 근거 충실도 채점·충돌 표기, `AE_CONSENSUS_CROSSVERIFY` 게이트, 폴백 보존
+- [x] 11. 합의 경로 교차 검증 배선
+  - `ai_engine/rag/cross_verify.py` — `build_crossverify_prompt`/`parse_crossverify`(순수,
+    방어적: 범위밖·중복 무시, 누락 default, 0~1 클램프), `cross_verify_consensus`(async, 폴백)
+  - server.py 합의 경로(`_orchestrator_merge` 직전)에 `AE_CONSENSUS_CROSSVERIFY` 게이트로 배선.
+    additive `cross_verify`/`crossVerify` 이벤트, 실패 시 비차단 폴백(merger 그대로 진행)
+  - 검증: `scripts/test_cross_verify_pbt.py`(파싱 속성 + async 성공/폴백), server.py py_compile 통과
   - _Requirements: 9.1, 9.2, 9.3, 9.4_
 
 - [x] 12. 통합 플래그 + 부팅 스모크 (부분)
@@ -181,6 +185,7 @@ flowchart TD
   (`retrieve_evidence_sync`, 러닝루프 내 별도 스레드)로 sync/async 충돌 해소. `build_context`에
   `AE_RETRIEVAL_PIPELINE` 게이트로 배선, 예외 시 기존 검색 폴백. 파일 테스트로 검증(라이브 불요).
 - ~~**6(확장 결과 RRF 융합) context_builder 연결**~~ ✅ 완료: 다중 쿼리 RRF 융합 + file_filter 통과.
-- **11 합의 교차 검증**: `server.py` 합의/병렬 경로 실배선 + 라이브 게이트웨이 검증 필요.
+- ~~**11 합의 교차 검증**~~ ✅ 배선 완료: `cross_verify.py` + server.py 합의 경로
+  `AE_CONSENSUS_CROSSVERIFY` 게이트(additive·비차단). 라이브 게이트웨이 end-to-end 채점은 런타임 게이트.
 - **스트리밍 Bedrock 엔드포인트(run_agent_stream/run_agent_with_tools)** 응답에 `answerQuality` 부착 + 교정 재생성 루프: SSE 계약 변경이라 프론트 연동 + 런타임 스모크 전제.
 - 진행 방법: 8765 dev 서버 정리 후 게이트웨이 자격증명 주입 상태로 기동 → 엔드포인트별 플래그 off 기본 → 스모크 → 점진 활성.
