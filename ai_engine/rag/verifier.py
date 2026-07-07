@@ -59,15 +59,10 @@ async def verify_faithfulness(gw, model_id: str, answer: str, context: str,
     if not answer or not context:
         return VerifyResult(score=None, degraded=True, feedback="empty answer/context")
     try:
-        import asyncio
+        from ai_engine.rag.gw_text import converse_text
         messages = build_verify_prompt(answer, context)
-        coro = gw.converse(model_id=model_id, messages=messages)
-        resp = await asyncio.wait_for(coro, timeout=timeout)
-        # 게이트웨이 에러/거부 응답은 degraded로 처리(가짜 점수 방지).
-        if isinstance(resp, dict) and resp.get("decision") not in (None, "ALLOW"):
-            return VerifyResult(score=None, degraded=True,
-                                feedback=f"gateway {resp.get('decision')}: {str(resp.get('error') or resp.get('denial_reason') or '')[:200]}")
-        text = _extract_text(resp)
+        # 스트리밍 우선(저지연·취소가능), 실패 시 동기 converse 폴백.
+        text = await converse_text(gw, model_id, messages, timeout=timeout)
         return VerifyResult(
             score=parse_faithfulness(text),
             degraded=False,

@@ -128,14 +128,9 @@ async def cross_verify_consensus(gw, model_id: str, user_prompt: str,
     if n == 0 or gw is None:
         return CrossVerifyReport(degraded=True, error="no candidates or gateway")
     try:
-        import asyncio
+        from ai_engine.rag.gw_text import converse_text
         messages = build_crossverify_prompt(user_prompt, agents)
-        coro = gw.converse(model_id=model_id, messages=messages)
-        resp = await asyncio.wait_for(coro, timeout=timeout)
-        if isinstance(resp, dict) and resp.get("decision") not in (None, "ALLOW"):
-            return CrossVerifyReport(degraded=True,
-                                     error=f"gateway {resp.get('decision')}: {str(resp.get('error') or '')[:200]}")
-        text = _extract_text(resp)
+        text = await converse_text(gw, model_id, messages, timeout=timeout)
         verdicts = parse_crossverify(text, n)
         conflicts = sum(1 for v in verdicts if v.conflict)
         return CrossVerifyReport(verdicts=verdicts, degraded=False, conflict_count=conflicts)

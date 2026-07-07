@@ -66,13 +66,9 @@ async def expand_query(gw, model_id: str, query: str, timeout: float = 6.0) -> L
     if not query:
         return []
     try:
-        import asyncio
+        from ai_engine.rag.gw_text import converse_text
         messages = build_expand_prompt(query)
-        coro = gw.converse(model_id=model_id, messages=messages)
-        resp = await asyncio.wait_for(coro, timeout=timeout)
-        if isinstance(resp, dict) and resp.get("decision") not in (None, "ALLOW"):
-            return [query]  # 에러/거부 → 원 쿼리만(비차단)
-        text = _extract_text(resp)
+        text = await converse_text(gw, model_id, messages, timeout=timeout)
         return parse_expansions(text, query)
     except Exception:
         return [query]

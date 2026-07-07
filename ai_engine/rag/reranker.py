@@ -64,13 +64,9 @@ async def rerank(gw, model_id: str, query: str, candidates: Sequence[str],
         return list(range(n))
     identity = list(range(n))
     try:
-        import asyncio
+        from ai_engine.rag.gw_text import converse_text
         messages = build_rerank_prompt(query, candidates)
-        coro = gw.converse(model_id=model_id, messages=messages)
-        resp = await asyncio.wait_for(coro, timeout=timeout)
-        if isinstance(resp, dict) and resp.get("decision") not in (None, "ALLOW"):
-            return identity  # 에러/거부 → 원 순위 유지(비차단)
-        text = _extract_text(resp)
+        text = await converse_text(gw, model_id, messages, timeout=timeout)
         return parse_rerank_order(text, n)
     except Exception:
         return identity

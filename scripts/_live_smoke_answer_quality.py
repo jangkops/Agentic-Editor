@@ -16,7 +16,9 @@ CTX = ("[근거]\nai_engine/rag/hybrid_search.py:200-220\n"
 ANSWER = ("rrf_fuse 함수는 k=60 기본값으로 여러 순위 리스트를 RRF로 융합하며, "
           "점수 절대값이 아니라 순위 기반이라 스케일 차이에 견고합니다 "
           "(ai_engine/rag/hybrid_search.py:200-220).")
-MODEL = "anthropic.claude-3-5-sonnet-20241022-v2:0"
+# 검증자 기본 모델 — 스트리밍(Lambda URL)에서 빠른 모델. 필요시 AE_VERIFY_MODEL로 교체.
+os.environ.setdefault("AE_VERIFY_MODEL", "anthropic.claude-sonnet-4-6")
+MODEL = os.environ["AE_VERIFY_MODEL"]
 
 
 async def try_profile(profile):
@@ -29,13 +31,16 @@ async def try_profile(profile):
 
 async def main():
     profiles = [os.environ.get("AWS_PROFILE") or "", "bedrock-gw", "mg-infra-admin", "default"]
+    # 외부 타임아웃은 내부 검증 타임아웃보다 넉넉히 크게(마스킹 방지).
+    inner_ms = float(os.environ.get("AE_VERIFY_TIMEOUT_MS", "60000"))
+    outer_s = inner_ms / 1000.0 + 20
     tried = []
     for p in [x for x in profiles if x]:
         if p in tried:
             continue
         tried.append(p)
         try:
-            res = await asyncio.wait_for(try_profile(p), timeout=60)
+            res = await asyncio.wait_for(try_profile(p), timeout=outer_s)
             meta = res.get("metadata") or {}
             f = meta.get("faithfulness") or {}
             print(f"[profile={p}] metadata={meta}")
