@@ -102,6 +102,46 @@ async def enhance_answer(answer: str, context_text: str, retrieved_chunks=None,
     return {"answer": answer, "metadata": metadata}
 
 
+def verify_mode(env: Optional[dict] = None) -> str:
+    """검증 실행 모드 결정: "off"(기본) | "inline" | "deferred".
+
+    - off: 검증 안 함(무회귀 기본). AE_ANSWER_QUALITY 미설정 시.
+    - inline: 응답 최종 이벤트 전에 동기 대기(빠른 게이트웨이용). AE_VERIFY_MODE=inline.
+    - deferred: [DONE] 이후 백그라운드 실행 후 저장(느린 게이트웨이용). AE_VERIFY_MODE=deferred.
+
+    라이브 실측상 게이트웨이 모델 호출이 매우 느리면(수십~수백 초) deferred가 최적이다.
+    마스터 플래그(AE_ANSWER_QUALITY)가 off면 항상 off.
+    """
+    env = env if env is not None else os.environ
+    if not quality_enabled(env):
+        return "off"
+    mode = str(env.get("AE_VERIFY_MODE", "inline")).strip().lower()
+    return mode if mode in ("inline", "deferred", "off") else "inline"
+
+
+async def run_deferred_verification(answer: str, context_text: str, retrieved_chunks,
+                                    gw, session_id: str, message_id: str,
+                                    env: Optional[dict] = None) -> dict:
+    """비차단 지연 검증 — 응답 경로와 분리해 실행 후 품질 저장소에 기록.
+
+    긴 타임아웃 허용(응답을 막지 않으므로). 예외는 삼켜 저장 실패로만 남긴다(비차단).
+    반환은 저장한 metadata(관측/테스트용).
+    """
+    from ai_engine.rag.quality_store import save_quality
+    try:
+        res = await enhance_answer(answer, context_text=context_text,
+                                   retrieved_chunks=retrieved_chunks, gw=gw, env=env)
+        meta = res.get("metadata") or {}
+    except Exception as e:  # noqa: BLE001
+        meta = {"error": str(e) or type(e).__name__, "reason": "error"}
+    meta["mode"] = "deferred"
+    try:
+        save_quality(session_id, message_id, meta, env=env)
+    except Exception as e:  # noqa: BLE001
+        print(f"[AnswerQuality] deferred 저장 실패(비차단): {e}")
+    return meta
+
+
 def faithfulness_below_threshold(metadata: dict, env: Optional[dict] = None) -> bool:
     """교정 재생성 트리거 판단(순수). degraded이거나 점수 없으면 재생성하지 않음(비차단)."""
     env = env if env is not None else os.environ
