@@ -7298,6 +7298,9 @@ _LATEST_OPUS_IDS = [
     "anthropic.claude-opus-4-7-20251015-v1:0",
     "anthropic.claude-opus-4-20250514-v1:0",
     "anthropic.claude-3-opus-20240229-v1:0",
+    # opus 권한이 없는 계정(라이브 실측: opus 전부 model_denied)에서도 동작하도록
+    # 활성 sonnet-4-5를 최종 폴백으로 둔다. opus 허용 계정은 위 opus를 그대로 사용.
+    "anthropic.claude-sonnet-4-5-20250929-v1:0",
 ]
 _LATEST_SONNET_IDS = [
     # sonnet-4-5: 라이브 게이트웨이 실측 활성(2026-07). 4-6은 일부 계정에서
