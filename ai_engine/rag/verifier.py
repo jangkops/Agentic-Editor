@@ -15,6 +15,8 @@ class VerifyResult:
     score: Optional[float]   # None이면 검증 불가(degraded)
     degraded: bool
     feedback: str = ""
+    latency_ms: Optional[float] = None   # 검증 LLM 호출 소요(관측/진단용)
+    reason: str = ""                     # degraded 사유 코드: "timeout"|"error"|"empty"|""
 
 
 def build_verify_prompt(answer: str, context: str) -> List[dict]:
@@ -47,7 +49,7 @@ def parse_faithfulness(text: str, default: float = 0.5) -> float:
 
 def parse_feedback(text: str) -> str:
     """`FEEDBACK:` 이후 텍스트 추출(없으면 빈 문자열)."""
-    if not text:
+    if not text: 
         return ""
     m = re.search(r'FEEDBACK:\s*(.+)', text, re.IGNORECASE | re.DOTALL)
     return m.group(1).strip() if m else ""
@@ -57,8 +59,16 @@ async def verify_faithfulness(gw, model_id: str, answer: str, context: str,
                               timeout: float = 10.0) -> VerifyResult:
     """경량 LLM으로 충실도 채점. 실패/타임아웃 시 degraded 폴백(score=None)."""
     if not answer or not context:
-        return VerifyResult(score=None, degraded=True, feedback="empty answer/context")
+        return VerifyResult(score=None, degraded=True,
+                            feedback="empty answer/context", reason="empty")
+    import time
+    _t0 = time.perf_counter()
+
+    def _ms():
+        return round((time.perf_counter() - _t0) * 1000, 1)
+
     try:
+        import asyncio as _asyncio
         from ai_engine.rag.gw_text import converse_text
         messages = build_verify_prompt(answer, context)
         # 스트리밍 우선(저지연·취소가능), 실패 시 동기 converse 폴백.
@@ -67,9 +77,18 @@ async def verify_faithfulness(gw, model_id: str, answer: str, context: str,
             score=parse_faithfulness(text),
             degraded=False,
             feedback=parse_feedback(text),
+            latency_ms=_ms(),
+            reason="",
         )
+    except _asyncio.TimeoutError:
+        # 빈 메시지 대신 명시적 사유 — 운영 진단(게이트웨이 지연) 가능.
+        return VerifyResult(score=None, degraded=True,
+                            feedback=f"verify timeout after {timeout:.0f}s",
+                            latency_ms=_ms(), reason="timeout")
     except Exception as e:
-        return VerifyResult(score=None, degraded=True, feedback=f"verify failed: {e}")
+        return VerifyResult(score=None, degraded=True,
+                            feedback=f"verify failed: {str(e) or type(e).__name__}",
+                            latency_ms=_ms(), reason="error")
 
 
 def _extract_text(resp) -> str:

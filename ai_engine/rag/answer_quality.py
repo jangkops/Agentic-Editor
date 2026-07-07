@@ -91,9 +91,13 @@ async def enhance_answer(answer: str, context_text: str, retrieved_chunks=None,
                 "score": res.score,
                 "degraded": res.degraded,
                 "feedback": (res.feedback or "")[:300],
+                "latency_ms": res.latency_ms,
+                "reason": res.reason,
             }
         except Exception as e:
-            metadata["faithfulness"] = {"score": None, "degraded": True, "feedback": str(e)[:200]}
+            metadata["faithfulness"] = {"score": None, "degraded": True,
+                                        "feedback": str(e)[:200] or type(e).__name__,
+                                        "reason": "error"}
 
     return {"answer": answer, "metadata": metadata}
 

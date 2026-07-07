@@ -67,3 +67,46 @@ def test_rerank_success_parses_order():
             return {"output": {"message": {"content": [{"text": "[2,0,1]"}]}}}
     out = asyncio.run(rerank(_GW(), "m", "q", ["a", "b", "c"], timeout=2.0))
     assert out == [2, 0, 1]
+
+
+# ── degraded 사유·latency 계측 (라이브 진단 개선) ──────────────────
+def test_verify_timeout_has_explicit_reason():
+    """게이트웨이 지연 → 빈 메시지가 아니라 'timeout' 사유·명시 피드백."""
+    import asyncio
+
+    class _HangGW:
+        async def converse(self, model_id, messages, system_prompt="", tool_config=None):
+            await asyncio.sleep(10)
+            return {"decision": "ALLOW", "output": {"message": {"content": [{"text": "x"}]}}}
+
+    res = asyncio.run(verify_faithfulness(_HangGW(), "m", "답변", "근거", timeout=0.2))
+    assert res.degraded and res.score is None
+    assert res.reason == "timeout"
+    assert "timeout" in res.feedback.lower() and res.feedback.strip() != ""
+    assert res.latency_ms is not None and res.latency_ms >= 0
+
+
+def test_verify_success_records_latency_and_empty_reason():
+    import asyncio
+
+    class _OkGW:
+        async def converse(self, model_id, messages, system_prompt="", tool_config=None):
+            return {"decision": "ALLOW",
+                    "output": {"message": {"content": [{"text": "SCORE: 0.9\nFEEDBACK: OK"}]}}}
+
+    res = asyncio.run(verify_faithfulness(_OkGW(), "m", "답변", "근거", timeout=5))
+    assert not res.degraded and res.score == 0.9
+    assert res.reason == "" and res.latency_ms is not None
+
+
+def test_verify_error_reason_never_empty_feedback():
+    """예외 str이 비어도 feedback은 타입명으로 채워져 진단 가능."""
+    import asyncio
+
+    class _BoomGW:
+        async def converse(self, model_id, messages, system_prompt="", tool_config=None):
+            raise RuntimeError("")  # 빈 메시지 예외
+
+    res = asyncio.run(verify_faithfulness(_BoomGW(), "m", "답변", "근거", timeout=5))
+    assert res.degraded and res.reason == "error"
+    assert res.feedback.strip() != "" and "RuntimeError" in res.feedback

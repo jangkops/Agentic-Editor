@@ -2956,6 +2956,11 @@ async function runAgentWorkflow(prompt) {
               if (parts.length) {
                 addLiveLog('system', `근거 품질: ${parts.join(', ')}`);
               }
+              // 검증이 degraded면 사유를 진단 로그로 노출(timeout/error 등)
+              if (f && f.degraded && f.reason) {
+                const lat = (typeof f.latency_ms === 'number') ? ` (${Math.round(f.latency_ms)}ms)` : '';
+                addLiveLog('warning', `충실도 검증 미완료: ${f.reason}${lat} — ${(f.feedback || '').slice(0, 120)}`);
+              }
             } catch (_) {}
           }
           else if (p.text) { msg.content += p.text; }

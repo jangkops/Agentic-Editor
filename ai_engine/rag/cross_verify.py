@@ -9,6 +9,7 @@ LLM 호출은 게이트웨이(gw.converse)만 사용한다. 플래그: AE_CONSEN
 
 Requirements: 9.1, 9.2, 9.3, 9.4  /  Property 5(폴백)
 """
+import asyncio
 import re
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -134,6 +135,9 @@ async def cross_verify_consensus(gw, model_id: str, user_prompt: str,
         verdicts = parse_crossverify(text, n)
         conflicts = sum(1 for v in verdicts if v.conflict)
         return CrossVerifyReport(verdicts=verdicts, degraded=False, conflict_count=conflicts)
+    except asyncio.TimeoutError:
+        return CrossVerifyReport(degraded=True, error=f"cross-verify timeout after {timeout:.0f}s")
     except Exception as e:
         # 폴백: 검증 불가 → degraded, merger 병합은 그대로 진행(비차단)
-        return CrossVerifyReport(degraded=True, error=f"cross-verify failed: {e}")
+        return CrossVerifyReport(degraded=True,
+                                 error=f"cross-verify failed: {str(e) or type(e).__name__}")
