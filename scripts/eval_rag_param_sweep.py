@@ -59,7 +59,7 @@ def run(project=os.path.join("ai_engine", "rag"), k=10):
         s.set_embedder(emb)
         s.set_vector_store(store)
         for fusion in ("weighted", "rrf"):
-            for use_mmr, mlam in ((False, 0.5), (True, 0.5), (True, 0.7)):
+            for use_mmr, mlam in ((False, 0.5), (True, 0.4), (True, 0.5), (True, 0.7)):
                 tag = f"a{alpha}_{fusion}_mmr{'off' if not use_mmr else mlam}"
                 results[tag] = _score(s, k, fusion, use_mmr, mlam)
 
