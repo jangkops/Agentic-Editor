@@ -48,7 +48,9 @@ def get_searcher(
     idx = get_indexer(project_path)
 
     if project_path not in _searcher_cache:
-        searcher = HybridSearcher(alpha=0.6)
+        # alpha=0.5 — 30-query GOLDEN 벤치 실측 최적(recall 1.0 유지, mrr 0.872→0.919).
+        # 벡터(neural)와 BM25(키워드)를 대등하게 융합: 함수명 등 정확 키워드 매칭 보존.
+        searcher = HybridSearcher(alpha=0.5)
         searcher.index(idx.chunks)
 
         # 벡터 임베딩 시도 — neural(fastembed) 우선 자동 선택, 미가용 시 TF-IDF 폴백.
