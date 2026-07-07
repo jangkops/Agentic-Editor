@@ -6,6 +6,19 @@ RAG Answer Quality (Ultra Production).
 
 각 태스크는 신규 의존성 최소·비차단 폴백·플래그 게이트 원칙을 따르며, 순수 함수는 파일 기반 pytest로 검증한다. 실행: `./venv/bin/python -m pytest <file> -p no:cacheprovider -q`. 우선순위: Phase 1 → 2 → 4(평가로 수치화) → 3 → 5. Phase 1·2만으로도 할루시네이션·정밀도 체감 개선을 목표로 한다.
 
+### 검증 실행 모드 결정 (라이브 실측 근거)
+
+라이브 게이트웨이 실측 결과: 인증·DNS·TCP는 즉시(<3s)지만 **모델 호출(/converse·스트리밍 둘 다)이 110~285초+** 로 매우 느림(비동기 job 경로 추정). 따라서 인라인(응답 차단) 검증은 부적합.
+
+`AE_VERIFY_MODE` 3모드 도입:
+- **off**(기본, `AE_ANSWER_QUALITY` 미설정 시): 검증 없음 = 무회귀.
+- **inline**: `[DONE]` 전 동기 대기 후 `answerQuality` SSE 방출. **빠른 게이트웨이 전용**.
+- **deferred**(느린 게이트웨이 최적): `[DONE]` 이후 백그라운드 검증 → 세션별 품질 저장소 기록.
+  서버가 `qualityPending` id를 SSE로 통지, 프론트가 `GET /api/answer-quality`를 폴링해 배지 표시.
+  답변 스트림은 즉시(무지연), 품질은 준비되면 부착.
+
+배선: `run_agent_stream`·`run_agent_with_tools` 양 경로 + `quality_store` + 부팅 스모크(양 모드 /health 200) 검증.
+
 ## Tasks
 
 ### Phase 1 — 근거 강제 & 검증 (신규 의존성 0, 최대 임팩트)
