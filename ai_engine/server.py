@@ -9149,15 +9149,26 @@ async def run_agent_with_tools(request: Request):
         system_prompt = f"사용자의 프로젝트 경로: {project_path}"
         if open_file:
             system_prompt += f"\n현재 열린 파일: {open_file}"
+    rag_evidence = None
     if project_path and _is_code_related(prompt):
         try:
             from ai_engine.rag.context_builder import build_system_prompt
-            system_prompt = build_system_prompt(
-                project_path=project_path, query=prompt,
-                open_file=open_file, open_file_content=open_file_content,
-                base_system_prompt=system_prompt,
-                aws_profile=aws_profile, bedrock_user=bedrock_user, gateway_client=gw,
-            )
+            from ai_engine.rag.answer_quality import verify_mode as _vmode
+            if _vmode(os.environ) != "off":
+                system_prompt, rag_evidence = build_system_prompt(
+                    project_path=project_path, query=prompt,
+                    open_file=open_file, open_file_content=open_file_content,
+                    base_system_prompt=system_prompt,
+                    aws_profile=aws_profile, bedrock_user=bedrock_user, gateway_client=gw,
+                    return_evidence=True,
+                )
+            else:
+                system_prompt = build_system_prompt(
+                    project_path=project_path, query=prompt,
+                    open_file=open_file, open_file_content=open_file_content,
+                    base_system_prompt=system_prompt,
+                    aws_profile=aws_profile, bedrock_user=bedrock_user, gateway_client=gw,
+                )
         except Exception as e:
             print(f"[Agent] RAG 실패 (무시): {e}")
 
@@ -9615,6 +9626,30 @@ async def run_agent_with_tools(request: Request):
                         yield f"data: {json.dumps({'text': _fail_notice}, ensure_ascii=False)}\n\n"
             except Exception as _ve:
                 print(f"[Agent] 파일 검증/강제생성 블록 예외: {_ve}")
+            # answer_quality (플래그 게이트, inline/deferred, additive·비차단)
+            try:
+                from ai_engine.rag.answer_quality import (
+                    verify_mode as _vm, enhance_answer as _ea, run_deferred_verification as _rdv,
+                )
+                _mode = _vm(os.environ)
+                _ans = "".join(agent_final_text_parts).strip()
+                if _mode != "off" and rag_evidence is not None and _ans:
+                    if _mode == "inline":
+                        _r = await _ea(_ans, context_text=rag_evidence.get("context", ""),
+                                       retrieved_chunks=rag_evidence.get("chunks"), gw=gw, env=os.environ)
+                        _meta = _r.get("metadata") or {}
+                        if _meta:
+                            yield f"data: {json.dumps({'answerQuality': _meta}, ensure_ascii=False)}\n\n"
+                    elif _mode == "deferred":
+                        import uuid as _uuid
+                        _qid = _uuid.uuid4().hex
+                        yield f"data: {json.dumps({'qualityPending': _qid}, ensure_ascii=False)}\n\n"
+                        _t = asyncio.create_task(_rdv(_ans, rag_evidence.get("context", ""),
+                                                      rag_evidence.get("chunks"), gw,
+                                                      body.get("sessionId", "default"), _qid, os.environ))
+                        _AQ_TASKS.add(_t); _t.add_done_callback(_AQ_TASKS.discard)
+            except Exception as _aqe:
+                print(f"[AnswerQuality] agent 검증 스킵(비차단): {_aqe}")
         except asyncio.CancelledError:
             print("[Agent] stream cancelled")
             return
