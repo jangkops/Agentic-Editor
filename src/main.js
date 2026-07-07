@@ -3225,6 +3225,26 @@ async function runParallel(prompt) {
           const ev = JSON.parse(d);
           // heartbeat 이벤트는 무시 (연결 유지 목적)
           if (ev.heartbeat) continue;
+          // self-consistency 랭킹 — 병렬 후보 중 다수의견(합의) 근접도. 로컬 임베딩 기반.
+          if (Array.isArray(ev.consensusRanking)) {
+            let repName = '';
+            for (const r of ev.consensusRanking) {
+              const cur = state.parallelResults.get(r.slotId);
+              if (cur) {
+                cur.consistency = r.consistency;
+                cur.representative = r.representative;
+                state.parallelResults.set(r.slotId, cur);
+              }
+              if (r.representative) {
+                const sl = state.parallelSlots.find(s => s.slotId === r.slotId);
+                repName = sl?.model?.name || r.slotId;
+              }
+            }
+            renderParallelResultGrid();
+            if (repName) addLiveLog('system',
+              `자기일관성 분석: 대표 답변 = ${repName} (다수의견 근접도 최고)`);
+            continue;
+          }
           if (ev.slotId) {
             const slot = state.parallelSlots.find(s => s.slotId === ev.slotId);
             const modelName = slot?.model?.name || ev.modelId || '';
