@@ -30,8 +30,8 @@ class RetrievalConfig:
     fusion: str = "weighted"        # "weighted" | "rrf"
     use_query_expand: bool = False
     use_rerank: bool = False
-    rerank_model: str = "anthropic.claude-3-5-sonnet-20241022-v2:0"
-    expand_model: str = "anthropic.claude-3-5-sonnet-20241022-v2:0"
+    rerank_model: str = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    expand_model: str = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
     score_threshold: float = 0.0
     use_mmr: bool = False
     rerank_timeout: float = 8.0

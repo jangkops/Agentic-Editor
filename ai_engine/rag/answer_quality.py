@@ -136,7 +136,9 @@ async def enhance_answer(answer: str, context_text: str, retrieved_chunks=None,
     _v = env.get("AE_VERIFY")
     _verify_on = True if (_v is None or str(_v).strip() == "") else _truthy(_v)
     if _verify_on and gw is not None and context_text:
-        model = env.get("AE_VERIFY_MODEL") or "anthropic.claude-3-5-sonnet-20241022-v2:0"
+        # 라이브 실측 활성 모델(2026-07). EOL 모델은 게이트웨이가 거부해 검증이 항상
+        # degraded 되므로 활성 모델로 기본값 지정. us. prefix는 gateway_module이 처리.
+        model = env.get("AE_VERIFY_MODEL") or "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
         try:
             timeout = float(env.get("AE_VERIFY_TIMEOUT_MS", "10000")) / 1000.0
         except (TypeError, ValueError):

@@ -7300,6 +7300,9 @@ _LATEST_OPUS_IDS = [
     "anthropic.claude-3-opus-20240229-v1:0",
 ]
 _LATEST_SONNET_IDS = [
+    # sonnet-4-5: 라이브 게이트웨이 실측 활성(2026-07). 4-6은 일부 계정에서
+    # model_denied 되므로 활성 확실한 4-5를 최우선 폴백으로 둔다.
+    "anthropic.claude-sonnet-4-5-20250929-v1:0",
     "anthropic.claude-sonnet-4-6-20250929-v1:0",
     "anthropic.claude-sonnet-4-20250514-v1:0",
     "anthropic.claude-3-5-sonnet-20241022-v2:0",
@@ -8798,7 +8801,7 @@ _AQ_TASKS = set()  # deferred answer_quality 태스크 참조 보관(GC 방지)
 async def run_agent_stream(request: Request):
     body = await request.json()
     prompt = body.get("prompt", "")
-    model = body.get("model", "anthropic.claude-sonnet-4-6")
+    model = body.get("model", "anthropic.claude-sonnet-4-5-20250929-v1:0")
     system_prompt = body.get("systemPrompt", "")
     aws_profile = body.get("awsProfile", os.environ.get("AWS_PROFILE", "bedrock-gw"))
     bedrock_user = body.get("bedrockUser", os.environ.get("BEDROCK_USER", ""))
@@ -9078,7 +9081,7 @@ async def run_agent_with_tools(request: Request):
     """
     body = await request.json()
     prompt = body.get("prompt", "")
-    model = body.get("model", "anthropic.claude-sonnet-4-6")
+    model = body.get("model", "anthropic.claude-sonnet-4-5-20250929-v1:0")
     system_prompt = body.get("systemPrompt", "")
     aws_profile = body.get("awsProfile", os.environ.get("AWS_PROFILE", "bedrock-gw"))
     bedrock_user = body.get("bedrockUser", os.environ.get("BEDROCK_USER", ""))
@@ -13904,7 +13907,7 @@ async def run_agent_orchestrated(request: Request):
 async def run_agent(request: Request):
     body = await request.json()
     prompt = body.get("prompt", "")
-    model = body.get("model", "anthropic.claude-sonnet-4-6")
+    model = body.get("model", "anthropic.claude-sonnet-4-5-20250929-v1:0")
     aws_profile = body.get("awsProfile", os.environ.get("AWS_PROFILE", "bedrock-gw"))
     bedrock_user = body.get("bedrockUser", os.environ.get("BEDROCK_USER", ""))
     try:
@@ -14021,7 +14024,7 @@ async def run_workflow(request: Request):
     """Run full agent workflow: Plan → Code → Review → Execute."""
     body = await request.json()
     prompt = body.get("prompt", "")
-    model = body.get("model", "anthropic.claude-3-5-sonnet-20241022-v2:0")
+    model = body.get("model", "anthropic.claude-sonnet-4-5-20250929-v1:0")
 
     try:
         from ai_engine.gateway_module import GatewayClient

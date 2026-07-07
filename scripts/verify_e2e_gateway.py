@@ -1,18 +1,12 @@
-"""게이트웨이 경유 end-to-end 검증 — 단일/병렬/합의 전체를 한 번에 실측.
+"""게이트웨이 경유 E2E 통합 검증 — 단일 / 병렬 / 합의 각 1케이스 + 품질 메타 전체.
 
-게이트웨이가 정상 응답하는 환경(사내망/앱 서버)에서 실행하면, 세 경로 각각을 실제
-게이트웨이로 1회씩 돌려 결과와 모든 품질 메타데이터를 출력한다. 개발 샌드박스처럼
-게이트웨이 모델 응답이 지연되면 각 단계가 timeout으로 정직하게 사유를 남긴다.
+실제 Bedrock 게이트웨이를 경유해 세 경로를 한 번씩 실행하고, 각 경로의 결과와
+품질 메타데이터(citation·faithfulness·grounding / self-consistency / cross-verify)가
+제대로 산출되는지 확인한다. 실패는 정직하게 사유 출력.
 
 실행:
-  AWS_PROFILE=bedrock-gw BEDROCK_USER=<name> \
-  PYTHONPATH=. ai_engine/.venv/bin/python scripts/verify_e2e_gateway.py
-
-옵션 env:
-  AE_E2E_QUERY        검증 질의(기본: RRF 관련 질의)
-  AE_E2E_TIMEOUT_MS   단계별 게이트웨이 타임아웃(기본 300000=5분)
-  AE_GEN_MODEL        생성 모델(기본 sonnet)
-  AE_PARALLEL_MODELS  병렬 모델 CSV(기본 sonnet,opus)
+  AWS_PROFILE=bedrock-gw PYTHONPATH=. ai_engine/.venv/bin/python scripts/verify_e2e_gateway.py
+선택 env: BEDROCK_USER, AE_GEN_MODEL, AE_VERIFY_MODEL, AE_PARALLEL_MODELS(콤마구분)
 """
 import os
 import sys
@@ -21,106 +15,159 @@ import asyncio
 
 os.environ.setdefault("AE_ANSWER_QUALITY", "1")
 os.environ.setdefault("AE_VERIFY", "1")
+os.environ.setdefault("AE_VERIFY_TIMEOUT_MS", "120000")
 
 from ai_engine.gateway_module import GatewayClient
 from ai_engine.rag.gw_text import converse_text
+from ai_engine.rag.context_builder import get_searcher
 from ai_engine.rag.answer_quality import enhance_answer, _get_local_embedder
 from ai_engine.rag.consensus_select import rank_by_self_consistency
 from ai_engine.rag.cross_verify import cross_verify_consensus
 
-QUERY = os.environ.get("AE_E2E_QUERY") or "rrf_fuse 함수는 무엇을 하고 기본 k 값은 얼마인가?"
-CTX = ("[근거] ai_engine/rag/hybrid_search.py\n"
-       "rrf_fuse(rank_lists, k=60): 여러 검색기의 순위 리스트를 Reciprocal Rank Fusion으로 "
-       "융합한다. RRF(d)=sum 1/(k+rank). 점수 스케일에 무관하며 k 기본값은 60이다.")
-GEN_MODEL = os.environ.get("AE_GEN_MODEL", "anthropic.claude-3-5-sonnet-20241022-v2:0")
-PARALLEL_MODELS = [m.strip() for m in (os.environ.get("AE_PARALLEL_MODELS") or
-    "anthropic.claude-3-5-sonnet-20241022-v2:0,anthropic.claude-3-opus-20240229-v1:0").split(",") if m.strip()]
-TIMEOUT = float(os.environ.get("AE_E2E_TIMEOUT_MS", "300000")) / 1000.0
+PROJECT = os.environ.get("AE_E2E_PROJECT", os.path.join("ai_engine", "rag"))
+QUERY = os.environ.get("AE_E2E_QUERY",
+                       "하이브리드 검색에서 RRF(reciprocal rank fusion) 융합은 어떻게 동작하나?")
+GEN_MODEL = os.environ.get("AE_GEN_MODEL", "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
+VERIFY_MODEL = os.environ.get("AE_VERIFY_MODEL", "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
+PARALLEL_MODELS = [m.strip() for m in os.environ.get(
+    "AE_PARALLEL_MODELS",
+    "us.anthropic.claude-sonnet-4-5-20250929-v1:0,us.anthropic.claude-sonnet-4-20250514-v1:0"
+).split(",") if m.strip()]
+
+GEN_TIMEOUT = float(os.environ.get("AE_GEN_TIMEOUT_S", "45"))
+# AE_E2E_ONLY=single|parallel|consensus 로 한 경로만 실행(빠른 단일 케이스 확인).
+ONLY = (os.environ.get("AE_E2E_ONLY") or "all").strip().lower()
+
+# 파이프(| tail)로 실행해도 진행이 실시간으로 보이도록 라인 버퍼링 강제.
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except Exception:
+    pass
 
 
-def _gw():
-    return GatewayClient(aws_profile=os.environ.get("AWS_PROFILE", ""),
-                         bedrock_user=os.environ.get("BEDROCK_USER", ""))
+def _mk_gw():
+    return GatewayClient(aws_profile=os.environ.get("AWS_PROFILE") or "bedrock-gw",
+                         bedrock_user=os.environ.get("BEDROCK_USER", "") or "cgjang")
 
 
-async def _generate(gw, model, query, context):
-    """근거를 시스템 컨텍스트로 준 단일 답변 생성."""
-    msgs = [{"role": "user", "content": [{"text":
-        f"다음 근거만 사용해 질문에 답하세요.\n\n{context}\n\n질문: {query}"}]}]
-    return await converse_text(gw, model, msgs, timeout=TIMEOUT)
+def _build_context(chunks) -> str:
+    parts = []
+    for c, _score in chunks:
+        parts.append(f"{c.file_path}:{c.start_line}-{c.end_line}\n{c.content[:1200]}")
+    return "\n\n".join(parts)
 
 
-async def verify_single(gw) -> dict:
-    """단일 호출: 답변 생성 + 근거/충실도/grounding 전체 메타."""
-    out = {"path": "single", "model": GEN_MODEL}
-    try:
-        answer = await asyncio.wait_for(_generate(gw, GEN_MODEL, QUERY, CTX), timeout=TIMEOUT + 20)
-        out["answer"] = answer[:500]
-        res = await enhance_answer(answer, context_text=CTX, retrieved_chunks=None,
-                                   gw=gw, env=os.environ)
-        out["metadata"] = res.get("metadata")
-        out["ok"] = bool(answer.strip())
-    except asyncio.TimeoutError:
-        out["ok"] = False
-        out["error"] = f"gateway timeout after {TIMEOUT:.0f}s"
-    except Exception as e:
-        out["ok"] = False
-        out["error"] = str(e)[:300]
-    return out
+async def _gen(gw, query, context):
+    sys_p = ("당신은 코드베이스 전문가입니다. 아래 [근거]만 사용해 한국어로 정확히 "
+             "답하고, 각 주장 끝에 (파일:라인) 형식으로 출처를 표기하세요. 근거에 없으면 "
+             "모른다고 하세요.")
+    user = f"[질문]\n{query}\n\n[근거]\n{context[:8000]}"
+    msgs = [{"role": "user", "content": [{"text": user}]}]
+    return await asyncio.wait_for(
+        converse_text(gw, GEN_MODEL, msgs, system_prompt=sys_p, timeout=GEN_TIMEOUT),
+        timeout=GEN_TIMEOUT + 10)
 
 
-async def verify_parallel(gw) -> dict:
-    """병렬 호출: 여러 모델 답변 + self-consistency 대표 선별."""
-    out = {"path": "parallel", "models": PARALLEL_MODELS}
-    answers, per = [], []
-    for m in PARALLEL_MODELS:
+async def run_single(gw, chunks, context):
+    print("\n===== [1] 단일 모델 호출 (게이트웨이 경유) =====")
+    ans = await _gen(gw, QUERY, context)
+    print(f"[답변 {len(ans)}자]\n{ans[:600]}\n...")
+    res = await enhance_answer(ans, context_text=context, retrieved_chunks=chunks,
+                               gw=gw, env=os.environ)
+    meta = res.get("metadata") or {}
+    print("[품질 메타]", json.dumps(meta, ensure_ascii=False, indent=2))
+    return ans, meta
+
+
+async def run_parallel(gw, context):
+    print("\n===== [2] 병렬 모델 호출 (게이트웨이 경유) =====")
+    async def one(model):
         try:
-            a = await asyncio.wait_for(_generate(gw, m, QUERY, CTX), timeout=TIMEOUT + 20)
-            answers.append(a)
-            per.append({"model": m, "ok": bool(a.strip()), "answer": a[:300]})
+            t = await _gen(gw, QUERY, context)
+            return {"model": model, "status": "done", "content": t}
         except Exception as e:
-            answers.append("")
-            per.append({"model": m, "ok": False, "error": str(e)[:200]})
-    out["candidates"] = per
-    ranking = rank_by_self_consistency(answers, _get_local_embedder())
-    out["selfConsistency"] = ranking
-    out["ok"] = ranking is not None and any(p["ok"] for p in per)
-    return out
-
-
-async def verify_consensus(gw) -> dict:
-    """합의: 병렬 후보들을 검증자 모델로 교차 채점(충실도/충돌)."""
-    out = {"path": "consensus"}
-    agents = []
-    for i, m in enumerate(PARALLEL_MODELS):
+            return {"model": model, "status": "error", "content": "", "error": str(e)[:200]}
+    # 서로 다른 모델로 병렬
+    async def one_m(model):
+        sys_p = "당신은 코드베이스 전문가입니다. 아래 근거로 한국어로 간결히 답하세요."
+        user = f"[질문]\n{QUERY}\n\n[근거]\n{context[:8000]}"
+        msgs = [{"role": "user", "content": [{"text": user}]}]
         try:
-            a = await asyncio.wait_for(_generate(gw, m, QUERY, CTX), timeout=TIMEOUT + 20)
-            agents.append({"role": f"agent{i}", "title": m, "summary": a})
+            t = await asyncio.wait_for(
+                converse_text(gw, model, msgs, system_prompt=sys_p, timeout=GEN_TIMEOUT),
+                timeout=GEN_TIMEOUT + 10)
+            return {"model": model, "status": "done", "content": t}
         except Exception as e:
-            agents.append({"role": f"agent{i}", "title": m, "summary": f"(실패: {str(e)[:100]})"})
-    rep = await cross_verify_consensus(gw, GEN_MODEL, QUERY, agents, timeout=TIMEOUT)
-    out["crossVerify"] = rep.as_dict()
-    out["ok"] = not rep.degraded
-    return out
+            return {"model": model, "status": "error", "content": "", "error": str(e)[:200]}
+
+    results = await asyncio.gather(*(one_m(m) for m in PARALLEL_MODELS))
+    for r in results:
+        st = r["status"]
+        prev = (r.get("content") or r.get("error") or "")[:200]
+        print(f"  - {r['model']} [{st}] {prev}")
+    done = [r for r in results if r["status"] == "done" and r["content"]]
+    ranking = None
+    if len(done) >= 2:
+        ranking = rank_by_self_consistency([r["content"] for r in done], _get_local_embedder())
+        print("[self-consistency 랭킹]", json.dumps(ranking, ensure_ascii=False))
+    else:
+        print(f"[self-consistency] 후보 부족(done={len(done)}) — 랭킹 생략")
+    return results, ranking
+
+
+async def run_consensus(gw, results):
+    print("\n===== [3] 합의 도출 — 교차 검증 (게이트웨이 경유) =====")
+    agents = [{"role": f"agent{i}", "title": r["model"], "summary": r["content"]}
+              for i, r in enumerate(results) if r["status"] == "done" and r["content"]]
+    if len(agents) < 2:
+        print(f"[cross-verify] 후보 부족(done={len(agents)}) — 생략")
+        return None
+    rep = await cross_verify_consensus(gw, VERIFY_MODEL, QUERY, agents, timeout=GEN_TIMEOUT)
+    print("[cross-verify 결과]", json.dumps(rep.as_dict(), ensure_ascii=False, indent=2))
+    return rep
 
 
 async def main():
-    print(f"[E2E] profile={os.environ.get('AWS_PROFILE')} bedrock_user={os.environ.get('BEDROCK_USER')}")
-    print(f"[E2E] query={QUERY!r} timeout={TIMEOUT:.0f}s")
-    gw = _gw()
-    results = {}
-    for name, fn in (("single", verify_single), ("parallel", verify_parallel),
-                     ("consensus", verify_consensus)):
-        print(f"\n=== {name.upper()} 검증 중 (게이트웨이 경유) ===")
-        results[name] = await fn(gw)
-        print(json.dumps(results[name], ensure_ascii=False, indent=2))
-    ok_all = all(v.get("ok") for v in results.values())
-    print("\n=== 종합 ===")
-    print(json.dumps({k: {"ok": v.get("ok"), "error": v.get("error")} for k, v in results.items()},
-                     ensure_ascii=False, indent=2))
-    print("✅ 전체 게이트웨이 경유 검증 성공" if ok_all else
-          "⚠️ 일부 경로 미완료 — 위 error 사유 확인(게이트웨이 응답 지연 시 timeout)")
-    return 0 if ok_all else 1
+    print(f"프로젝트={PROJECT}  질의={QUERY!r}")
+    print(f"생성모델={GEN_MODEL}  검증모델={VERIFY_MODEL}  병렬={PARALLEL_MODELS}")
+    gw = _mk_gw()
+
+    # RAG 검색 (로컬 neural, 게이트웨이 불필요) — 근거 확보
+    searcher = get_searcher(PROJECT, gateway_client=gw)
+    chunks = searcher.search(QUERY, top_k=6, score_threshold=0.0)
+    context = _build_context(chunks)
+    print(f"\n[RAG] 근거 {len(chunks)}개 청크 검색 — 파일: {sorted(set(c.file_path for c,_ in chunks))}")
+
+    ok = {}
+    if ONLY in ("all", "single"):
+        ok["single"] = False
+        try:
+            _ans, meta = await run_single(gw, chunks, context)
+            ok["single"] = bool(_ans)
+        except Exception as e:
+            print(f"❌ 단일 호출 실패: {str(e)[:300]}", flush=True)
+
+    results = None
+    if ONLY in ("all", "parallel", "consensus"):
+        ok["parallel"] = False
+        try:
+            results, ranking = await run_parallel(gw, context)
+            ok["parallel"] = any(r["status"] == "done" for r in (results or []))
+        except Exception as e:
+            print(f"❌ 병렬 호출 실패: {str(e)[:300]}", flush=True)
+
+    if ONLY in ("all", "consensus"):
+        ok["consensus"] = False
+        try:
+            if results:
+                rep = await run_consensus(gw, results)
+                ok["consensus"] = rep is not None and not rep.degraded
+        except Exception as e:
+            print(f"❌ 합의 도출 실패: {str(e)[:300]}", flush=True)
+
+    print("\n===== 전체 확인 요약 =====")
+    print(json.dumps(ok, ensure_ascii=False))
+    return 0 if all(ok.values()) else 1
 
 
 if __name__ == "__main__":
