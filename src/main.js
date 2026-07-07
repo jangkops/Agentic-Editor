@@ -2965,6 +2965,11 @@ async function runAgentWorkflow(prompt) {
               if (f && typeof f.score === 'number' && !f.degraded) {
                 parts.push(`충실도 ${(f.score * 100).toFixed(0)}%`);
               }
+              // 로컬 grounding(게이트웨이 무관, 항상 계산) — 근거 일치도
+              const g = p.answerQuality.grounding || {};
+              if (g && typeof g.score === 'number') {
+                parts.push(`근거일치 ${(g.score * 100).toFixed(0)}%`);
+              }
               if (parts.length) {
                 addLiveLog('system', `근거 품질: ${parts.join(', ')}`);
               }
@@ -2994,6 +2999,8 @@ async function runAgentWorkflow(prompt) {
                     const parts = [];
                     if (typeof c.verified === 'number' && typeof c.citations_total === 'number' && c.citations_total > 0) parts.push(`인용 ${c.verified}/${c.citations_total} 검증`);
                     if (f && typeof f.score === 'number' && !f.degraded) parts.push(`충실도 ${(f.score * 100).toFixed(0)}%`);
+                    const g = j.quality.grounding || {};
+                    if (g && typeof g.score === 'number') parts.push(`근거일치 ${(g.score * 100).toFixed(0)}%`);
                     if (parts.length) addLiveLog('system', `근거 품질(지연): ${parts.join(', ')}`);
                     else if (f && f.degraded && f.reason) addLiveLog('warning', `충실도 검증 미완료: ${f.reason} — ${(f.feedback || '').slice(0, 120)}`);
                     return;

@@ -39,6 +39,38 @@ def quality_enabled(env: Optional[dict] = None) -> bool:
     return _truthy(val)
 
 
+_LOCAL_EMBEDDER = None
+
+
+def _get_local_embedder():
+    """로컬 grounding용 임베딩 provider(프로세스 싱글턴). 게이트웨이 불필요.
+
+    실패해도 None 반환(비차단). 기본 fastembed, 미가용 시 내부 폴백.
+    """
+    global _LOCAL_EMBEDDER
+    if _LOCAL_EMBEDDER is None:
+        try:
+            from ai_engine.rag.embedder import get_embedding_provider
+            env = dict(os.environ)
+            env.setdefault("AE_EMBED_PROVIDER", "fastembed")
+            _LOCAL_EMBEDDER = get_embedding_provider(env)
+        except Exception as e:
+            print(f"[AnswerQuality] 로컬 임베더 초기화 실패(비차단): {e}")
+            _LOCAL_EMBEDDER = False  # 재시도 방지 sentinel
+    return _LOCAL_EMBEDDER or None
+
+
+def _chunk_texts(chunks) -> List[str]:
+    """검색 청크(또는 (chunk,score)) → grounding용 텍스트 목록(방어적)."""
+    out = []
+    for item in chunks or []:
+        c = item[0] if isinstance(item, (tuple, list)) and item else item
+        txt = getattr(c, "content", None)
+        if isinstance(txt, str) and txt.strip():
+            out.append(txt)
+    return out
+
+
 def _ranges_from_chunks(chunks) -> List[RetrievedRange]:
     """검색 청크(또는 (chunk,score) 튜플) → RetrievedRange 목록(방어적)."""
     out = []
@@ -85,6 +117,20 @@ async def enhance_answer(answer: str, context_text: str, retrieved_chunks=None,
         metadata["citation"] = build_citation_metadata(answer, retrieved_chunks)
     except Exception as e:
         metadata["citation_error"] = str(e)
+
+    # 1.5) 로컬 grounding 점수 (LLM/게이트웨이 불필요 — 항상 계산 시도).
+    #      게이트웨이가 느리거나 없어도 근거-기반성 하한 신호를 제공(한계 개선).
+    try:
+        from ai_engine.rag.verifier import local_grounding_score
+        chunk_texts = _chunk_texts(retrieved_chunks) or (
+            [context_text] if context_text else [])
+        if chunk_texts:
+            gs = local_grounding_score(answer, chunk_texts, _get_local_embedder())
+            if gs is not None:
+                metadata["grounding"] = {"score": round(gs, 4),
+                                         "method": "local-embedding-cosine"}
+    except Exception as e:
+        metadata["grounding_error"] = str(e)[:200]
 
     # 2) 충실도 검증 (기본 자동 ON — 끄려면 AE_VERIFY=0). gw 없으면 자동 skip.
     _v = env.get("AE_VERIFY")

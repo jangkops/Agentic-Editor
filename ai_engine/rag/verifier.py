@@ -107,3 +107,71 @@ def _extract_text(resp) -> str:
     except Exception:
         pass
     return ""
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 로컬 grounding 점수 — 게이트웨이 LLM 없이 근거-기반성을 근사 (한계 개선)
+#
+# LLM 충실도 검증은 게이트웨이 응답 지연에 의존해 무점수(degraded)로 빠지기 쉽다.
+# 이를 보완하기 위해, 로컬 임베딩(FastEmbed 등)으로 답변 각 문장이 제공된 근거와
+# 얼마나 의미적으로 겹치는지를 코사인 유사도로 근사한다. LLM/게이트웨이 불필요 →
+# 게이트웨이가 느리거나 없어도 항상 점수가 나온다.
+#
+# 정직한 한계 표기: 이는 어휘/의미 겹침 근사이며 진짜 함의(entailment)·모순 탐지가
+# 아니다. LLM 충실도의 대체가 아니라 항상 제공되는 하한 신호로 사용한다.
+# ─────────────────────────────────────────────────────────────────────────
+import re as _re
+
+
+def _split_sentences(text: str, max_sents: int = 40) -> List[str]:
+    """답변을 문장/줄 단위로 분리(한/영). 너무 짧은 조각 제외, 상한 적용."""
+    if not text:
+        return []
+    parts = _re.split(r'(?<=[.!?。])\s+|\n+', text)
+    out = [p.strip() for p in parts if len(p.strip()) >= 5]
+    return out[:max_sents]
+
+
+def local_grounding_score(answer: str, context_chunks: List[str], embedder) -> Optional[float]:
+    """LLM 없이 로컬 임베딩으로 답변의 근거-기반성 근사(0.0~1.0). 불가 시 None.
+
+    답변 문장별로 근거 청크와의 최대 코사인 유사도를 구해 평균한다. embedder는
+    L2 정규화 벡터를 반환한다고 가정(FastEmbed/LSA 등) → 내적이 코사인과 일치.
+    """
+    if not answer or not context_chunks or embedder is None:
+        return None
+    if not getattr(embedder, "is_ready", False):
+        # TF-IDF류는 fit 전 is_ready=False. 코퍼스 fit 시도(있으면).
+        try:
+            if hasattr(embedder, "fit_corpus"):
+                embedder.fit_corpus(list(context_chunks))
+        except Exception:
+            pass
+        if not getattr(embedder, "is_ready", False):
+            return None
+    sents = _split_sentences(answer)
+    if not sents:
+        return None
+    try:
+        import numpy as _np
+        ctx_vecs = [v for v in embedder.embed_batch(list(context_chunks)) if v is not None]
+        if not ctx_vecs:
+            return None
+        ctx_mat = _np.vstack([_np.asarray(v, dtype=_np.float32) for v in ctx_vecs])
+        # 안전 정규화(제공자가 정규화 안 해도 코사인 성립)
+        ctx_mat = ctx_mat / (_np.linalg.norm(ctx_mat, axis=1, keepdims=True) + 1e-10)
+        sent_vecs = embedder.embed_batch(sents)
+        scores = []
+        for v in sent_vecs:
+            if v is None:
+                continue
+            a = _np.asarray(v, dtype=_np.float32)
+            a = a / (_np.linalg.norm(a) + 1e-10)
+            sims = ctx_mat @ a
+            scores.append(float(_np.max(sims)))
+        if not scores:
+            return None
+        return max(0.0, min(1.0, sum(scores) / len(scores)))
+    except Exception as e:
+        print(f"[Verifier] local_grounding_score 실패(비차단): {e}")
+        return None
