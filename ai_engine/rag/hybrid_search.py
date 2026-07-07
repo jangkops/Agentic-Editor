@@ -88,7 +88,7 @@ class HybridSearcher:
     def search(self, query: str, top_k: int = 8,
                score_threshold: float = 0.05,
                use_mmr: bool = True,
-               mmr_lambda: float = 0.5,
+               mmr_lambda: float = 0.7,
                file_filter: Optional[Callable[[str], bool]] = None,
                fusion: str = "weighted") -> List[Tuple[Chunk, float]]:
         """하이브리드 검색 + MMR + score threshold + metadata 필터.
@@ -98,7 +98,9 @@ class HybridSearcher:
             top_k: 최종 반환 개수
             score_threshold: 이 점수 미만은 제외 (관련성 낮은 결과 제거)
             use_mmr: True면 Maximal Marginal Relevance로 다양성 확보
-            mmr_lambda: MMR balance — 1.0=정확도만, 0.0=다양성만, 0.5=균형
+            mmr_lambda: MMR balance — 1.0=정확도만, 0.0=다양성만. 기본 0.7(관련성
+                강조) — GOLDEN 벤치 실측상 0.5보다 precision/mrr 우위. relevance는
+                하이브리드 최종 점수를 정규화해 사용한다.
             file_filter: chunk.file_path를 받아서 True 반환하면 포함 (metadata 필터)
             fusion: "weighted"(기본, 기존 동작) | "rrf"(순위 기반 융합, opt-in).
                 RRF는 시맨틱 벡터 랭커가 있을 때 스케일 차이에 견고하다. 기본값을
@@ -205,21 +207,22 @@ class HybridSearcher:
             return v / n
 
         q_n = _norm(query_vec)
-        # 후보별 query 유사도
-        cand_query_sim = {}
-        for cidx, v in idx_to_vec.items():
-            cand_query_sim[cidx] = float(_norm(v) @ q_n)
 
         # MMR 알고리즘
         selected: List[Tuple[int, float]] = []
         remaining = list(idx_to_vec.keys())
         rank_dict = dict(ranked)
+        # relevance는 하이브리드 최종 점수(BM25+vector 융합)를 [0,1] 정규화해 사용한다.
+        # 이전 구현은 벡터 유사도만 relevance로 써서 BM25 신호를 무시 → exact-keyword
+        # 질의에서 정답을 밀어내 정확도(mrr/precision)가 급락했다(벤치로 실측).
+        _max_rel = max(rank_dict.values(), default=0.0) or 1.0
+        rel_norm = {cidx: (rank_dict.get(cidx, 0.0) / _max_rel) for cidx in idx_to_vec}
 
         while remaining and len(selected) < top_k:
             best_idx = None
             best_mmr = -1e9
             for cidx in remaining:
-                relevance = cand_query_sim.get(cidx, 0.0)
+                relevance = rel_norm.get(cidx, 0.0)
                 if not selected:
                     diversity = 0.0
                 else:
