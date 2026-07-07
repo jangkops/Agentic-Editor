@@ -13827,10 +13827,42 @@ async def run_agent_orchestrated(request: Request):
                         except Exception as _ce:
                             print(f"[Orchestrator] coverage 보강 실패 ({fmt}): {_ce}")
 
-            # 3) Merger
-            report = await _orchestrator_merge(gw, merger_id, user_prompt, agent_results, base_sys,
-                                               required_formats=required_formats)
-            await emit_queue.put({"type": "merge", "report": report, "results": agent_results})
+            # 3) Merger + 합의 교차검증(병렬·비차단·additive)
+            #    병합과 교차검증을 asyncio.gather로 동시 실행 → 교차검증이 느리거나
+            #    degraded여도 병합(report)은 지연/차단되지 않는다(가용성 우선).
+            #    자동 ON(공수 0). 끄려면 AE_CONSENSUS_CROSSVERIFY=0.
+            _cv_flag = str(os.environ.get("AE_CONSENSUS_CROSSVERIFY") or "").strip().lower()
+            _cv_on = _cv_flag not in ("0", "false", "no", "off")
+
+            async def _do_merge():
+                return await _orchestrator_merge(gw, merger_id, user_prompt, agent_results, base_sys,
+                                                 required_formats=required_formats)
+
+            async def _do_crossverify():
+                # 후보가 2개 미만이면 합의 자체가 무의미 → skip.
+                if not _cv_on or len([r for r in agent_results if r.get("status") == "done"]) < 2:
+                    return None
+                try:
+                    from ai_engine.rag.cross_verify import cross_verify_consensus
+                    try:
+                        _cv_to = float(os.environ.get("AE_CONSENSUS_CROSSVERIFY_TIMEOUT_MS", "12000")) / 1000.0
+                    except (TypeError, ValueError):
+                        _cv_to = 12.0
+                    _rep = await cross_verify_consensus(gw, merger_id, user_prompt,
+                                                        agent_results, timeout=_cv_to)
+                    return _rep.as_dict()
+                except Exception as _cve:
+                    print(f"[Orchestrator] cross-verify 예외(비차단): {_cve}")
+                    return None
+
+            report, _cv = await asyncio.gather(_do_merge(), _do_crossverify())
+            _merge_evt = {"type": "merge", "report": report, "results": agent_results}
+            if _cv is not None:
+                _merge_evt["crossVerify"] = _cv
+                _cc = _cv.get("conflictCount", 0)
+                print(f"[Orchestrator] cross-verify done — conflicts={_cc} "
+                      f"degraded={_cv.get('degraded')}")
+            await emit_queue.put(_merge_evt)
             await emit_queue.put({"type": "__END__"})
 
         pipe_task = asyncio.create_task(pipeline())

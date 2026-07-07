@@ -2398,6 +2398,18 @@ async function runOrchestrated(prompt) {
                 }
               }
             }
+            // 합의 교차검증 결과(있으면) — 보고서 하단에 요약 첨부(additive, 비차단)
+            if (ev.crossVerify && !ev.crossVerify.degraded && Array.isArray(ev.crossVerify.candidates)) {
+              const cv = ev.crossVerify;
+              const lines = cv.candidates.map(c =>
+                `- 후보 ${c.index}: 충실도 ${(typeof c.score === 'number' ? c.score : 0).toFixed(2)}`
+                + (c.conflict ? ' \u26a0\ufe0f충돌' : '')
+                + (c.note ? ' \u2014 ' + c.note : ''));
+              const header = (cv.conflictCount > 0)
+                ? `\n\n---\n**\u26a0\ufe0f 합의 교차검증 \u2014 후보 간 사실 충돌 ${cv.conflictCount}건 감지**\n`
+                : `\n\n---\n**\u2713 합의 교차검증 \u2014 충돌 없음**\n`;
+              mergeReport += header + lines.join('\n');
+            }
             // 최종 통합 보고서를 assistant 메시지로
             state.messages.push({ role: 'assistant', content: mergeReport });
             renderMessages();
