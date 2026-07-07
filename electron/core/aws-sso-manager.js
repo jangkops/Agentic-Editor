@@ -623,12 +623,15 @@ class AwsSsoManager {
             RoleSessionName: 'probe',
             DurationSeconds: 900,
           }));
-          return candidate; // 첫 성공 후보
+          return candidate; // 첫 성공 후보 (assume-role로 검증됨)
         } catch (_) {
           // 다음 후보 시도
         }
       }
-      return candidates[0]; // 폴백 (기존 동작 보존)
+      // 어떤 후보도 실제 assume-role에 성공하지 못함 → 틀린 추측을 저장하지 않는다.
+      // 빈 문자열을 반환하면 UI가 사용자에게 BedrockUser 이름을 1회 입력받는다(배포 안전).
+      // (틀린 이름을 조용히 저장하면 다른 사용자 계정/DynamoDB에 잘못 묶일 위험)
+      return '';
     } catch (_) {
       return '';
     }
