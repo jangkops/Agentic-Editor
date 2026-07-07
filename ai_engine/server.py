@@ -8777,7 +8777,24 @@ async def classify_intent(request: Request):
         })
 
 
+@app.get("/api/answer-quality")
+async def get_answer_quality(session: str = "default", id: str = ""):
+    """deferred answer_quality 결과 조회. id 지정 시 단건, 없으면 세션 전체."""
+    try:
+        from ai_engine.rag.quality_store import load_quality, get_quality
+        if id:
+            m = get_quality(session, id)
+            return {"session": session, "id": id, "quality": m, "ready": m is not None}
+        return {"session": session, "quality": load_quality(session)}
+    except Exception as e:
+        return {"session": session, "quality": None, "error": str(e)[:200]}
+
+
+_AQ_TASKS = set()  # deferred answer_quality 태스크 참조 보관(GC 방지)
+
+
 @app.post("/api/agents/run-stream")
+
 async def run_agent_stream(request: Request):
     body = await request.json()
     prompt = body.get("prompt", "")
@@ -8809,15 +8826,26 @@ async def run_agent_stream(request: Request):
     )
     system_prompt = (system_prompt or "") + _AGENT_BASE
 
+    rag_evidence = None
     if project_path and _is_code_related(prompt):
         try:
             from ai_engine.rag.context_builder import build_system_prompt
-            system_prompt = build_system_prompt(
-                project_path=project_path, query=prompt,
-                open_file=open_file, open_file_content=open_file_content,
-                base_system_prompt=system_prompt,
-                aws_profile=aws_profile, bedrock_user=bedrock_user, gateway_client=gw,
-            )
+            from ai_engine.rag.answer_quality import verify_mode as _vmode
+            if _vmode(os.environ) != "off":
+                system_prompt, rag_evidence = build_system_prompt(
+                    project_path=project_path, query=prompt,
+                    open_file=open_file, open_file_content=open_file_content,
+                    base_system_prompt=system_prompt,
+                    aws_profile=aws_profile, bedrock_user=bedrock_user, gateway_client=gw,
+                    return_evidence=True,
+                )
+            else:
+                system_prompt = build_system_prompt(
+                    project_path=project_path, query=prompt,
+                    open_file=open_file, open_file_content=open_file_content,
+                    base_system_prompt=system_prompt,
+                    aws_profile=aws_profile, bedrock_user=bedrock_user, gateway_client=gw,
+                )
         except Exception as e:
             print(f"[RAG] 컨텍스트 빌드 실패 (무시): {e}")
 
@@ -8958,6 +8986,7 @@ async def run_agent_stream(request: Request):
             asyncio.create_task(_maybe_summarize(body.get("sessionId", "default"), body.get("chatHistory", []), gw))
             return
         try:
+            _full_answer_parts = []
             for cont in range(max_continues + 1):
                 text_parts = []
                 stop_reason = ""
@@ -8982,6 +9011,7 @@ async def run_agent_stream(request: Request):
                                 yield f"data: {json.dumps({'thinking': _rtext}, ensure_ascii=False)}\n\n"
                         if "text" in delta:
                             text_parts.append(delta["text"])
+                            _full_answer_parts.append(delta["text"])
                             yield f"data: {json.dumps({'text': delta['text']}, ensure_ascii=False)}\n\n"
                     elif evt_type in ("message_delta", "message_stop"):
                         stop_reason = evt.get("delta", {}).get("stopReason", "") or evt.get("stop_reason", "") or evt.get("stopReason", "") or stop_reason
@@ -9000,6 +9030,31 @@ async def run_agent_stream(request: Request):
                 break
         except Exception as e:
             yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
+        # answer_quality (플래그 게이트). inline=최종이벤트로 대기, deferred=백그라운드+저장.
+        try:
+            from ai_engine.rag.answer_quality import (
+                verify_mode as _vm, enhance_answer as _ea, run_deferred_verification as _rdv,
+            )
+            _mode = _vm(os.environ)
+            _ans = "".join(_full_answer_parts).strip()
+            if _mode != "off" and rag_evidence is not None and _ans:
+                if _mode == "inline":
+                    _r = await _ea(_ans, context_text=rag_evidence.get("context", ""),
+                                   retrieved_chunks=rag_evidence.get("chunks"), gw=gw, env=os.environ)
+                    _meta = _r.get("metadata") or {}
+                    if _meta:
+                        yield f"data: {json.dumps({'answerQuality': _meta}, ensure_ascii=False)}\n\n"
+                elif _mode == "deferred":
+                    import uuid as _uuid
+                    _qid = _uuid.uuid4().hex
+                    yield f"data: {json.dumps({'qualityPending': _qid}, ensure_ascii=False)}\n\n"
+                    _t = asyncio.create_task(_rdv(_ans, rag_evidence.get("context", ""),
+                                                  rag_evidence.get("chunks"), gw,
+                                                  body.get("sessionId", "default"), _qid, os.environ))
+                    _AQ_TASKS.add(_t); _t.add_done_callback(_AQ_TASKS.discard)
+        except Exception as _aqe:
+            print(f"[AnswerQuality] stream 검증 스킵(비차단): {_aqe}")
+
         yield "data: [DONE]\n\n"
         asyncio.create_task(_maybe_summarize(body.get("sessionId", "default"), body.get("chatHistory", []), gw))
 

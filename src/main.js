@@ -2963,6 +2963,35 @@ async function runAgentWorkflow(prompt) {
               }
             } catch (_) {}
           }
+          else if (p.qualityPending) {
+            // deferred 검증: 백그라운드 완료 후 저장소를 폴링해 품질 배지 표시(비차단).
+            try {
+              const qid = p.qualityPending;
+              const sess = chatSessions[activeSessionIdx]?.id || 'default';
+              const targetMsg = msg;
+              let tries = 0;
+              const poll = async () => {
+                tries++;
+                try {
+                  const r = await fetch(`${apiBase()}/api/answer-quality?session=${encodeURIComponent(sess)}&id=${encodeURIComponent(qid)}`);
+                  const j = await r.json();
+                  if (j && j.ready && j.quality) {
+                    targetMsg._answerQuality = j.quality;
+                    const c = j.quality.citation || {};
+                    const f = j.quality.faithfulness || {};
+                    const parts = [];
+                    if (typeof c.verified === 'number' && typeof c.citations_total === 'number' && c.citations_total > 0) parts.push(`인용 ${c.verified}/${c.citations_total} 검증`);
+                    if (f && typeof f.score === 'number' && !f.degraded) parts.push(`충실도 ${(f.score * 100).toFixed(0)}%`);
+                    if (parts.length) addLiveLog('system', `근거 품질(지연): ${parts.join(', ')}`);
+                    else if (f && f.degraded && f.reason) addLiveLog('warning', `충실도 검증 미완료: ${f.reason} — ${(f.feedback || '').slice(0, 120)}`);
+                    return;
+                  }
+                } catch (_) {}
+                if (tries < 30) setTimeout(poll, 6000);  // 최대 ~3분 폴링(느린 게이트웨이 대응)
+              };
+              setTimeout(poll, 4000);
+            } catch (_) {}
+          }
           else if (p.text) { msg.content += p.text; }
           else { msg.content += d; }
         } catch { msg.content += d; }
