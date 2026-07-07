@@ -17,17 +17,25 @@ class _Chunk:
     end_line: int
 
 
-def test_disabled_by_default_passthrough():
-    """마스터 플래그 off(기본) → 응답 그대로, metadata 비어있음(무회귀)."""
-    out = asyncio.run(enhance_answer("ans", "ctx", [], gw=None, env={}))
+def test_explicit_off_passthrough():
+    """AE_ANSWER_QUALITY=0 명시 → 응답 그대로, metadata 비어있음(opt-out)."""
+    out = asyncio.run(enhance_answer("ans", "ctx", [], gw=None, env={"AE_ANSWER_QUALITY": "0"}))
     assert out["answer"] == "ans"
     assert out["metadata"] == {}
 
 
+def test_auto_on_by_default():
+    """기본(미설정) → 자동 ON. 인용 검증(무료)은 gw 없이도 수행되어 metadata 존재."""
+    out = asyncio.run(enhance_answer("근거(a.py:1-2)", "ctx", [], gw=None, env={}))
+    assert out["answer"].startswith("근거")
+    assert "citation" in (out["metadata"] or {})  # 자동 ON → 인용 메타 부착
+
+
 def test_quality_enabled_flag():
-    assert quality_enabled({}) is False
+    assert quality_enabled({}) is True                       # 기본 자동 ON
+    assert quality_enabled({"AE_ANSWER_QUALITY": ""}) is True  # 빈값도 ON
     assert quality_enabled({"AE_ANSWER_QUALITY": "1"}) is True
-    assert quality_enabled({"AE_ANSWER_QUALITY": "0"}) is False
+    assert quality_enabled({"AE_ANSWER_QUALITY": "0"}) is False  # 명시 opt-out
 
 
 def test_citation_metadata_detects_unverified():

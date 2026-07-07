@@ -45,15 +45,16 @@ def test_load_corrupt_file_returns_empty(tmp_path):
     assert qs.load_quality("sess1", env=env) == {}
 
 
-def test_verify_mode_off_when_master_off():
-    assert verify_mode({}) == "off"
-    assert verify_mode({"AE_VERIFY_MODE": "deferred"}) == "off"  # 마스터 off
+def test_verify_mode_off_when_explicit_off():
+    assert verify_mode({"AE_ANSWER_QUALITY": "0"}) == "off"
+    assert verify_mode({"AE_ANSWER_QUALITY": "0", "AE_VERIFY_MODE": "deferred"}) == "off"
 
 
-def test_verify_mode_values():
-    assert verify_mode({"AE_ANSWER_QUALITY": "1"}) == "inline"  # 기본 inline
-    assert verify_mode({"AE_ANSWER_QUALITY": "1", "AE_VERIFY_MODE": "deferred"}) == "deferred"
-    assert verify_mode({"AE_ANSWER_QUALITY": "1", "AE_VERIFY_MODE": "junk"}) == "inline"
+def test_verify_mode_default_is_deferred_auto_on():
+    assert verify_mode({}) == "deferred"                          # 자동 ON + 비차단 기본
+    assert verify_mode({"AE_ANSWER_QUALITY": "1"}) == "deferred"
+    assert verify_mode({"AE_VERIFY_MODE": "inline"}) == "inline"  # 빠른 게이트웨이 선택
+    assert verify_mode({"AE_VERIFY_MODE": "junk"}) == "deferred"  # 잘못된 값 → deferred
 
 
 def test_run_deferred_persists_result(tmp_path):

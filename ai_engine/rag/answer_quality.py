@@ -27,8 +27,16 @@ def _truthy(v) -> bool:
 
 
 def quality_enabled(env: Optional[dict] = None) -> bool:
+    """근거 품질 검증 활성 여부. **기본 자동 ON**(사용자 공수 0).
+
+    끄려면 AE_ANSWER_QUALITY=0/false 명시. 미설정/빈값이면 활성.
+    기본 모드는 deferred(비차단)라 답변 UX에 지연을 주지 않는다.
+    """
     env = env if env is not None else os.environ
-    return _truthy(env.get("AE_ANSWER_QUALITY"))
+    val = env.get("AE_ANSWER_QUALITY")
+    if val is None or str(val).strip() == "":
+        return True
+    return _truthy(val)
 
 
 def _ranges_from_chunks(chunks) -> List[RetrievedRange]:
@@ -78,8 +86,10 @@ async def enhance_answer(answer: str, context_text: str, retrieved_chunks=None,
     except Exception as e:
         metadata["citation_error"] = str(e)
 
-    # 2) 충실도 검증 (opt-in + gateway)
-    if _truthy(env.get("AE_VERIFY")) and gw is not None and context_text:
+    # 2) 충실도 검증 (기본 자동 ON — 끄려면 AE_VERIFY=0). gw 없으면 자동 skip.
+    _v = env.get("AE_VERIFY")
+    _verify_on = True if (_v is None or str(_v).strip() == "") else _truthy(_v)
+    if _verify_on and gw is not None and context_text:
         model = env.get("AE_VERIFY_MODEL") or "anthropic.claude-3-5-sonnet-20241022-v2:0"
         try:
             timeout = float(env.get("AE_VERIFY_TIMEOUT_MS", "10000")) / 1000.0
@@ -115,8 +125,9 @@ def verify_mode(env: Optional[dict] = None) -> str:
     env = env if env is not None else os.environ
     if not quality_enabled(env):
         return "off"
-    mode = str(env.get("AE_VERIFY_MODE", "inline")).strip().lower()
-    return mode if mode in ("inline", "deferred", "off") else "inline"
+    # 기본 deferred — 자동 ON이어도 응답을 막지 않도록(비차단). 빠른 게이트웨이면 inline 선택 가능.
+    mode = str(env.get("AE_VERIFY_MODE") or "deferred").strip().lower()
+    return mode if mode in ("inline", "deferred", "off") else "deferred"
 
 
 async def run_deferred_verification(answer: str, context_text: str, retrieved_chunks,
@@ -128,9 +139,12 @@ async def run_deferred_verification(answer: str, context_text: str, retrieved_ch
     반환은 저장한 metadata(관측/테스트용).
     """
     from ai_engine.rag.quality_store import save_quality
+    # deferred는 비차단이므로 충실도 타임아웃을 넉넉히(기본 120s) — 응답 UX 영향 없음.
+    _env = dict(env if env is not None else os.environ)
+    _env.setdefault("AE_VERIFY_TIMEOUT_MS", "120000")
     try:
         res = await enhance_answer(answer, context_text=context_text,
-                                   retrieved_chunks=retrieved_chunks, gw=gw, env=env)
+                                   retrieved_chunks=retrieved_chunks, gw=gw, env=_env)
         meta = res.get("metadata") or {}
     except Exception as e:  # noqa: BLE001
         meta = {"error": str(e) or type(e).__name__, "reason": "error"}

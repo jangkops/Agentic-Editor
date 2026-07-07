@@ -10,12 +10,15 @@ RAG Answer Quality (Ultra Production).
 
 라이브 게이트웨이 실측 결과: 인증·DNS·TCP는 즉시(<3s)지만 **모델 호출(/converse·스트리밍 둘 다)이 110~285초+** 로 매우 느림(비동기 job 경로 추정). 따라서 인라인(응답 차단) 검증은 부적합.
 
-`AE_VERIFY_MODE` 3모드 도입:
-- **off**(기본, `AE_ANSWER_QUALITY` 미설정 시): 검증 없음 = 무회귀.
-- **inline**: `[DONE]` 전 동기 대기 후 `answerQuality` SSE 방출. **빠른 게이트웨이 전용**.
-- **deferred**(느린 게이트웨이 최적): `[DONE]` 이후 백그라운드 검증 → 세션별 품질 저장소 기록.
+`AE_VERIFY_MODE` 3모드 — **기본 자동 ON(deferred), 사용자 공수 0**:
+- **deferred**(★기본값, 자동 ON): `[DONE]` 이후 백그라운드 검증 → 세션별 품질 저장소 기록.
   서버가 `qualityPending` id를 SSE로 통지, 프론트가 `GET /api/answer-quality`를 폴링해 배지 표시.
-  답변 스트림은 즉시(무지연), 품질은 준비되면 부착.
+  답변 스트림은 즉시(무지연), 품질은 준비되면 부착. 비차단이라 자동 ON이어도 UX 영향 0.
+  충실도 타임아웃은 비차단이므로 넉넉히(기본 120s).
+- **inline**: `[DONE]` 전 동기 대기 후 `answerQuality` SSE 방출. 빠른 게이트웨이에서만 선택(`AE_VERIFY_MODE=inline`).
+- **off**: 완전 비활성. opt-out은 `AE_ANSWER_QUALITY=0` 명시(그 외/미설정은 자동 ON).
+
+인용 검증(무료·게이트웨이 불요)은 항상 수행, 충실도 검증(LLM)은 gw 있을 때 자동 수행.
 
 배선: `run_agent_stream`·`run_agent_with_tools` 양 경로 + `quality_store` + 부팅 스모크(양 모드 /health 200) 검증.
 
