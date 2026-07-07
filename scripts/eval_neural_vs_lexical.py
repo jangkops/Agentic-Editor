@@ -48,6 +48,9 @@ def run(project=os.path.join("ai_engine", "rag"), k=10,
     if not emb.is_ready:
         out["neural"] = {"status": "unavailable (fastembed/model load failed)"}
         return out
+    # 폴백이 일어났으면 실제 로드된 모델명으로 정직하게 갱신
+    out["model_requested"] = model
+    out["model"] = emb.model_name
 
     sem = HybridSearcher(alpha=0.7)
     sem.index(chunks)

@@ -51,13 +51,15 @@ def get_searcher(
         searcher = HybridSearcher(alpha=0.6)
         searcher.index(idx.chunks)
 
-        # 벡터 임베딩 시도
+        # 벡터 임베딩 시도 — neural(fastembed) 우선 자동 선택, 미가용 시 TF-IDF 폴백.
         try:
-            if gateway_client:
-                embedder = BedrockEmbedder(gateway_client=gateway_client)
-            else:
-                # GatewayClient가 없으면 BM25만 사용
-                raise RuntimeError("GatewayClient 필요")
+            from ai_engine.rag.embedder import get_embedding_provider
+            # 공수 0: 기본 provider를 neural로. 게이트웨이 불필요(로컬 ONNX)라 gw 없어도
+            # 활성. fastembed/모델 미가용 시 get_embedding_provider가 TF-IDF로 정직 폴백한다.
+            # 끄려면 AE_EMBED_PROVIDER=tfidf(또는 다른 값) 명시.
+            _emb_env = dict(os.environ)
+            _emb_env.setdefault("AE_EMBED_PROVIDER", "fastembed")
+            embedder = get_embedding_provider(_emb_env, gateway_client=gateway_client)
             # 캐시된 벡터 저장소 로드 시도
             # 우선순위:
             # 1) /fsx/home/<user>/.cache/ae_rag/<projhash> — FSx 사용자 홈 (원격 모드)
@@ -139,7 +141,9 @@ def get_searcher(
                 except Exception as _e:
                     print(f"[RAG] 캐시 삭제 실패: {_e}")
 
-                print(f"[RAG] {len(idx.chunks)}개 청크 TF-IDF 임베딩...")
+                print(f"[RAG] {len(idx.chunks)}개 청크 임베딩 "
+                      f"(provider={type(embedder).__name__}, model="
+                      f"{getattr(embedder, 'model_name', 'tfidf')})...")
                 store = VectorStore()
                 vectors = embedder.embed_batch(texts)
                 for i, vec in enumerate(vectors):

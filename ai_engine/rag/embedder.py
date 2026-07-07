@@ -387,8 +387,15 @@ def _bundled_fastembed_cache() -> Optional[str]:
 class FastEmbedProvider:
     """fastembed(ONNX) 다국어 임베딩. query/passage 비대칭 프리픽스 지원."""
 
-    # 기본: multilingual-e5-small (경량, 다국어). 필요시 bge-m3 등으로 교체.
-    def __init__(self, model_name: str = "intfloat/multilingual-e5-small",
+    # 기본: paraphrase-multilingual-MiniLM-L12-v2 (경량 384d, 다국어, 지원 확실).
+    # 미지원 모델명이 들어오면 _resolve_model이 지원 다국어 모델로 자동 폴백한다.
+    _SUPPORTED_FALLBACKS = (
+        "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        "intfloat/multilingual-e5-large",
+        "sentence-transformers/all-MiniLM-L6-v2",
+    )
+
+    def __init__(self, model_name: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
                  use_e5_prefix: bool = True, gateway_client=None,
                  cache_dir: Optional[str] = None):
         self._model_name = model_name
@@ -402,9 +409,28 @@ class FastEmbedProvider:
         self._ready = False
         self._init()
 
+    def _resolve_model(self, requested: str) -> str:
+        """요청 모델이 설치된 fastembed에서 미지원이면 지원 다국어 모델로 폴백(정직)."""
+        try:
+            from fastembed import TextEmbedding
+            supported = {m["model"] for m in TextEmbedding.list_supported_models()}
+        except Exception:
+            return requested  # 목록 조회 불가 → 원본 그대로 시도
+        if requested in supported:
+            return requested
+        for cand in self._SUPPORTED_FALLBACKS:
+            if cand in supported:
+                print(f"[FastEmbed] '{requested}' 미지원 → '{cand}'로 폴백")
+                return cand
+        return requested
+
     def _init(self):
         try:
             from fastembed import TextEmbedding
+            resolved = self._resolve_model(self._model_name)
+            if resolved != self._model_name:
+                self._model_name = resolved
+                self._use_prefix = "e5" in resolved.lower()
             kwargs = {"model_name": self._model_name}
             if self._cache_dir:
                 kwargs["cache_dir"] = self._cache_dir
@@ -465,6 +491,11 @@ class FastEmbedProvider:
     @property
     def is_ready(self) -> bool:
         return self._ready
+
+    @property
+    def model_name(self) -> str:
+        # 폴백 후 실제 로드된 모델명(정직한 관측/로그용).
+        return self._model_name
 
     @property
     def vocab_size(self) -> int:
