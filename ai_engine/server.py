@@ -8728,23 +8728,51 @@ async def classify_intent(request: Request):
         })
 
     gw = _get_gw(aws_profile, bedrock_user)
-    # task별 자동 라우팅 — 항상 최신 Haiku 선택
-    classifier_model = _specialized_model_for_task(
+    # task별 자동 라우팅 — Haiku 우선(빠름/저렴)이되, 특정 Haiku가
+    # 게이트웨이에서 응답이 느리거나 불가할 수 있으므로(예: haiku-4-5
+    # 무응답 → 10s 하드컷 → 항상 degraded 되던 문제), 확정 활성 모델
+    # (Sonnet, file_generation tier)로 폴백하는 후보 체인을 순차 시도한다.
+    _primary_cls = _specialized_model_for_task(
         "intent_classifier", None,
         aws_profile=aws_profile, bedrock_user=bedrock_user,
     )
+    _fallback_cls = _specialized_model_for_task(
+        "file_generation", None,
+        aws_profile=aws_profile, bedrock_user=bedrock_user,
+    )
+    _cls_candidates = []
+    for _m in (_primary_cls, _fallback_cls):
+        if _m and _m not in _cls_candidates:
+            _cls_candidates.append(_m)
+    # 후보별 타임아웃 — 비스트리밍 converse는 게이트웨이에서 ~40-50s로
+    # 매우 느려 분류가 항상 타임아웃됐다. 빠른 스트리밍 경로(~8s 첫 토큰)로
+    # 호출하고 현실적 타임아웃을 둔다.
+    _cls_timeouts = [25, 35]
 
     try:
-        result = await asyncio.wait_for(
-            gw.converse(
-                model_id=classifier_model,
-                messages=[{"role": "user", "content": [{"text": prompt[:1500]}]}],
-                system_prompt=INTENT_CLASSIFIER_PROMPT,
-            ),
-            timeout=10
-        )
-        if result.get("decision") != "ALLOW":
-            raise RuntimeError(f"classifier failed: {result.get('error') or result.get('decision')}")
+        result = None
+        _cls_last_err = None
+        for _idx, _cm in enumerate(_cls_candidates):
+            _to = _cls_timeouts[_idx] if _idx < len(_cls_timeouts) else 35
+            try:
+                _r = await asyncio.wait_for(
+                    gw.converse_stream_live(
+                        model_id=_cm,
+                        messages=[{"role": "user", "content": [{"text": prompt[:1500]}]}],
+                        system_prompt=INTENT_CLASSIFIER_PROMPT,
+                    ),
+                    timeout=_to,
+                )
+            except Exception as _ce:
+                _cls_last_err = _ce
+                print(f"[Intent] 후보 {_cm} 실패({type(_ce).__name__ or 'timeout'}) → 다음 후보 시도")
+                continue
+            if _r.get("decision") == "ALLOW":
+                result = _r
+                break
+            _cls_last_err = RuntimeError(f"classifier failed: {_r.get('error') or _r.get('decision')}")
+        if result is None:
+            raise _cls_last_err or RuntimeError("classifier: 모든 후보 실패")
 
         output = result.get("output", {}).get("message", {}).get("content", [])
         text = "\n".join(c.get("text", "") for c in output if "text" in c).strip()
