@@ -64,6 +64,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   ssoLogin: (profile) => ipcRenderer.invoke('sso:login', profile),
   getCredentials: (profile) => ipcRenderer.invoke('sso:get-credentials', profile),
   getBedrockUsername: (profile) => ipcRenderer.invoke('sso:get-bedrock-username', profile),
+  verifyBedrockUsername: (profile, name) => ipcRenderer.invoke('sso:verify-bedrock-username', profile, name),
   getSSOExpiry: (profile) => ipcRenderer.invoke('sso:get-expiry', profile),
   // Onboarding — ~/.aws/config에 SSO 프로파일 블록 기록 (spec app-deployment-readiness §6.1/6.2).
   // input: { name, startUrl, region, accountId, roleName } (secret-free)

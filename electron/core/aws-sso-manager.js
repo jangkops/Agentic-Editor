@@ -638,6 +638,44 @@ class AwsSsoManager {
   }
 
   /**
+   * 수동 입력한 BedrockUser 이름을 저장 전 검증한다 (타인 계정 도용 방지).
+   *
+   * 현재 로그인한 사용자의 SSO 자격증명으로 `BedrockUser-{name}` role을 실제
+   * assume 시도한다. 성공해야만 그 이름이 "이 사용자에게 실제로 허용된" 것이다.
+   * 다른 사용자 이름(예: 남의 BedrockUser)을 입력하면 — IAM trust policy가
+   * 신원별로 assume를 제한하는 한 — assume가 실패하므로 저장이 거부된다.
+   *
+   * 반환 계약: { ok: boolean, reason?: string, account?: string }
+   * 예외를 던지지 않는다(항상 객체 반환).
+   *
+   * 주의(정직): 근본 방어는 각 BedrockUser-{name} role의 IAM trust policy가
+   * "해당 SSO 신원만 assume 허용"하도록 설정되는 것이다. 이 함수는 그 정책을
+   * 클라이언트에서 조기 강제·피드백하는 보조 계층이다. trust policy가 느슨하면
+   * (누구나 모든 BedrockUser assume 가능) 이 검증도 통과하므로, IAM 설정이 필수.
+   */
+  async verifyBedrockUsername(profileName, name) {
+    const clean = String(name || '').trim();
+    if (!clean) return { ok: false, reason: 'empty' };
+    try {
+      const cfg = resolveSsoConfig(profileName);
+      const region = cfg.region || 'us-west-2';
+      const credentials = fromSSO({ profile: profileName });
+      const sts = new STSClient({ region, credentials });
+      const ident = await sts.send(new GetCallerIdentityCommand({}));
+      const account = ident.Account;
+      await sts.send(new AssumeRoleCommand({
+        RoleArn: `arn:aws:iam::${account}:role/BedrockUser-${clean}`,
+        RoleSessionName: 'verify',
+        DurationSeconds: 900,
+      }));
+      return { ok: true, account };
+    } catch (e) {
+      // AccessDenied → 이 사용자는 해당 BedrockUser를 assume할 권한이 없음(도용 차단).
+      return { ok: false, reason: (e && (e.name || e.Code)) || 'assume-failed' };
+    }
+  }
+
+  /**
    * 온보딩 입력으로 ~/.aws/config에 SSO 프로파일 블록을 append/생성한다 (spec §6.1, R4.2/4.5/4.6).
    *
    * - buildSsoProfileBlock로 secret-free ini 블록을 생성한다.

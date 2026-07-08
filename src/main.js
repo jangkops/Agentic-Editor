@@ -686,9 +686,21 @@ async function showSSODialog(isInitial) {
       // Step 3: 성공
       await window.electronAPI?.saveSettings?.({ awsProfile: profile });
       state.settings = { awsProfile: profile };
-      // BedrockUser 이름 저장
+      // BedrockUser 이름 저장 — 저장 전 assume-role 검증(타인 계정 도용 방지).
       const buInput = o.querySelector('#sso-bedrock-user')?.value?.trim();
       if (buInput) {
+        st.className = 'status-text'; st.textContent = `BedrockUser-${buInput} 권한 확인 중...`;
+        let vr = { ok: true };
+        try {
+          if (window.electronAPI?.verifyBedrockUsername) {
+            vr = await window.electronAPI.verifyBedrockUsername(profile, buInput);
+          }
+        } catch (_) { vr = { ok: false, reason: 'verify-error' }; }
+        if (!vr.ok) {
+          st.className = 'status-text error';
+          st.textContent = `✗ 'BedrockUser-${buInput}' 권한 없음(${vr.reason || 'AccessDenied'}) — 본인의 BedrockUser 이름을 입력하세요. 저장하지 않았습니다.`;
+          return;  // 검증 실패 → 저장/로그인 완료 중단
+        }
         state.settings.bedrockUser = buInput;
         await window.electronAPI?.saveSettings?.(state.settings);
       }
@@ -6443,10 +6455,24 @@ function renderSettingsTab(o, profiles) {
     body.querySelector('#acc-bu-save').addEventListener('click', async () => {
       const v = body.querySelector('#acc-bu').value.trim();
       if (!v) return;
+      const st = body.querySelector('#acc-status');
+      // 저장 전 assume-role 검증 — 본인이 실제 assume 가능한 BedrockUser만 허용(도용 방지).
+      st.className = 'status-text'; st.textContent = `BedrockUser-${v} 권한 확인 중...`;
+      let vr = { ok: true };
+      try {
+        const prof = state.settings?.awsProfile || 'bedrock-gw';
+        if (window.electronAPI?.verifyBedrockUsername) {
+          vr = await window.electronAPI.verifyBedrockUsername(prof, v);
+        }
+      } catch (_) { vr = { ok: false, reason: 'verify-error' }; }
+      if (!vr.ok) {
+        st.className = 'status-text error';
+        st.textContent = `✗ 'BedrockUser-${v}' 권한 없음(${vr.reason || 'AccessDenied'}) — 본인 이름만 저장 가능`;
+        return;
+      }
       state.settings.bedrockUser = v;
       await window.electronAPI?.saveSettings?.(state.settings);
-      const st = body.querySelector('#acc-status');
-      st.className = 'status-text success'; st.textContent = '✓ 저장됨';
+      st.className = 'status-text success'; st.textContent = '✓ 저장됨(권한 확인 완료)';
       setTimeout(() => { st.textContent = ''; }, 1500);
     });
     body.querySelector('#acc-switch').addEventListener('click', async () => {

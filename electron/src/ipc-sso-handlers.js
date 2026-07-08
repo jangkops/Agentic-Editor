@@ -61,6 +61,17 @@ function registerSsoHandlers(ssoManager) {
     }
   });
 
+  // 수동 입력 BedrockUser 이름을 저장 전 assume-role로 검증 (타인 계정 도용 방지).
+  // 반환: { ok: boolean, reason?: string }
+  ipcMain.handle('sso:verify-bedrock-username', async (_, profile, name) => {
+    try {
+      return await ssoManager.verifyBedrockUsername(profile, name);
+    } catch (error) {
+      console.error(`[sso:verify-bedrock-username] Error for ${profile}/${name}:`, error.message);
+      return { ok: false, reason: (error && error.message) || 'error' };
+    }
+  });
+
   /**
    * SSO 토큰 만료 시간 가져오기
    * AWS SSO 캐시 파일에서 읽음
