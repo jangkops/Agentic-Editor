@@ -9719,7 +9719,22 @@ async def run_agent_parallel(request: Request):
     """병렬 모델 호출 — 서버에서 동시 실행, SSE로 각 모델 결과 전달."""
     body = await request.json()
     prompt = body.get("prompt", "")
-    models = body.get("models", [])
+    _raw_models = body.get("models", [])
+    # models 정규화 — 항목이 문자열(modelId)로 와도 dict로 변환.
+    # (디버그 print의 s.get('modelId')가 문자열에서 크래시 → SSE 스트림 전체가
+    #  죽어 모든 슬롯이 에러로 표시되던 문제 방지. 프론트/구버전 무관하게 견고.)
+    models = []
+    for _i, _mm in enumerate(_raw_models if isinstance(_raw_models, list) else []):
+        if isinstance(_mm, str):
+            models.append({"modelId": _mm, "slotId": f"slot-{_i+1}", "systemPrompt": ""})
+        elif isinstance(_mm, dict):
+            models.append({
+                "modelId": _mm.get("modelId") or _mm.get("model") or "",
+                "slotId": _mm.get("slotId") or f"slot-{_i+1}",
+                "systemPrompt": _mm.get("systemPrompt", "") or "",
+                **{k: v for k, v in _mm.items() if k not in ("modelId", "slotId", "systemPrompt")},
+            })
+        # 그 외 타입은 건너뜀(방어)
     aws_profile = body.get("awsProfile", os.environ.get("AWS_PROFILE", "bedrock-gw"))
     bedrock_user = body.get("bedrockUser", os.environ.get("BEDROCK_USER", ""))
     project_path = body.get("projectPath", "")
@@ -9932,7 +9947,7 @@ async def run_agent_parallel(request: Request):
         for i in range(0, len(models), batch_size):
             batch = models[i:i+batch_size]
             _batch_t0 = _time.time()
-            print(f"[Parallel] BATCH start size={len(batch)} models={[s.get('modelId') for s in batch]}")
+            print(f"[Parallel] BATCH start size={len(batch)} models={[(s.get('modelId') if isinstance(s, dict) else s) for s in batch]}")
             # 모든 task를 즉시 스케줄링 — 이벤트 루프가 다음 await에서 모두 시작
             tasks = [asyncio.create_task(call_model(slot)) for slot in batch]
             # as_completed로 완료 순서대로 yield
