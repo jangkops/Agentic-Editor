@@ -29,7 +29,14 @@ class ProjectIndexer:
     IGNORE_DIRS = {
         'node_modules', '__pycache__', '.git', '.venv', 'dist', 'build',
         '.next', 'coverage', '.nyc_output', '.DS_Store', 'venv', 'env',
+        # 빌드/패키징 산출물 — 번들된 서드파티 코드가 대량 인덱싱돼 청크가
+        # 폭증(수십만)하고 임베딩이 프로세스를 마비시키던 원인. 반드시 제외.
+        'ai_engine_dist', 'dist_electron', 'build-python-work',
+        'out', 'target', 'vendor', '.gradle', '.idea', '.cache', 'site-packages',
     }
+    # 프로젝트당 총 청크 상한 — 비정상적으로 큰 트리(대형 데이터/생성물)에서
+    # 임베딩 시간·메모리 폭발을 막는 안전망.
+    MAX_TOTAL_CHUNKS = int(os.environ.get("AE_RAG_MAX_CHUNKS", "20000"))
     CODE_EXTS = {
         'js', 'ts', 'jsx', 'tsx', 'py', 'java', 'go', 'rs', 'c', 'cpp',
         'h', 'rb', 'php', 'swift', 'kt', 'css', 'scss', 'html', 'vue',
@@ -97,6 +104,9 @@ class ProjectIndexer:
 
     def _index_file(self, base: str, rel_path: str, ext: str):
         """파일을 청크로 분할."""
+        # 총 청크 상한 도달 시 더 이상 인덱싱하지 않음(폭발 방지 안전망).
+        if len(self.chunks) >= self.MAX_TOTAL_CHUNKS:
+            return
         full = os.path.join(base, rel_path)
         try:
             with open(full, 'r', encoding='utf-8', errors='ignore') as fh:

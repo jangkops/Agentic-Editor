@@ -9749,7 +9749,9 @@ async def run_agent_parallel(request: Request):
     if project_path and _is_code_related(prompt):
         try:
             from ai_engine.rag.context_builder import build_system_prompt
-            rag_context = build_system_prompt(
+            import functools as _ft
+            _rag_fn = _ft.partial(
+                build_system_prompt,
                 project_path=project_path,
                 query=prompt,
                 open_file=open_file,
@@ -9758,6 +9760,16 @@ async def run_agent_parallel(request: Request):
                 bedrock_user=bedrock_user,
                 gateway_client=gw,
             )
+            # 대형 프로젝트에서 첫 RAG 인덱싱/임베딩은 수십 초~분이 걸린다.
+            # 동기 호출은 이벤트 루프를 블로킹해 SSE 응답이 지연되고 모든 슬롯이
+            # 타임아웃(에러)된다. 스레드에서 실행 + 예산 초과 시 RAG 없이 진행
+            # (인덱스는 백그라운드에서 계속 구축 → 다음 호출부터 캐시 적중).
+            rag_context = await asyncio.wait_for(
+                asyncio.get_event_loop().run_in_executor(None, _rag_fn),
+                timeout=float(os.environ.get("AE_RAG_BUDGET_S", "12")),
+            )
+        except asyncio.TimeoutError:
+            print("[RAG] 컨텍스트 빌드 예산 초과 — RAG 없이 진행 (백그라운드 인덱싱 지속, 다음 호출 캐시)")
         except Exception as e:
             print(f"[RAG] 컨텍스트 빌드 실패 (무시): {e}")
 
