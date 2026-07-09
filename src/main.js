@@ -2376,7 +2376,12 @@ async function runOrchestrated(prompt) {
             if (a && ev.status === 'done') a.toolCount++;
           } else if (ev.type === 'agent_done') {
             const a = agentStates.get(ev.taskId);
-            if (a) { a.status = 'done'; a.toolCount = ev.toolCount || a.toolCount; }
+            if (a) {
+              a.status = 'done';
+              a.toolCount = ev.toolCount || a.toolCount;
+              // 실제 생성된 파일 목록 보존 — 후속 카드의 ".generated 확인" 노출 판단에 사용
+              a.files = Array.isArray(ev.verifiedFiles) ? ev.verifiedFiles : (a.files || []);
+            }
             addLiveLog('system', `[${ev.taskId}] 완료 — 도구 ${ev.toolCount || 0}회 사용`);
             // 진행 중 라벨 업데이트
             const thinkMsg = state.messages.find(m => m._thinking);
@@ -2500,34 +2505,40 @@ async function runOrchestrated(prompt) {
       document.dispatchEvent(new CustomEvent('generated-folder:refresh'));
     } catch (_e) { /* best-effort */ }
 
-    // 후속 추천 카드 — 도구를 사용하지 않은 에이전트가 있으면 재시도 권유
-    if (noToolCount > 0 && doneCount > 0) {
+    // 후속 추천 카드 (강제성/불필요 UI 제거):
+    //  · 실제 생성된 파일이 있을 때만 ".generated 폴더 확인" 버튼을 노출(개수 표기).
+    //  · "추가 요청" 버튼 제거 — 입력창이 항상 있어 단순 포커스 이동은 중복.
+    //  · 파일 산출물이 없는 순수 텍스트 응답이면 완료 카드를 띄우지 않음
+    //    (상단 "오케스트레이션 완료 — N개 성공" 시스템 메시지로 충분).
+    const _genFileCount = [...agentStates.values()]
+      .reduce((n, a) => n + ((a.files && a.files.length) || 0), 0);
+    if (noToolCount > 0 && doneCount > 0 && _genFileCount === 0) {
+      // 파일이 필요했을 수 있는데 아무 파일도 생성되지 않음 → 재시도 권유.
       state.messages.push({
         role: 'system',
         _isRecommendCard: true,
         _recommendData: {
-          title: '일부 에이전트가 파일을 생성하지 않았습니다',
-          reason: `${noToolCount}개 에이전트가 도구를 사용하지 않고 텍스트만 출력했습니다. 더 강한 모델로 재시도하면 실제 파일이 생성될 가능성이 높습니다.`,
+          title: '파일이 생성되지 않았습니다',
+          reason: `${noToolCount}개 에이전트가 도구를 사용하지 않고 텍스트만 출력했습니다. 파일 산출물이 필요했다면 더 강한 모델로 재시도하세요.`,
           actions: [
             { key: 'retry-stronger', label: '더 강한 모델로 재시도', primary: true },
-            { key: 'view-generated', label: '.generated 폴더 확인' },
           ],
           hasHallucination: true,
           originalPrompt: prompt,
           doneResults: [],
         },
-        content: '[추천] 일부 에이전트 재시도',
+        content: '[추천] 재시도',
       });
-    } else if (doneCount > 0) {
+    } else if (doneCount > 0 && _genFileCount > 0) {
+      // 실제 파일이 생성된 경우에만 산출물 바로가기 카드를 띄운다.
       state.messages.push({
         role: 'system',
         _isRecommendCard: true,
         _recommendData: {
-          title: '작업 완료 — 다음 단계',
-          reason: `${doneCount}개 에이전트가 작업을 완료했습니다. 결과를 검토하거나 추가 작업을 진행할 수 있습니다.`,
+          title: '작업 완료 — 생성된 파일 확인',
+          reason: `${doneCount}개 에이전트가 작업을 완료하고 ${_genFileCount}개 파일을 생성했습니다.`,
           actions: [
-            { key: 'view-generated', label: '.generated 폴더 확인', primary: true },
-            { key: 'refine', label: '추가 요청' },
+            { key: 'view-generated', label: `.generated 폴더 확인 (${_genFileCount})`, primary: true },
           ],
           hasHallucination: false,
           originalPrompt: prompt,
