@@ -136,8 +136,21 @@ function registerGitHandlers() {
       // 출력 형식은 "path:line:text". 매치가 없으면 git grep이 비-영으로 종료 →
       // run()이 throw → 아래 catch에서 [] 반환(정상 흐름).
       // (참고: git 워크트리 밖 폴더는 검색되지 않는다 — .gitignore/바이너리 자동 제외 이점.)
-      const cmd = `git grep --no-color -n -I ${ci} -e "${q}"`.replace(/\s+/g, ' ').trim();
-      const result = await run(cmd, { cwd: dirPath, timeout: 15000 });
+      let result = '';
+      try {
+        const cmd = `git grep --no-color -n -I ${ci} -e "${q}"`.replace(/\s+/g, ' ').trim();
+        result = await run(cmd, { cwd: dirPath, timeout: 15000 });
+      } catch (_gitErr) {
+        // git 저장소가 아니거나(=fatal: not a git repository) 매치 없음 →
+        // git 비의존 재귀 grep 으로 폴백. 열린 폴더가 git repo가 아니어도 검색된다.
+        // (cwd 옵션으로 경로 전달 → 공백 포함 경로도 안전.)
+        const excl = [
+          'node_modules', '.git', '.venv', 'dist', 'build', '__pycache__',
+          'ai_engine_dist', 'dist_electron', '.next', 'coverage', 'venv',
+        ].map((d) => `--exclude-dir=${d}`).join(' ');
+        const cmd2 = `grep -rn -I ${ci} ${excl} -e "${q}" .`.replace(/\s+/g, ' ').trim();
+        result = await run(cmd2, { cwd: dirPath, timeout: 15000 });
+      }
 
       const byFile = new Map();
       for (const line of result.split('\n')) {

@@ -484,6 +484,47 @@ function registerProjectHandlers() {
         }
       }
 
+      // 루트에 의존성 파일이 없으면 depth-1 하위 디렉터리 스캔.
+      // 프로젝트 루트를 열었지만 deps가 ai_engine/ 등 하위에 있는 경우 대응.
+      const _hasAny = () =>
+        Object.keys(result.production).length ||
+        Object.keys(result.development).length ||
+        result.python.length;
+      if (!_hasAny()) {
+        try {
+          const IGNORE = new Set([
+            'node_modules', '.git', '.venv', 'dist', 'build', '__pycache__',
+            'ai_engine_dist', 'dist_electron', '.next', 'coverage', 'venv', 'env',
+          ]);
+          const subs = fs
+            .readdirSync(dirPath, { withFileTypes: true })
+            .filter((e) => e.isDirectory() && !e.name.startsWith('.') && !IGNORE.has(e.name))
+            .slice(0, 40);
+          for (const sub of subs) {
+            const subDir = path.join(dirPath, sub.name);
+            const subReq = path.join(subDir, 'requirements.txt');
+            const subPkg = path.join(subDir, 'package.json');
+            if (fs.existsSync(subReq)) {
+              try {
+                const content = fs.readFileSync(subReq, 'utf-8');
+                result.python = content
+                  .split('\n')
+                  .map((l) => l.trim())
+                  .filter((l) => l && !l.startsWith('#'));
+              } catch {}
+            }
+            if (fs.existsSync(subPkg)) {
+              try {
+                const pkg = JSON.parse(fs.readFileSync(subPkg, 'utf-8'));
+                if (!Object.keys(result.production).length) result.production = pkg.dependencies || {};
+                if (!Object.keys(result.development).length) result.development = pkg.devDependencies || {};
+              } catch {}
+            }
+            if (_hasAny()) break;
+          }
+        } catch {}
+      }
+
       return result;
     } catch (error) {
       console.error('[project:dependencies] Error:', error.message);
