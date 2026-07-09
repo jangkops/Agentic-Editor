@@ -8644,17 +8644,26 @@ async def list_models(request: Request):
             catalog = _oc.merge_openai_into_catalog(catalog, _openai_entries)
         except Exception as _oe:
             print(f"[Models] OpenAI 병합 실패 → Bedrock-only: {str(_oe)[:200]}")
+        _text_count = sum(len(v) for v in catalog.values())
+        _image_count = sum(len(v) for v in image_catalog.values())
+        _video_count = sum(len(v) for v in video_catalog.values())
+        _embed_count = sum(len(v) for v in embed_catalog.values())
+        _rerank_count = sum(len(v) for v in rerank_catalog.values())
         return JSONResponse(content={
             "models": catalog,
             "image_models": image_catalog,
             "video_models": video_catalog,
             "embed_models": embed_catalog,
             "rerank_models": rerank_catalog,
-            "count": sum(len(v) for v in catalog.values()),
-            "image_count": sum(len(v) for v in image_catalog.values()),
-            "video_count": sum(len(v) for v in video_catalog.values()),
-            "embed_count": sum(len(v) for v in embed_catalog.values()),
-            "rerank_count": sum(len(v) for v in rerank_catalog.values()),
+            # `count`는 프런트 드롭다운(ALL_MODELS)이 실제로 병합해 보여주는
+            # 전체 호출가능 모델 수(text+image+video+embed+rerank)와 일치시킨다.
+            # 과거엔 text-only(예: 74)만 반환해 실제 카탈로그(~100)와 불일치했다.
+            "count": _text_count + _image_count + _video_count + _embed_count + _rerank_count,
+            "text_count": _text_count,
+            "image_count": _image_count,
+            "video_count": _video_count,
+            "embed_count": _embed_count,
+            "rerank_count": _rerank_count,
         })
     except Exception as e:
         return JSONResponse(content={"models": {}, "error": str(e)})
