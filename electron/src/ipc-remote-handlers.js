@@ -359,6 +359,26 @@ function registerRemoteHandlers(deps) {
     } catch (err) { return { ok: false, error: err && err.message }; }
   });
 
+  // --- remote:go-local ---
+  // Explicit "return to local" action used by the renderer when the user
+  // opens a LOCAL folder. Deactivates remote routing UNCONDITIONALLY so
+  // subsequent fs/terminal/git/project IPC use the local transport. Does
+  // NOT tear down the SSH session(s) — the user can reconnect/switch back
+  // via the host picker. Idempotent (safe to call when already local).
+  ipcMain.handle('remote:go-local', () => {
+    try {
+      const deps = getConnectDeps();
+      // Stop routing to any remote session.
+      if (manager) { try { manager.switchActive(null); } catch (_e) { /* ignore */ } }
+      if (deps.sessionRouter) deps.sessionRouter.setActive(null);
+      // Local ai_engine must be running again for chat/quota to work.
+      if (processManager && typeof processManager.startPython === 'function') {
+        try { processManager.startPython(); } catch (_e) { /* ignore */ }
+      }
+      return { ok: true };
+    } catch (err) { return { ok: false, error: err && err.message }; }
+  });
+
   // --- remote:switch-active ---
   ipcMain.handle('remote:switch-active', (_, { alias }) => {
     try {

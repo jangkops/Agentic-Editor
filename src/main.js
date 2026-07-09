@@ -5275,6 +5275,12 @@ function initFileExplorer() {
     if (window.electronAPI?.openFolder) {
       const p = await window.electronAPI.openFolder();
       if (p) {
+        // Opening a LOCAL folder must deactivate any lingering remote routing
+        // so fs/terminal/git/project IPC use the local transport. Without this
+        // a prior SSH session can keep those IPC pinned to the remote bridge,
+        // making the local folder appear empty/broken. Idempotent + safe.
+        try { await window.electronAPI?.remoteGoLocal?.(); } catch (_) {}
+        window.__remoteStatus = null;
         state.folderPath = p;
         document.getElementById('file-tree-path-text').textContent = p;
         document.getElementById('file-tree-actions').style.display = 'inline-flex';

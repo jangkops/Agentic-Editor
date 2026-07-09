@@ -115,6 +115,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   remoteConnect: (p) => ipcRenderer.invoke('remote:connect', p),
   remoteDisconnect: (p) => ipcRenderer.invoke('remote:disconnect', p),
   remoteSwitchActive: (p) => ipcRenderer.invoke('remote:switch-active', p),
+  remoteGoLocal: () => ipcRenderer.invoke('remote:go-local'),
   remoteStatus: (p) => ipcRenderer.invoke('remote:status', p || {}),
   remoteRespondAuth: (p) => ipcRenderer.invoke('remote:respond-auth', p),
   remoteSetWorkspace: (p) => ipcRenderer.invoke('remote:set-workspace', p),

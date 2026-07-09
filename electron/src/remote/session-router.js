@@ -215,11 +215,16 @@ class SessionRouter extends EventEmitter {
     if (opts && opts.forceLocal) return false;
     const active = this.getActive();
     if (!active) return false;
-    // Accept any state that has a live client — not just 'connected'.
-    // The session may be in 'provisioning' or 'forwarding' but still
-    // has a working SSH client for file/exec operations.
+    // Only route remote when the session is authenticated AND usable.
+    // A session that has dropped (disconnected/failed/reconnecting) or is
+    // still dialing (connecting/authenticating) MUST fall back to local —
+    // otherwise a stale session object keeps fs/terminal/git IPC pinned to a
+    // dead remote bridge, so a newly-opened LOCAL folder looks empty/broken
+    // ("remote state sticks after going back to local").
+    const USABLE = { connected: true, provisioning: true, forwarding: true };
+    if (!USABLE[active.state]) return false;
     if (active.state === 'connected') return true;
-    // Legacy ctx: if session has a client, it's usable
+    // provisioning/forwarding: only usable if the ssh2 client is live.
     if (active.client && typeof active.client.exec === 'function') return true;
     return false;
   }
