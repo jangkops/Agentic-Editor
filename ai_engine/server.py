@@ -14282,35 +14282,6 @@ async def conversation_handoff(request: Request):
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
-@app.post("/api/agents/workflow")
-async def run_workflow(request: Request):
-    """Run full agent workflow: Plan → Code → Review → Execute."""
-    body = await request.json()
-    prompt = body.get("prompt", "")
-    model = body.get("model", "anthropic.claude-sonnet-4-5-20250929-v1:0")
-
-    try:
-        from ai_engine.gateway_module import GatewayClient
-        from ai_engine.agent_system.agent_graph import build_graph
-
-        gw = GatewayClient(
-            gateway_url=os.environ.get(
-                "GATEWAY_URL",
-                "https://5l764dh7y9.execute-api.us-west-2.amazonaws.com/v1",
-            ),
-            aws_profile=os.environ.get("AWS_PROFILE", "default"),
-        )
-        graph = build_graph(gw)
-        from ai_engine.agent_system.state import AgentState
-
-        state = AgentState(task=prompt)
-        result = await graph.ainvoke(state)
-        await gw.close()
-        return JSONResponse(content=result)
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
-
-
 _quota_cache = {"used_krw": 0, "remaining_krw": 0, "limit_krw": 0, "last_updated": "", "user": "", "fetching": False}
 
 @app.get("/api/quota")

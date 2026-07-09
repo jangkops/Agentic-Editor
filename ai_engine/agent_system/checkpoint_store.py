@@ -1,12 +1,11 @@
-"""JSON-based checkpoint stores for agent workflows.
+"""JSON-based LangGraph checkpoint saver for agent workflows.
 
-이 모듈은 두 가지를 제공한다.
+이 모듈은 ``JsonFileCheckpointSaver`` — 정식 LangGraph ``BaseCheckpointSaver`` 구현체를
+제공한다. SQLite를 절대 사용하지 않고 ``.json`` 파일로만 그래프 상태를 영속하며,
+자격증명은 어떤 파일에도 저장하지 않는다(방어적 차단 포함).
 
-1. ``CheckpointStore`` — 구(舊) 수동 워크플로우용 단순 JSON 저장소(레거시).
-   Phase 5 정리 전까지 유지한다(현재 server.py 미참조 = dead code로 확인됨).
-2. ``JsonFileCheckpointSaver`` — 정식 LangGraph ``BaseCheckpointSaver`` 구현체.
-   SQLite를 절대 사용하지 않고 ``.json`` 파일로만 그래프 상태를 영속한다.
-   자격증명은 어떤 파일에도 저장하지 않는다(방어적 차단 포함).
+(구 수동 워크플로우용 레거시 ``CheckpointStore``는 Phase 5 정리에서 제거되었다 —
+ dead code로 확인되어 삭제.)
 
 설계 근거는 spec의 ``API_NOTES.md`` 항목 2·3, "⚠️ 설계 보정 필요", design.md 섹션 5 참조.
 """
@@ -14,7 +13,6 @@ import os
 import json
 import base64
 import asyncio
-from datetime import datetime
 from typing import Any, AsyncIterator, Iterator, Optional, Sequence
 
 from langgraph.checkpoint.base import (
@@ -30,66 +28,6 @@ try:  # RunnableConfig는 타입 힌트 용도(런타임 의존성 아님)
     from langchain_core.runnables import RunnableConfig
 except Exception:  # pragma: no cover - 방어
     RunnableConfig = dict  # type: ignore
-
-
-class CheckpointStore:
-    """Persist and restore agent workflow state as JSON files (legacy)."""
-
-    def __init__(self, base_dir: str = ""):
-        if not base_dir:
-            # Default: userData/checkpoints/
-            base_dir = os.path.join(os.path.expanduser("~"), ".ai-editor", "checkpoints")
-        self.base_dir = base_dir
-        os.makedirs(self.base_dir, exist_ok=True)
-
-    def _path(self, workflow_id: str) -> str:
-        return os.path.join(self.base_dir, f"{workflow_id}.json")
-
-    def save(self, workflow_id: str, state: dict) -> str:
-        """Save workflow state to JSON file."""
-        checkpoint = {
-            "workflow_id": workflow_id,
-            "timestamp": datetime.utcnow().isoformat(),
-            "state": state,
-        }
-        path = self._path(workflow_id)
-        with open(path, "w") as f:
-            json.dump(checkpoint, f, indent=2, default=str)
-        return path
-
-    def load(self, workflow_id: str) -> dict | None:
-        """Load workflow state from JSON file."""
-        path = self._path(workflow_id)
-        if not os.path.isfile(path):
-            return None
-        with open(path, "r") as f:
-            data = json.load(f)
-        return data.get("state")
-
-    def list_checkpoints(self) -> list:
-        """List all saved checkpoints."""
-        results = []
-        for fname in os.listdir(self.base_dir):
-            if fname.endswith(".json"):
-                path = os.path.join(self.base_dir, fname)
-                try:
-                    with open(path, "r") as f:
-                        data = json.load(f)
-                    results.append({
-                        "workflow_id": data.get("workflow_id", fname[:-5]),
-                        "timestamp": data.get("timestamp", ""),
-                    })
-                except Exception:
-                    pass
-        return sorted(results, key=lambda x: x["timestamp"], reverse=True)
-
-    def delete(self, workflow_id: str) -> bool:
-        """Delete a checkpoint."""
-        path = self._path(workflow_id)
-        if os.path.isfile(path):
-            os.remove(path)
-            return True
-        return False
 
 
 # ── 보안 방어: 자격증명 문자열이 직렬화 결과에 나타나면 저장 차단 (요구사항 8.3) ──

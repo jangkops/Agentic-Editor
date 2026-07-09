@@ -2761,6 +2761,29 @@ async function runPipeline(prompt, stages) {
   state.isStreaming = false;
 }
 
+// 단일 채팅 SSE 엔드포인트 — LangGraph 계층 그래프 경로를 우선 사용한다.
+// 서버는 AE_LANGGRAPH flag off면 내부적으로 기존 run_agent_stream 으로 위임하므로
+// flag 상태와 무관하게 무회귀(동일 SSE 계약: text/tool/verifiedFiles/agent_*/heartbeat/error/[DONE]).
+const CHAT_STREAM_ENDPOINT = '/api/agents/graph-stream';
+const CHAT_STREAM_FALLBACK_ENDPOINT = '/api/agents/run-stream';
+
+// graph-stream 우선 호출 + 스트림 시작 전 실패 시 기존 run-stream 으로 1회 자동 fallback (요구사항 7.4).
+// resp.ok(스트림 확립) 이후의 오류는 fallback 하지 않는다 — 이미 토큰 수신이 시작됐을 수 있으므로.
+// fetchOpts.body 는 JSON 문자열이라 두 요청에 안전하게 재사용된다.
+async function _openChatStream(fetchOpts) {
+  try {
+    const resp = await fetch(`${apiBase()}${CHAT_STREAM_ENDPOINT}`, fetchOpts);
+    if (resp.ok) return resp;
+    // 비200 → 스트림 시작 전 실패로 간주하고 기존 경로로 fallback.
+    addLiveLog('warning', `graph-stream 실패(${resp.status}) → run-stream fallback`);
+  } catch (e) {
+    // 사용자 취소(AbortError)는 fallback 대상이 아님 — 그대로 전파.
+    if (e && e.name === 'AbortError') throw e;
+    addLiveLog('warning', 'graph-stream 오류 → run-stream fallback', e?.message || String(e));
+  }
+  return await fetch(`${apiBase()}${CHAT_STREAM_FALLBACK_ENDPOINT}`, fetchOpts);
+}
+
 // 간단한 질문 — 워크플로우 없이 바로 응답
 async function runSimpleChat(prompt) {
   state.isStreaming = true;
@@ -2783,7 +2806,7 @@ async function runSimpleChat(prompt) {
     }
   }, 1000);
   try {
-    const resp = await fetch(`${apiBase()}/api/agents/run-stream`, {
+    const resp = await _openChatStream({
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(_apiBody({ prompt, model: state.selectedModel.id })),
       signal: state._abortController.signal
