@@ -80,7 +80,7 @@ context_builder/indexer/embedder/citation/answer_quality)은 **재구현하지 �
 - [x] 2. Phase 1 체크포인트
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 3. Phase 2 — 계층화: Top Supervisor + 나머지 서브그래프 (graph-of-graphs)
+- [x] 3. Phase 2 — 계층화: Top Supervisor + 나머지 서브그래프 (graph-of-graphs)
   - [x] 3.1 Top Supervisor 라우터 노드 (`agent_system/supervisor.py`)
     - `top_router_node`: GatewayChatModel(sonnet-4-5)로 route 분류, 타임아웃 적용
     - `route_selector` conditional edge 함수, `MAX_ROUTE_HOPS` 초과 시 route=`done`
@@ -103,21 +103,21 @@ context_builder/indexer/embedder/citation/answer_quality)은 **재구현하지 �
   - [ ]* 3.5 통합 테스트: coding→media 재라우팅 및 done 종료 (Gateway mock)
     - _Requirements: 1.3, 1.4, 1.5_
 
-  - [ ] 3.6 recursion_limit / GRAPH_TOTAL_TIMEOUT / MAX_ROUTE_HOPS / SUBGRAPH_RECURSION 설정 배선
+  - [x] 3.6 recursion_limit / GRAPH_TOTAL_TIMEOUT / MAX_ROUTE_HOPS / SUBGRAPH_RECURSION 설정 배선
     - `astream_events` config에 `recursion_limit` 설정, 그래프 전체를 `asyncio.wait_for(GRAPH_TOTAL_TIMEOUT)`로 래핑
     - 모든 값 `AE_*` 환경변수 오버라이드
     - _Requirements: 6.4, 6.5, 6.6, 6.7_
 
-- [ ] 4. Phase 2 체크포인트
+- [x] 4. Phase 2 체크포인트
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 5. Phase 3 — RAG/verify 노드화 + SSE 매핑
-  - [ ] 5.1 retrieve 노드 (`agent_system/nodes/retrieve.py`) — 기존 RAG 자산 재사용
+- [x] 5. Phase 3 — RAG/verify 노드화 + SSE 매핑
+  - [x] 5.1 retrieve 노드 (`agent_system/nodes/retrieve.py`) — 기존 RAG 자산 재사용
     - `context_builder.build_system_prompt`(return_evidence) / ProjectIndexer / FastEmbedProvider / VectorStore 재사용
     - `RETRIEVE_NODE_TIMEOUT` 래핑, 검색 불가/`chat`이면 evidence=None 비차단
     - _Requirements: 3.1, 3.2, 6.3_
 
-  - [ ] 5.2 verify 노드 (`agent_system/nodes/verify.py`) — 기존 검증 자산 재사용
+  - [x] 5.2 verify 노드 (`agent_system/nodes/verify.py`) — 기존 검증 자산 재사용
     - final_text 확정, `parse_citations`/`verify_citations`로 verified/unverified 분류(비차단)
     - answer_quality 메타데이터, 파일 의도 있으나 verified_files 0건이면 `_force_generate_from_text` 호출 후 병합
     - _Requirements: 3.3, 3.4, 3.5, 3.6, 3.8, 7.5_
@@ -126,7 +126,7 @@ context_builder/indexer/embedder/citation/answer_quality)은 **재구현하지 �
     - **Property 7: citation 검증은 답변을 차단하지 않음**
     - **Validates: Requirements 3.5**
 
-  - [ ] 5.4 SSE 브리지 (`agent_system/sse_bridge.py`) — astream_events v2 → 기존 계약
+  - [x] 5.4 SSE 브리지 (`agent_system/sse_bridge.py`) — astream_events v2 → 기존 계약
     - `on_chat_model_stream→{text}`, tool start/end→`{tool,status}`, 서브그래프 진입/종료→`agent_start/agent_done`
     - 디스크 실측 path만 `{verifiedFiles}`, `HEARTBEAT_INTERVAL`마다 `{heartbeat}`, 종료 시 `[DONE]`
     - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.6, 6.7_
@@ -135,43 +135,43 @@ context_builder/indexer/embedder/citation/answer_quality)은 **재구현하지 �
     - **Property 6: SSE 이벤트 계약 호환**
     - **Validates: Requirements 5.5, 5.6**
 
-  - [ ] 5.6 graph-stream 라우트를 sse_bridge에 연결 + 노드 예외/GatewayModelError → `{error}` → `[DONE]` (`ai_engine/server.py`)
+  - [x] 5.6 graph-stream 라우트를 sse_bridge에 연결 + 노드 예외/GatewayModelError → `{error}` → `[DONE]` (`ai_engine/server.py`)
     - retrieve/verify 노드를 coding 서브그래프에 실배선(1.12 스텁 대체)
     - _Requirements: 5.7_
 
-- [ ] 6. Phase 3 체크포인트
+- [x] 6. Phase 3 체크포인트
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 7. Phase 4 — 전환: 프론트 신규 라우트 전환 + fallback
-  - [ ] 7.1 프론트 SSE consumer가 `AE_LANGGRAPH` on 시 `/api/agents/graph-stream` 사용 (`src/center-views.js` / `src/main.js`)
+- [x] 7. Phase 4 — 전환: 프론트 신규 라우트 전환 + fallback
+  - [x] 7.1 프론트 SSE consumer가 `AE_LANGGRAPH` on 시 `/api/agents/graph-stream` 사용 (`src/center-views.js` / `src/main.js`)
     - 기존 이벤트 계약 그대로 소비(무회귀)
     - _Requirements: 7.2, 7.3_
 
-  - [ ] 7.2 graph-stream 실패 시 기존 라우트 자동 fallback 배선 (프론트/서버)
+  - [x] 7.2 graph-stream 실패 시 기존 라우트 자동 fallback 배선 (프론트/서버)
     - _Requirements: 7.4_
 
   - [ ]* 7.3 통합 테스트: flag on/off 및 실패 fallback 시나리오
     - _Requirements: 7.1, 7.2, 7.3, 7.4_
 
-- [ ] 8. Phase 4 체크포인트
+- [x] 8. Phase 4 체크포인트
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 9. Phase 5 — 정리: dead code 제거 + 번들 검증
-  - [ ] 9.1 dead code 제거 (`agent_system/agent_graph.py` 수동 while 루프, 구버전 `run_workflow`, 미참조 CheckpointStore 경로)
+- [x] 9. Phase 5 — 정리: dead code 제거 + 번들 검증
+  - [x] 9.1 dead code 제거 (`agent_system/agent_graph.py` 수동 while 루프, 구버전 `run_workflow`, 미참조 CheckpointStore 경로)
     - _Requirements: 9.3_
 
-  - [ ] 9.2 PyInstaller spec 신규 서브모듈 수집 유지 확인 (`ai-engine-server.spec`)
+  - [x] 9.2 PyInstaller spec 신규 서브모듈 수집 유지 확인 (`ai-engine-server.spec`)
     - `langgraph`, `langchain_core`, `fastembed`, `onnxruntime`, `tokenizers`, `huggingface_hub` collect 대상 유지
     - _Requirements: 9.1_
 
-  - [ ] 9.3 번들 import smoke test (유한 시간, 서버 미기동)
+  - [x] 9.3 번들 import smoke test (유한 시간, 서버 미기동)
     - `langgraph.checkpoint.base`, `langgraph.checkpoint.serde.jsonplus`, `langgraph.prebuilt`, `langchain_core.language_models` import 검증
     - _Requirements: 9.2_
 
   - [ ]* 9.4 회귀 테스트: 기존 `run_agent_stream` 경로 무회귀
     - _Requirements: 9.3_
 
-- [ ] 10. 최종 체크포인트
+- [x] 10. 최종 체크포인트
   - Ensure all tests pass, ask the user if questions arise.
 
 ## Notes
