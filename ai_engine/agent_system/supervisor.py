@@ -32,7 +32,7 @@ import asyncio
 import os
 from typing import Any, List, Optional
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
 
 from ai_engine.agent_system.chat_model_adapter import (
@@ -245,15 +245,32 @@ def make_top_router_node(deps: Any):
     반환 노드의 계약:
       Precondition:  state["prompt"] 는 비어있지 않다.
       Postcondition: hop cap 도달 시 {"route": "done"}(visited_routes 미증가) 반환.
+                     이미 서브그래프를 1회 이상 방문했고 마지막 메시지가 도구호출 없는
+                     최종 AIMessage 이면 {"route": "done"} 반환(작업 완료 — 재라우팅 불필요).
                      그 외에는 {"route": <label>, "visited_routes": [<label>]} 반환
                      (visited_routes reducer 가 operator.add 로 누적).
       Invariant:     LLM 호출은 GatewayChatModel(gateway 경유)만. 분류 실패는 비차단.
     """
 
     async def top_router_node(state: GraphState) -> dict:
+        visited = state.get("visited_routes", []) or []
+
         # 요구사항 6.5 / Property 4: hop cap 도달 시 LLM 없이 즉시 종료.
-        if len(state.get("visited_routes", []) or []) >= MAX_ROUTE_HOPS:
+        if len(visited) >= MAX_ROUTE_HOPS:
             return {"route": "done"}
+
+        # 작업 완료 감지(재라우팅 순환·빈 재호출 방지): 서브그래프를 이미 1회 이상 방문했고
+        # 마지막 메시지가 "도구호출이 없는 AIMessage"(= 서브그래프의 model→tools 루프가 끝나
+        # 최종 텍스트 답변을 반환한 상태)이면 추가 라우팅 없이 done 으로 종료한다.
+        # 이 가드가 없으면 서브그래프 종료 후 router 로 복귀할 때마다 같은 도메인으로 다시
+        # 분류되어(hop cap 까지) 불필요한 재호출이 발생하고, 이미 assistant 로 끝난 대화에
+        # model 을 재호출해 "No generations found in stream" 을 유발한다.
+        if visited:
+            messages = state.get("messages") or []
+            if messages:
+                last = messages[-1]
+                if isinstance(last, AIMessage) and not (getattr(last, "tool_calls", None)):
+                    return {"route": "done"}
 
         route = await _classify_route(state, deps)
         return {"route": route, "visited_routes": [route]}
