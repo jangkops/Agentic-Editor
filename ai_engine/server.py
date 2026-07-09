@@ -281,6 +281,23 @@ AGENT_TOOLS = {
                         }
                     }
                 }
+            },
+            {
+                "toolSpec": {
+                    "name": "generate_native_diagram",
+                    "description": "Generate a native (editable-style) diagram PNG using matplotlib (no Bedrock call). diagram_type: tree (indented folder tree), flow (left-to-right arrows), architecture, stack, block. Saves PNG to .generated/.",
+                    "inputSchema": {
+                        "json": {
+                            "type": "object",
+                            "properties": {
+                                "diagram_type": {"type": "string", "description": "Diagram kind: tree, flow, architecture, stack, block"},
+                                "title": {"type": "string", "description": "Diagram title"},
+                                "content": {"type": "string", "description": "Text describing the diagram (lines for tree; 'A -> B -> C' for flow)"}
+                            },
+                            "required": ["diagram_type", "title", "content"]
+                        }
+                    }
+                }
             }]
 }
 
@@ -7101,7 +7118,7 @@ def _execute_tool(tool_name: str, tool_input: dict, project_path: str = "", aws_
             print(f"[ExecuteTool] 템플릿 주입 실패 → 무템플릿 진행: {str(_te)[:200]}")
 
     # Async media generation tools
-    if tool_name in ("generate_image", "generate_pdf", "generate_pptx", "generate_xlsx", "generate_docx", "edit_image"):
+    if tool_name in ("generate_image", "generate_pdf", "generate_pptx", "generate_xlsx", "generate_docx", "edit_image", "generate_native_diagram"):
         try:
             import asyncio as _asyncio
             if tool_name == "generate_image":
@@ -7116,6 +7133,17 @@ def _execute_tool(tool_name: str, tool_input: dict, project_path: str = "", aws_
                 return _asyncio.run(_tool_generate_docx(tool_input, project_path, aws_profile=aws_profile, bedrock_user=bedrock_user))
             if tool_name == "edit_image":
                 return _asyncio.run(_tool_edit_image(tool_input, project_path, aws_profile=aws_profile, bedrock_user=bedrock_user))
+            if tool_name == "generate_native_diagram":
+                # 독립 실행 진입점. 헬퍼는 개별 kwargs(diagram_type/title/content)를 받고
+                # 다른 generate_* 도구와 동일하게 {path: ".generated/...", model, width,
+                # height, sizeBytes} JSON을 반환한다 → GatewayToolNode의 verified_files
+                # 실측(path 추출)이 그대로 동작한다 (요구사항 1.6/3.7).
+                return _asyncio.run(_tool_generate_native_diagram(
+                    diagram_type=str(tool_input.get("diagram_type", "tree")),
+                    title=str(tool_input.get("title", "Diagram")),
+                    content=str(tool_input.get("content", "")),
+                    project_path=project_path,
+                ))
         except Exception as e:
             return json.dumps({"error": "tool-execution-failed", "detail": str(e)[:300]})
 

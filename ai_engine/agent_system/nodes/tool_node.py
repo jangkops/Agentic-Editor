@@ -169,6 +169,9 @@ class GatewayToolNode:
         return out
 
     async def __call__(self, state) -> dict:
+        # ⚠️ 순차 실행(의도적 트레이드오프): 공식 LangGraph ToolNode 는 tool_calls 를 병렬
+        # 실행하지만, 우리 도구는 파일 생성/셸 등 부작용(side-effect)이 있어 동일 경로/자원
+        # 경합을 피하기 위해 아래 루프에서 tool_call 을 순차 처리한다(동작 변경 금지).
         import ai_engine.server as _srv  # 지연 import (순환 참조 방지)
 
         messages = state.get("messages") or []

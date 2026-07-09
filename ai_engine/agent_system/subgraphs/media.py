@@ -7,12 +7,12 @@ Task 3.3 산출물. `_common.build_domain_subgraph` 를 재사용하고 media �
 - generate_image / generate_pdf / generate_pptx / generate_docx / generate_xlsx / edit_image
   은 server.py `_execute_tool` 이 정확히 이 이름으로 디스패치한다(AGENT_TOOLS toolSpec 에도
   등록됨). GatewayToolNode 는 이 이름을 그대로 `_execute_tool` 에 전달하므로 정합한다.
-- generate_native_diagram 은 design 표에는 media 도구로 명시되지만, 현재 server.py 에는
-  독립 도구로 등록되어 있지 않다(내부 헬퍼 `_tool_generate_native_diagram(...)` 이 pptx/pdf
-  파이프라인 내부에서 kwargs 로만 호출됨). 즉 `_execute_tool("generate_native_diagram", ...)`
-  는 현재 "알 수 없는 도구" 를 반환한다. design 표 정합을 위해 toolSpec 은 포함하되, 실제
-  실행 배선은 후속 태스크(server.py `_execute_tool` 에 case 추가)에서 필요하다. 자세한 내용은
-  실행 보고 참조.
+- generate_native_diagram 도 이제 server.py `_execute_tool` 에 독립 case 로 배선되어 있다
+  (async 헬퍼 `_tool_generate_native_diagram(diagram_type, title, content, project_path)` 을
+  `asyncio.run` 으로 감싸 호출; 기존 generate_* async 도구와 동일 패턴). 헬퍼는 matplotlib
+  으로 PNG 를 생성하고 `{path: ".generated/...", model, width, height, sizeBytes}` JSON 을
+  반환하므로 GatewayToolNode 의 verified_files 실측(path 추출)이 그대로 동작한다. AGENT_TOOLS
+  toolSpec 목록에도 등록되어 있어 도구-디스패처 불일치가 해소되었다(요구사항 1.6/3.7).
 """
 
 from __future__ import annotations
@@ -250,9 +250,10 @@ MEDIA_TOOLS: List[dict] = [
     {
         "name": "generate_native_diagram",
         "description": (
-            "네이티브(편집 가능) 다이어그램을 생성한다(flow / tree 등). "
-            "⚠️ 현재 server.py `_execute_tool` 에 독립 도구로 배선되어 있지 않다 — 후속 "
-            "태스크에서 디스패치 case 추가가 필요하다(실행 보고 참조)."
+            "네이티브(편집 가능 스타일) 다이어그램 PNG 를 matplotlib 로 생성한다"
+            "(Bedrock 호출 없음). diagram_type: tree(들여쓰기 폴더 트리) / flow(좌→우 화살표) / "
+            "architecture / stack / block. .generated/ 에 저장한다. server.py `_execute_tool` 에 "
+            "배선되어 있으며 {path, model, width, height, sizeBytes} 를 반환한다."
         ),
         "inputSchema": {
             "json": {
@@ -260,15 +261,17 @@ MEDIA_TOOLS: List[dict] = [
                 "properties": {
                     "diagram_type": {
                         "type": "string",
-                        "description": "다이어그램 종류(flow, tree 등)",
+                        "description": "다이어그램 종류(tree, flow, architecture, stack, block)",
                     },
                     "title": {"type": "string", "description": "다이어그램 제목"},
                     "content": {
                         "type": "string",
-                        "description": "다이어그램으로 표현할 내용/설명",
+                        "description": "다이어그램으로 표현할 내용(tree=줄 목록, flow='A -> B -> C')",
                     },
                 },
-                "required": ["diagram_type", "title"],
+                # content 는 헬퍼가 비면 error 를 반환하므로 required 로 둔다
+                # (AGENT_TOOLS toolSpec 과 정합).
+                "required": ["diagram_type", "title", "content"],
             }
         },
     },
