@@ -134,7 +134,12 @@ function registerTerminalHandlers(processManager) {
         }
         // Remote active but bridge unavailable — fall through to local.
       }
-      return processManager.createTerminal(terminalId, legacyMainWindow, {
+      // 로컬 터미널 출력(terminal:data)은 webContents로 전송된다. 렌더러는
+      // terminalCreate(id, opts)만 넘겨 legacyMainWindow가 없으므로(null),
+      // event.sender(렌더러 webContents)를 target으로 넘겨야 출력이 전달된다.
+      // (이게 없으면 로컬 터미널에 프롬프트/경로가 안 뜨고 입력 반응이 없다.
+      //  원격 경로는 이미 event.sender를 사용 중이라 정상 동작한다.)
+      return processManager.createTerminal(terminalId, (event && event.sender) || legacyMainWindow, {
         cols: opts.cols,
         rows: opts.rows,
         cwd: opts.cwd,

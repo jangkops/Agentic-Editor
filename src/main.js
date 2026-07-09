@@ -3395,6 +3395,7 @@ function _showPostParallelRecommendation(originalPrompt) {
     _isRecommendCard: true,
     _recommendData: {
       title, reason, actions, hasHallucination, originalPrompt,
+      isFileTask, isCodeTask,
       doneResults: doneResults.map(r => ({ modelName: r.modelName, content: r.content })),
     },
     content: '[추천] ' + title,
@@ -3411,6 +3412,7 @@ function _showPostParallelRecommendation(originalPrompt) {
 function _renderRecommendCardMessage(msg) {
   const data = msg._recommendData;
   if (!data) return null;
+  if (msg._recommendConsumed) return null;
   const card = document.createElement('div');
   card.className = 'model-recommend-card' + (data.hasHallucination ? ' recommend-warning' : '');
   card.style.margin = '8px 12px';
@@ -3426,7 +3428,14 @@ function _renderRecommendCardMessage(msg) {
     </div>
   `;
 
-  const cleanup = () => { card.classList.add('recommend-fade-out'); setTimeout(() => card.remove(), 300); };
+  const cleanup = () => {
+    // 소비 플래그 → 스트리밍 중 renderMessages 재호출로 카드가 되살아나
+    // (버튼 재활성 + 깜빡임) 문제 방지. DOM 제거만으로는 부족.
+    msg._recommendConsumed = true;
+    card.querySelectorAll('.recommend-btn').forEach((b) => { b.disabled = true; });
+    card.classList.add('recommend-fade-out');
+    setTimeout(() => card.remove(), 300);
+  };
   card.querySelector('.recommend-dismiss')?.addEventListener('click', cleanup);
   card.querySelector('.recommend-btn.dismiss')?.addEventListener('click', cleanup);
 
@@ -3435,7 +3444,14 @@ function _renderRecommendCardMessage(msg) {
     const contextSummary = data.doneResults.map((r, i) =>
       `### [참고 답변 ${i+1}] ${r.modelName}\n${(r.content || '').substring(0, 1500)}`
     ).join('\n\n---\n\n');
-    const enrichedPrompt = `${data.originalPrompt}\n\n--- 이전 ${data.doneResults.length}개 모델의 답변 (참고용) ---\n${contextSummary}\n\n위 답변들을 참고하여 도구(write_file, generate_image 등)를 사용해 실제 파일을 생성해주세요.`;
+    // 작업 종류에 맞는 지시만 부여 — 단순 질의(파일/코드 아님)에 파일 생성을
+    // 강제하면 요청하지 않은 PDF 등이 만들어진다(오케스트레이션 강제 파일화 방지).
+    const _synth = data.isFileTask
+      ? '위 답변들을 참고하여 도구(write_file, generate_image, generate_pdf, generate_pptx 등)를 사용해 실제 파일을 생성해주세요.'
+      : data.isCodeTask
+        ? '위 답변들을 참고하여 도구(write_file 등)로 코드를 실제 파일에 반영해주세요.'
+        : '위 답변들을 종합해 하나의 정리된 최종 답변을 작성해주세요. 요청하지 않은 파일(PDF/PPTX 등) 생성은 하지 마세요.';
+    const enrichedPrompt = `${data.originalPrompt}\n\n--- 이전 ${data.doneResults.length}개 모델의 답변 (참고용) ---\n${contextSummary}\n\n${_synth}`;
     runOrchestrated(enrichedPrompt);
   });
 
