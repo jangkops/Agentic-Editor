@@ -10,6 +10,7 @@
 설계 근거는 spec의 ``API_NOTES.md`` 항목 2·3, "⚠️ 설계 보정 필요", design.md 섹션 5 참조.
 """
 import os
+import re
 import json
 import base64
 import asyncio
@@ -30,12 +31,20 @@ except Exception:  # pragma: no cover - 방어
     RunnableConfig = dict  # type: ignore
 
 
-# ── 보안 방어: 자격증명 문자열이 직렬화 결과에 나타나면 저장 차단 (요구사항 8.3) ──
-_FORBIDDEN_CRED_KEYS = ("accessKeyId", "secretAccessKey")
+# ── 보안 방어: 실제 자격증명 "값"이 직렬화 결과에 나타나면 저장 차단 (요구사항 8.3) ──
+# ⚠️ 키 이름 문자열(accessKeyId/secretAccessKey)만으로 차단하면, 자격증명 관련 소스/문서를
+# 읽은 도구 결과가 messages 에 포함될 때 오탐으로 정상 체크포인트가 차단된다(코드 조회 작업
+# 방해). 따라서 코드/문서에 흔한 "키 이름"이 아니라 실제 AWS 자격증명 "값" 패턴만 감지한다.
+#   - Access Key ID: AKIA/ASIA + 16 대문자·숫자 (실제 키 값의 명확한 서명)
+# Secret Access Key(40자 base64)는 일반 문자열/해시와 구분이 어려워 오탐 위험이 크므로,
+# Access Key ID 값 패턴을 유출의 1차 신호로 사용한다(실제 자격증명 세트엔 항상 동반됨).
+_CRED_VALUE_PATTERNS = (
+    re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
+)
 
 
 class CredentialLeakError(RuntimeError):
-    """직렬화된 체크포인트에 자격증명이 감지되면 발생(방어적 차단)."""
+    """직렬화된 체크포인트에 실제 자격증명 값이 감지되면 발생(방어적 차단)."""
 
 
 def _default_checkpoint_dir() -> str:
@@ -108,10 +117,11 @@ class JsonFileCheckpointSaver(BaseCheckpointSaver):
         않으므로, 저장 대상 원본 객체의 문자열 표현을 검사해 이중 방어한다.
         """
         haystack = " ".join(repr(o) for o in objs)
-        for key in _FORBIDDEN_CRED_KEYS:
-            if key in haystack:
+        for pat in _CRED_VALUE_PATTERNS:
+            if pat.search(haystack):
                 raise CredentialLeakError(
-                    f"체크포인트에 자격증명({key})이 감지되어 저장을 차단했습니다."
+                    "체크포인트에 실제 AWS 자격증명 값(Access Key ID)이 감지되어 "
+                    "저장을 차단했습니다."
                 )
 
     @staticmethod
