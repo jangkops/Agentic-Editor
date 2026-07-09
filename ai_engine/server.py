@@ -9156,8 +9156,14 @@ async def run_agent_stream(request: Request):
 #    (Python 3.14 에서 취소 시 hang). per-node 타임아웃 + recursion_limit 로만 상한을 건다.
 # ─────────────────────────────────────────────────────────────────────────────
 def _langgraph_enabled() -> bool:
-    """`AE_LANGGRAPH` 환경변수가 활성(1/true/on)인지 여부."""
-    return os.environ.get("AE_LANGGRAPH", "").strip().lower() in ("1", "true", "on")
+    """LangGraph 계층 오케스트레이터 경로 활성 여부 — **기본 활성(on)**.
+
+    사용자가 별도 조작 없이 모든 기능이 LangGraph 경로로 동작하도록 기본값을 on 으로
+    둔다. 문제 발생 시 `AE_LANGGRAPH=0`(또는 false/off/no)로 명시적으로만 비활성화할 수
+    있으며, 그 경우 graph-stream 라우트는 기존 run_agent_stream 으로 위임한다(무회귀 안전장치).
+    """
+    val = os.environ.get("AE_LANGGRAPH", "on").strip().lower()
+    return val not in ("0", "false", "off", "no")
 
 
 @app.post("/api/agents/graph-stream")

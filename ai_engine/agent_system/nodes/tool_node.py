@@ -42,6 +42,23 @@ _BRIDGE_TOOLS = frozenset(
     {"read_file", "write_file", "list_directory", "search_files", "run_command"}
 )
 
+# 미디어 생성 도구군 — 이미지 생성(Vertex/Bedrock) + HTML→PNG 렌더 + 문서 조립이
+# 포함돼 본질적으로 무겁다(슬라이드/이미지 수에 비례해 수 분까지 소요 가능). 일반 도구의
+# 120초 상한으로는 정상 산출물이 timeout 되므로(예: 3장 PPT = 이미지 3장 생성+렌더),
+# 이 집합은 더 긴 상한(AE_MEDIA_TOOL_TIMEOUT, 기본 600초)을 적용한다. 상한이 존재하고
+# SSE heartbeat 로 연결이 유지되므로 무한대기는 발생하지 않는다.
+_MEDIA_TOOLS = frozenset(
+    {
+        "generate_image",
+        "generate_pdf",
+        "generate_pptx",
+        "generate_docx",
+        "generate_xlsx",
+        "edit_image",
+        "generate_native_diagram",
+    }
+)
+
 
 def _default_timeout() -> float:
     """TOOL_NODE_TIMEOUT 기본값(초). 요구사항 6.2: 기본 120초, env AE_TOOL_NODE_TIMEOUT."""
@@ -49,6 +66,14 @@ def _default_timeout() -> float:
         return float(os.environ.get("AE_TOOL_NODE_TIMEOUT", "120"))
     except (TypeError, ValueError):
         return 120.0
+
+
+def _default_media_timeout() -> float:
+    """미디어 생성 도구 전용 상한(초). 기본 600초, env AE_MEDIA_TOOL_TIMEOUT."""
+    try:
+        return float(os.environ.get("AE_MEDIA_TOOL_TIMEOUT", "600"))
+    except (TypeError, ValueError):
+        return 600.0
 
 
 def _tool_name(t: Any) -> str:
@@ -117,6 +142,9 @@ class GatewayToolNode:
     def __init__(self, tools, deps=None, timeout: Optional[float] = None):
         self.deps = deps
         self.timeout = float(timeout) if timeout is not None else _default_timeout()
+        # 미디어 생성 도구 전용 상한(일반 도구보다 길다). timeout 을 명시 주입한 경우에도
+        # 미디어 상한은 max(주입값, media_default)로 두어 최소한의 여유를 보장한다.
+        self.media_timeout = max(self.timeout, _default_media_timeout())
         self.tool_names = {_tool_name(t) for t in (tools or [])}
 
     # ── 개별 실행 헬퍼 (동기 server 함수를 감쌈; asyncio.to_thread에서 호출) ──
@@ -198,19 +226,21 @@ class GatewayToolNode:
             tc_id = tc.get("id")
 
             use_bridge = is_remote_session and bridge_remote and name in _BRIDGE_TOOLS
+            # 미디어 생성 도구는 긴 상한 적용(이미지 생성 + 렌더 + 조립).
+            eff_timeout = self.media_timeout if name in _MEDIA_TOOLS else self.timeout
             try:
                 if use_bridge:
                     raw = await asyncio.wait_for(
                         asyncio.to_thread(self._run_bridge, name, args),
-                        timeout=self.timeout,
+                        timeout=eff_timeout,
                     )
                 else:
                     raw = await asyncio.wait_for(
                         asyncio.to_thread(self._run_local, name, args, state),
-                        timeout=self.timeout,
+                        timeout=eff_timeout,
                     )
             except asyncio.TimeoutError:
-                raw = f"[도구 시간 초과: {name} ({self.timeout}s)]"
+                raw = f"[도구 시간 초과: {name} ({eff_timeout}s)]"
             except Exception as e:  # noqa: BLE001 — 도구 실패는 비차단, ToolMessage로 전달
                 raw = f"[도구 실행 오류: {name} — {str(e)[:300]}]"
 
