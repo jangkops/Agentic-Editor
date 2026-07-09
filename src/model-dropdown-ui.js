@@ -31,6 +31,18 @@
       }
     }
 
+    // 전체 합계 헤더 — 탑바(ALL_MODELS.length)와 일치시켜 개수 불일치 오해 제거.
+    // 두 값 모두 MODEL_CATALOG에서 파생되므로 필터 없을 때 total === 탑바 개수.
+    const _total = Object.values(groups).reduce((n, arr) => n + arr.length, 0);
+    const _chatCount = groups.chat.length;
+    if (_total > 0) {
+      const summary = document.createElement('div');
+      summary.className = 'model-dropdown-summary';
+      summary.style.cssText = 'padding:8px 14px;font-size:11px;font-weight:700;color:var(--color-text-primary);background:var(--color-bg-tertiary);border-bottom:1px solid var(--color-border);display:flex;justify-content:space-between;position:sticky;top:0;z-index:2;';
+      summary.innerHTML = `<span>전체 ${_total}개 모델</span><span style="color:var(--color-text-muted);font-weight:500;">채팅 ${_chatCount} · 미디어/기타 ${_total - _chatCount}</span>`;
+      listEl.appendChild(summary);
+    }
+
     for (const [capKey, models] of Object.entries(groups)) {
       if (!models.length) continue;
       const g = document.createElement('div');
