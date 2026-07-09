@@ -132,4 +132,5 @@ def build_coding_subgraph(deps: Any):
         deps,
         tools=CODING_TOOLS,
         model_id=deps.model_coding,
+        domain="coding",
     )

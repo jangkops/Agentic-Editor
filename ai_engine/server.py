@@ -9149,8 +9149,9 @@ async def run_agent_graph_stream(request: Request):
     try:
         from langchain_core.messages import HumanMessage
         from ai_engine.agent_system.deps import GraphDeps
-        from ai_engine.agent_system.subgraphs.coding import build_coding_subgraph
+        from ai_engine.agent_system.supervisor import build_top_graph
         from ai_engine.agent_system.checkpoint_store import JsonFileCheckpointSaver
+        from ai_engine.agent_system.sse_bridge import graph_events_to_sse
 
         prompt = body.get("prompt", "")
         model = body.get("model", "anthropic.claude-sonnet-4-5-20250929-v1:0")
@@ -9175,15 +9176,18 @@ async def run_agent_graph_stream(request: Request):
             _ckpt_dir = ""  # JsonFileCheckpointSaver 기본(AE_CHECKPOINT_DIR / ~/.agentic-editor)
         checkpointer = JsonFileCheckpointSaver(_ckpt_dir)
 
-        # Phase 1 은 coding 단일 그래프(Top Supervisor 는 Phase 2). deps 로 gateway/model/ckpt 주입.
+        # Phase 2: Top Supervisor + graph-of-graphs(build_top_graph). deps 로 gateway/model/ckpt 주입.
+        # (Phase 1 의 build_coding_subgraph 단일 그래프를 대체 — 요구사항 1.1/1.3/6.5.)
         deps = GraphDeps(
             gateway=gw,
             model_coding=_resolve_callable_model_id(model, aws_profile, bedrock_user),
             checkpointer=checkpointer,
         )
-        compiled = build_coding_subgraph(deps)
+        compiled = build_top_graph(deps)
 
         # 초기 GraphState — 자격증명은 담지 않고 profile name / bedrock_user 문자열만(요구사항 8.1).
+        # visited_routes 는 라우터 hop cap(요구사항 6.5)용 누적 리스트 — 명시적으로 [] 로 초기화한다
+        # (reducer operator.add 기본값과 동일하나, 계약을 분명히 하기 위해 초기 상태에 포함).
         initial_state = {
             "prompt": prompt,
             "session_id": session_id,
@@ -9195,41 +9199,46 @@ async def run_agent_graph_stream(request: Request):
             "template_id": template_id,
             "system_prompt": system_prompt,
             "messages": [HumanMessage(content=prompt)],
+            "visited_routes": [],
         }
+        # config: thread_id(체크포인트 영속) + recursion_limit(요구사항 6.6, AE_GRAPH_RECURSION 기본 50).
         graph_config = {
             "configurable": {"thread_id": session_id},
             "recursion_limit": int(os.environ.get("AE_GRAPH_RECURSION", "50")),
         }
+        # 그래프 전체 상한 / heartbeat 주기(요구사항 6.6/6.7/6.8, Property 4). ⚠️ API_NOTES
+        # CRITICAL 2: 스트림 소비 루프를 asyncio.wait_for 로 감싸면 Python 3.14 에서 취소 시
+        # hang → sse_bridge 가 개별 __anext__ 만 shield+wait 하고 deadline 을 수동 검사한다.
+        # 각 상수는 이미 각 모듈에 env override 로 정의됨(중복 정의 금지, 재사용):
+        #   - MAX_ROUTE_HOPS          : supervisor.py (AE_MAX_ROUTE_HOPS,      기본 4)
+        #   - SUBGRAPH_RECURSION_LIMIT : subgraphs/_common.py (AE_SUBGRAPH_RECURSION, 기본 25)
+        #   - MODEL_NODE_TIMEOUT       : subgraphs/_common.py (AE_MODEL_NODE_TIMEOUT)
+        #   - recursion_limit          : 위 graph_config (AE_GRAPH_RECURSION,    기본 50)
+        # 여기서는 그래프 전체 시간 상한 + heartbeat 주기를 sse_bridge 로 넘겨 배선한다.
+        graph_total_timeout = float(os.environ.get("AE_GRAPH_TOTAL_TIMEOUT", "1800"))
+        heartbeat_interval = float(os.environ.get("AE_HEARTBEAT_INTERVAL", "20"))
     except Exception as _prep_err:
         print(f"[graph-stream] 준비 실패 → 기존 run-stream 경로로 fallback: {_prep_err}")
         return await run_agent_stream(request)
 
     async def graph_stream():
-        """astream_events(v2) 를 최소 매핑으로 SSE 중계.
+        """Top Supervisor 그래프의 astream_events(v2) → sse_bridge 로 기존 SSE 계약 중계.
 
-        ⚠️ 이 async for 루프를 asyncio.wait_for 로 감싸지 않는다(API_NOTES CRITICAL 2).
+        SSE 매핑(on_chat_model_stream→{text}, tool→{tool,status}, 서브그래프 진입/종료→
+        agent_start/agent_done, verifiedFiles, heartbeat, [DONE])과 노드 예외/
+        GatewayModelError → {error}→[DONE] 처리, 그리고 무한대기 차단(개별 __anext__ 만
+        shield+wait, deadline 수동 검사, 요구사항 5.7/6.6/6.7/6.8)은 모두 graph_events_to_sse
+        내부가 담당한다. ⚠️ API_NOTES CRITICAL 2: 이 중계 루프를 asyncio.wait_for 로 감싸지
+        않는다(스트림 제너레이터 취소 시 hang).
         """
-        try:
-            async for event in compiled.astream_events(
-                initial_state, config=graph_config, version="v2"
-            ):
-                if event.get("event") != "on_chat_model_stream":
-                    continue
-                chunk = (event.get("data") or {}).get("chunk")
-                text = getattr(chunk, "content", "") if chunk is not None else ""
-                # content 가 리스트(멀티모달 블록)면 text 조각만 이어붙임.
-                if isinstance(text, list):
-                    text = "".join(
-                        p.get("text", "") if isinstance(p, dict) else str(p)
-                        for p in text
-                    )
-                if text:
-                    yield f"data: {json.dumps({'text': text}, ensure_ascii=False)}\n\n"
-        except Exception as _stream_err:
-            # 스트리밍이 이미 시작된 후의 실패는 fallback 불가 → error 이벤트로 종료.
-            print(f"[graph-stream] 스트림 실패: {_stream_err}")
-            yield f"data: {json.dumps({'error': str(_stream_err)}, ensure_ascii=False)}\n\n"
-        yield "data: [DONE]\n\n"
+        async for sse_line in graph_events_to_sse(
+            compiled,
+            initial_state,
+            graph_config,
+            heartbeat_interval=heartbeat_interval,
+            total_timeout=graph_total_timeout,
+        ):
+            yield sse_line
 
     return StreamingResponse(
         graph_stream(),

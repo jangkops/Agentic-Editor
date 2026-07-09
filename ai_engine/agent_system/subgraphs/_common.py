@@ -15,9 +15,12 @@ design.md 섹션 4(서브그래프 공통 패턴) + API_NOTES.md(항목 5·6, CR
 - **checkpointer (API_NOTES 항목 6):** `build_domain_subgraph` 는 `sg.compile()` 만 호출
   한다. 서브그래프는 부모(build_top_graph)가 주입하는 checkpointer 를 상속하므로 여기서
   checkpointer 를 넘기지 않는다.
-- **Phase 1 스텁:** retrieve / verify 는 최소 구현이다. retrieve 는 `{}`(evidence 미적재),
-  verify 는 마지막 AIMessage 텍스트를 final_text 로 확정한다. Phase 3(task 5.1/5.2)에서
-  실제 RAG / citation / 강제 생성 폴백 노드로 교체된다.
+- **Phase 3 실노드 (task 5.6):** retrieve / verify 는 더 이상 스텁이 아니라 `nodes/`의
+  실구현을 사용한다. retrieve 는 `nodes/retrieve.make_retrieve_node(deps, domain)`(기존 RAG
+  자산 재사용 — context_builder/indexer/embedder), verify 는 `nodes/verify.make_verify_node
+  (deps)`(citation 분류 / answer_quality / 강제 생성 폴백)이다. 두 심볼은 이 모듈로 재노출
+  되어 `subgraphs.coding` 등 기존 import 경로가 그대로 실노드를 얻는다(하위 호환 보존).
+  retrieve 는 도메인별 스킵(chat 은 RAG 불필요)을 위해 `domain` 을 넘겨받는다.
 
 기존 자산 재사용(재구현 금지 — 요구사항 7.5):
 - GraphState (`agent_system/graph_state.py`)
@@ -37,6 +40,16 @@ from langgraph.graph import END, START, StateGraph
 from ai_engine.agent_system.chat_model_adapter import GatewayChatModel
 from ai_engine.agent_system.graph_state import GraphState
 from ai_engine.agent_system.nodes.tool_node import GatewayToolNode
+
+# Phase 3 실노드 — retrieve/verify 는 nodes/ 의 실구현을 사용한다(Phase 1 스텁 대체,
+# task 5.6). 여기로 재노출(re-export)되어 subgraphs.coding 등 기존 import 경로가
+# 그대로 실노드를 얻는다(하위 호환 보존). retrieve 는 domain 별로 팩토리를 만든다.
+from ai_engine.agent_system.nodes.retrieve import (  # noqa: F401
+    make_retrieve_node,
+)
+from ai_engine.agent_system.nodes.verify import (  # noqa: F401
+    make_verify_node,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -142,51 +155,6 @@ def tools_condition_or_verify(state: GraphState) -> str:
     return "verify"
 
 
-def make_retrieve_node(deps: Any):
-    """retrieve 노드 팩토리 (Phase 1 스텁).
-
-    Phase 1 에서는 RAG 를 수행하지 않고 evidence 를 적재하지 않는다({} 반환 → 상태 무변경).
-    Phase 3(task 5.1)에서 context_builder / indexer / embedder 를 재사용하는 실제 노드로
-    교체된다.
-    """
-
-    async def retrieve_node(state: GraphState) -> dict:
-        return {}
-
-    return retrieve_node
-
-
-def _last_ai_text(messages: List[BaseMessage]) -> str:
-    """마지막 AIMessage 의 텍스트를 추출(없으면 빈 문자열)."""
-    for msg in reversed(messages or []):
-        if isinstance(msg, AIMessage):
-            content = msg.content
-            if isinstance(content, str):
-                return content
-            if isinstance(content, list):
-                parts = [
-                    p.get("text", "") if isinstance(p, dict) else str(p)
-                    for p in content
-                ]
-                return "".join(parts)
-    return ""
-
-
-def make_verify_node(deps: Any):
-    """verify 노드 팩토리 (Phase 1 스텁).
-
-    Phase 1 에서는 마지막 AIMessage 텍스트를 final_text 로 확정하는 최소 구현이다
-    (요구사항 3.3). citation 검증 / answer_quality / 강제 생성 폴백은 Phase 3(task 5.2)에서
-    추가된다.
-    """
-
-    async def verify_node(state: GraphState) -> dict:
-        final = _last_ai_text(state.get("messages") or [])
-        return {"final_text": final}
-
-    return verify_node
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # 공통 서브그래프 빌더
 # ─────────────────────────────────────────────────────────────────────────────
@@ -196,6 +164,7 @@ def build_domain_subgraph(
     model_id: str,
     *,
     with_retrieve: bool = True,
+    domain: str = "coding",
 ):
     """도메인 서브그래프를 조립해 compiled Runnable 을 반환.
 
@@ -216,6 +185,10 @@ def build_domain_subgraph(
         model_id:      model 노드가 사용할 Bedrock model_id.
         with_retrieve: False 면 retrieve 노드를 두지 않고 START→model 로 진입(chat 은 RAG
                        불필요 — design 서브그래프 분할 기준).
+        domain:        retrieve 실노드에 전달할 도메인 라벨(coding/media/research/ops/chat).
+                       retrieve 노드는 domain=="chat" 이거나 project_path 가 없으면 RAG 를
+                       스킵한다(요구사항 3.2 — 비차단). with_retrieve=False 인 chat 에는
+                       사실상 영향이 없으나 계약 일관성을 위해 전달한다.
 
     Postcondition: sg.compile() 결과(CompiledStateGraph)를 반환한다. checkpointer 는
                    주입하지 않는다(부모 그래프가 주입 — API_NOTES 항목 6).
@@ -225,7 +198,7 @@ def build_domain_subgraph(
     has_tools = bool(tools)
 
     if with_retrieve:
-        sg.add_node("retrieve", make_retrieve_node(deps))
+        sg.add_node("retrieve", make_retrieve_node(deps, domain=domain))
     sg.add_node("model", make_model_node(deps, tools=tools, model_id=model_id))
     if has_tools:
         sg.add_node("tools", GatewayToolNode(tools, deps=deps))

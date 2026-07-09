@@ -62,4 +62,5 @@ def build_ops_subgraph(deps: Any):
         deps,
         tools=OPS_TOOLS,
         model_id=deps.model_coding,
+        domain="ops",
     )

@@ -74,4 +74,5 @@ def build_research_subgraph(deps: Any):
         deps,
         tools=RESEARCH_TOOLS,
         model_id=deps.model_coding,
+        domain="research",
     )

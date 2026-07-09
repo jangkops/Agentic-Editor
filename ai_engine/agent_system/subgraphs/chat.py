@@ -35,4 +35,5 @@ def build_chat_subgraph(deps: Any):
         tools=None,
         model_id=deps.model_coding,
         with_retrieve=False,
+        domain="chat",
     )

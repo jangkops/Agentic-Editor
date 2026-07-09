@@ -286,4 +286,5 @@ def build_media_subgraph(deps: Any):
         deps,
         tools=MEDIA_TOOLS,
         model_id=deps.model_coding,
+        domain="media",
     )
