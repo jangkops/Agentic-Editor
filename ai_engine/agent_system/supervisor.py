@@ -48,8 +48,11 @@ from ai_engine.agent_system.subgraphs import (
     build_research_subgraph,
 )
 
-# 라우터 분류가 선택 가능한 도메인 라벨(종료 라벨 done 은 hop cap 도달 시에만 부여).
+# 라우터 분류가 선택 가능한 도메인 라벨.
 _ROUTE_LABELS = ("coding", "media", "research", "ops", "chat")
+# 재진입(서브그래프 1회 이상 방문 후) 시에는 done 도 선택 가능하다 — 멀티도메인 체이닝의
+# 완료 판정을 LLM 이 직접 내린다(supervisor-of-supervisors). 첫 진입에는 done 을 제외한다.
+_ROUTE_LABELS_WITH_DONE = _ROUTE_LABELS + ("done",)
 
 # design 서브그래프 분할에 사용하는 라우터 기본 모델(sonnet-4-5).
 _DEFAULT_ROUTER_MODEL = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
@@ -78,47 +81,94 @@ ROUTER_TIMEOUT: float = _env_float("AE_ROUTER_TIMEOUT", 60.0)
 # ─────────────────────────────────────────────────────────────────────────────
 # 라우터 분류용 도구 스키마 (toolChoice 강제 — 단일 라벨 안정 확보)
 # ─────────────────────────────────────────────────────────────────────────────
-_ROUTE_TOOL: dict = {
-    "name": "select_route",
-    "description": (
-        "사용자 요청을 처리할 도메인 서브그래프를 하나 선택한다. "
+def _make_route_tool(allow_done: bool) -> dict:
+    """select_route 도구 스키마 생성. allow_done=True 면 enum 에 done 을 포함한다.
+
+    subtask: route 가 도메인(비-done)일 때, 그 도메인이 이번 단계에서 수행할 구체적 작업을
+    한국어 한두 문장으로 기술한다. 멀티도메인 체이닝에서 다음 서브그래프에 명확한 지시를
+    전달하는 데 쓰인다(supervisor→worker 작업 지시). done 이면 비워둔다.
+    """
+    labels = _ROUTE_LABELS_WITH_DONE if allow_done else _ROUTE_LABELS
+    desc = (
+        "사용자 요청을 처리할 다음 단계를 하나 선택하고, 그 단계가 수행할 작업을 subtask 에 "
+        "기술한다. "
         "coding: 코드 이해/수정/리팩터/디버그·파일 검색·명령. "
         "media: pptx/pdf/이미지/docx/xlsx/슬라이드/다이어그램 생성. "
         "research: 웹 검색/문서 조사/요약. "
         "ops: 셸 명령/git/원격 SSH 운영 작업. "
         "chat: 도구가 필요 없는 일반 대화."
-    ),
-    "inputSchema": {
-        "json": {
-            "type": "object",
-            "properties": {
-                "route": {
-                    "type": "string",
-                    "enum": list(_ROUTE_LABELS),
-                    "description": "선택한 도메인 라벨",
-                }
-            },
-            "required": ["route"],
-        }
-    },
-}
+    )
+    if allow_done:
+        desc += (
+            " done: 사용자의 원래 요청이 이미 모두 충족되어 더 이상 다른 도메인 작업이 "
+            "필요 없을 때 선택한다(작업 종료, subtask 불필요)."
+        )
+    return {
+        "name": "select_route",
+        "description": desc,
+        "inputSchema": {
+            "json": {
+                "type": "object",
+                "properties": {
+                    "route": {
+                        "type": "string",
+                        "enum": list(labels),
+                        "description": "선택한 다음 단계 라벨",
+                    },
+                    "subtask": {
+                        "type": "string",
+                        "description": (
+                            "선택한 도메인이 이번 단계에서 수행할 구체적 작업(한국어 1~2문장). "
+                            "done 이면 빈 문자열."
+                        ),
+                    },
+                },
+                "required": ["route"],
+            }
+        },
+    }
+
 
 _ROUTER_SYSTEM_PROMPT = (
-    "너는 요청 라우터다. 사용자의 요청과 컨텍스트(열린 파일 등)를 보고 "
-    "가장 적합한 도메인 하나를 골라 select_route 도구를 호출한다. "
-    "가능한 라벨: coding, media, research, ops, chat. "
-    "도구를 사용할 수 없으면 라벨 단어 하나만 출력한다."
+    "너는 계층적 오케스트레이터의 최상위 라우터다. 사용자의 원래 요청과 지금까지 수행한 "
+    "작업(이미 방문한 도메인, 직전 응답)을 보고, 요청을 완수하기 위한 다음 단계 도메인 "
+    "하나를 골라 select_route 도구를 호출한다. 가능한 라벨: coding, media, research, ops, chat, done.\n"
+    "판정 규칙:\n"
+    "- 사용자의 요청에 여러 도메인 작업이 포함되면(예: '코드를 분석하고 그 결과로 PPT를 "
+    "만들어줘'), 한 번에 하나씩 순서대로 처리한다.\n"
+    "- 이미 완료한 도메인 작업을 같은 목적으로 다시 선택하지 마라(반복 금지).\n"
+    "- 원래 요청이 모두 충족되었으면 반드시 done 을 선택한다.\n"
+    "- 도구를 사용할 수 없으면 라벨 단어 하나만 출력한다."
 )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 분류 컨텍스트 구성
 # ─────────────────────────────────────────────────────────────────────────────
+def _last_ai_text(messages: list, limit: int = 800) -> str:
+    """messages 에서 마지막 AIMessage 의 텍스트를 추출(멀티도메인 완료 판정 컨텍스트용)."""
+    for m in reversed(messages or []):
+        if isinstance(m, AIMessage):
+            c = getattr(m, "content", "")
+            if isinstance(c, list):
+                c = "".join(
+                    p.get("text", "") if isinstance(p, dict) else str(p) for p in c
+                )
+            c = str(c).strip()
+            if c:
+                return c[:limit]
+    return ""
+
+
 def _build_router_prompt(state: GraphState) -> str:
-    """프롬프트 + 간단한 컨텍스트(open_file 등)를 라우터 입력 텍스트로 구성한다."""
+    """프롬프트 + 컨텍스트(open_file) + 진행 상황(visited/직전 응답)을 라우터 입력으로 구성.
+
+    재진입 시 라우터가 '원래 요청이 충족됐는지'를 판정할 수 있도록, 이미 방문한 도메인과
+    직전 assistant 응답 요약을 함께 제공한다(멀티도메인 체이닝의 완료 판정 근거).
+    """
     parts: List[str] = []
     prompt = state.get("prompt") or ""
-    parts.append(f"[요청]\n{prompt}")
+    parts.append(f"[원래 요청]\n{prompt}")
 
     open_file = state.get("open_file")
     if isinstance(open_file, str) and open_file.strip():
@@ -127,6 +177,17 @@ def _build_router_prompt(state: GraphState) -> str:
     template_id = state.get("template_id")
     if isinstance(template_id, str) and template_id.strip():
         parts.append(f"[템플릿]\n{template_id.strip()}")
+
+    visited = state.get("visited_routes") or []
+    if visited:
+        parts.append(f"[이미 수행한 도메인(순서대로)]\n{', '.join(visited)}")
+        last_text = _last_ai_text(state.get("messages") or [])
+        if last_text:
+            parts.append(f"[직전 응답 요약]\n{last_text}")
+        parts.append(
+            "위 진행 상황을 근거로: 원래 요청이 모두 충족되었으면 done 을, 아직 남은 "
+            "다른 도메인 작업이 있으면 그 도메인을 선택하라."
+        )
 
     return "\n\n".join(parts)
 
@@ -188,24 +249,33 @@ def _heuristic_route(state: GraphState) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 # 라우터 LLM 분류
 # ─────────────────────────────────────────────────────────────────────────────
-async def _classify_route(state: GraphState, deps: Any) -> str:
-    """GatewayChatModel(sonnet-4-5)로 route 를 분류해 단일 라벨을 반환한다.
+async def _classify_route(
+    state: GraphState, deps: Any, allow_done: bool = False
+) -> tuple:
+    """GatewayChatModel(sonnet-4-5)로 다음 단계 (route, subtask) 를 분류해 반환한다.
 
-    Precondition:  deps.gateway 는 converse 를 제공한다. state["prompt"] 존재.
-    Postcondition: _ROUTE_LABELS 중 하나를 반환. LLM 실패/애매/타임아웃이면 휴리스틱
-                   폴백(_heuristic_route) 라벨을 반환(비차단).
-    Invariant:     LLM 호출은 GatewayChatModel(gateway 경유)만 사용. 개별 await 하나만
-                   asyncio.wait_for(ROUTER_TIMEOUT)로 감싼다(스트림 아님).
+    Args:
+        allow_done: True 면 재진입 상황으로 간주하고 done 을 유효 라벨로 허용한다
+                    (멀티도메인 완료 판정). False(첫 진입)면 done 을 제외한다.
+
+    Returns:
+        (route, subtask) 튜플. route 는 유효 라벨(allow_done 이면 done 포함). subtask 는
+        해당 도메인이 수행할 작업 지시(없으면 ""). LLM 실패/애매/타임아웃이면 폴백
+        (재진입=done, 첫 진입=휴리스틱)을 반환(비차단).
+
+    Invariant: LLM 호출은 GatewayChatModel(gateway 경유)만. 개별 await 하나만
+               asyncio.wait_for(ROUTER_TIMEOUT)로 감싼다(스트림 아님).
     """
+    valid = _ROUTE_LABELS_WITH_DONE if allow_done else _ROUTE_LABELS
     gateway = getattr(deps, "gateway", None)
     if gateway is None:
-        return _heuristic_route(state)
+        return ("done", "") if allow_done else (_heuristic_route(state), "")
 
     model_id = getattr(deps, "model_coding", None) or _DEFAULT_ROUTER_MODEL
 
     try:
         llm = GatewayChatModel(gateway=gateway, model_id=model_id).bind_tools(
-            [_ROUTE_TOOL], tool_choice="select_route"
+            [_make_route_tool(allow_done)], tool_choice="select_route"
         )
         messages = [
             SystemMessage(content=_ROUTER_SYSTEM_PROMPT),
@@ -213,8 +283,7 @@ async def _classify_route(state: GraphState, deps: Any) -> str:
         ]
         ai = await asyncio.wait_for(llm.ainvoke(messages), timeout=ROUTER_TIMEOUT)
     except (asyncio.TimeoutError, GatewayModelError, Exception):
-        # LLM 실패는 비차단 — 휴리스틱 폴백.
-        return _heuristic_route(state)
+        return ("done", "") if allow_done else (_heuristic_route(state), "")
 
     # 1) toolChoice 강제 스키마 응답 우선
     tool_calls = getattr(ai, "tool_calls", None) or []
@@ -222,16 +291,19 @@ async def _classify_route(state: GraphState, deps: Any) -> str:
         args = tc.get("args") if isinstance(tc, dict) else None
         if isinstance(args, dict):
             label = args.get("route")
-            if isinstance(label, str) and label.lower() in _ROUTE_LABELS:
-                return label.lower()
+            if isinstance(label, str) and label.lower() in valid:
+                subtask = args.get("subtask")
+                return (label.lower(), subtask.strip() if isinstance(subtask, str) else "")
 
     # 2) 텍스트 라벨 파싱 폴백
     label = _extract_label_from_text(getattr(ai, "content", ""))
-    if label in _ROUTE_LABELS:
-        return label
+    if label in valid:
+        return (label, "")
+    if allow_done and isinstance(getattr(ai, "content", ""), str) and "done" in ai.content.lower():
+        return ("done", "")
 
-    # 3) 최종 휴리스틱 폴백
-    return _heuristic_route(state)
+    # 3) 최종 폴백
+    return ("done", "") if allow_done else (_heuristic_route(state), "")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -245,35 +317,49 @@ def make_top_router_node(deps: Any):
     반환 노드의 계약:
       Precondition:  state["prompt"] 는 비어있지 않다.
       Postcondition: hop cap 도달 시 {"route": "done"}(visited_routes 미증가) 반환.
-                     이미 서브그래프를 1회 이상 방문했고 마지막 메시지가 도구호출 없는
-                     최종 AIMessage 이면 {"route": "done"} 반환(작업 완료 — 재라우팅 불필요).
-                     그 외에는 {"route": <label>, "visited_routes": [<label>]} 반환
-                     (visited_routes reducer 가 operator.add 로 누적).
-      Invariant:     LLM 호출은 GatewayChatModel(gateway 경유)만. 분류 실패는 비차단.
+                     첫 진입(visited 비었음): done 불가 분류 → {"route": <label>, "visited_routes": [<label>]}.
+                     재진입(visited 있음): 라우터가 원래 요청 충족 여부를 판정 —
+                       · done 이면 {"route": "done"}(visited 미증가)로 종료.
+                       · 다른 도메인이 남았으면 {"route": <label>, "visited_routes": [<label>]}로
+                         멀티도메인 체이닝 계속(supervisor-of-supervisors).
+      Invariant:     LLM 호출은 GatewayChatModel(gateway 경유)만. 분류 실패는 비차단
+                     (재진입 실패 시 done 으로 안전 종료). hop cap 이 순환을 유한 종료.
     """
 
     async def top_router_node(state: GraphState) -> dict:
         visited = state.get("visited_routes", []) or []
 
-        # 요구사항 6.5 / Property 4: hop cap 도달 시 LLM 없이 즉시 종료.
+        # 요구사항 6.5 / Property 4: hop cap 도달 시 LLM 없이 즉시 종료(무한 순환 차단).
         if len(visited) >= MAX_ROUTE_HOPS:
             return {"route": "done"}
 
-        # 작업 완료 감지(재라우팅 순환·빈 재호출 방지): 서브그래프를 이미 1회 이상 방문했고
-        # 마지막 메시지가 "도구호출이 없는 AIMessage"(= 서브그래프의 model→tools 루프가 끝나
-        # 최종 텍스트 답변을 반환한 상태)이면 추가 라우팅 없이 done 으로 종료한다.
-        # 이 가드가 없으면 서브그래프 종료 후 router 로 복귀할 때마다 같은 도메인으로 다시
-        # 분류되어(hop cap 까지) 불필요한 재호출이 발생하고, 이미 assistant 로 끝난 대화에
-        # model 을 재호출해 "No generations found in stream" 을 유발한다.
-        if visited:
-            messages = state.get("messages") or []
-            if messages:
-                last = messages[-1]
-                if isinstance(last, AIMessage) and not (getattr(last, "tool_calls", None)):
-                    return {"route": "done"}
+        # 방어: 마지막 메시지가 도구호출 대기(tool_calls 있는 AIMessage)면 서브그래프 내부에서
+        # 처리돼야 하며 여기 도달하면 안 되지만, 안전하게 done 으로 종료한다.
+        messages = state.get("messages") or []
+        if visited and messages:
+            last = messages[-1]
+            if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
+                return {"route": "done"}
 
-        route = await _classify_route(state, deps)
-        return {"route": route, "visited_routes": [route]}
+        # 첫 진입엔 done 불가(반드시 도메인 하나 실행). 재진입엔 done 허용(완료 판정).
+        allow_done = bool(visited)
+        route, subtask = await _classify_route(state, deps, allow_done=allow_done)
+
+        if route == "done":
+            return {"route": "done"}
+
+        out: dict = {"route": route, "visited_routes": [route]}
+
+        # 재진입(멀티도메인 체이닝)에서 다음 도메인에 명확한 지시를 전달한다. 직전 도메인의
+        # 최종 AIMessage 로 messages 가 끝나 있으면, 새 도메인의 model 호출이 "생성할 것 없음"
+        # (No generations found in stream)을 반환하므로, subtask 를 HumanMessage 로 추가해
+        # messages 가 사용자 턴으로 끝나게 하고 다음 워커에게 작업을 지시한다(supervisor→worker).
+        if visited:
+            instruction = subtask or (state.get("prompt") or "")
+            if instruction:
+                out["messages"] = [HumanMessage(content=instruction)]
+
+        return out
 
     return top_router_node
 
