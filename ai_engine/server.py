@@ -10241,55 +10241,88 @@ _REQUIRED_FORMAT_TOOL = {
 }
 
 
-def _extract_required_formats(user_prompt: str) -> set:
-    """사용자 프롬프트에서 명시된 파일 형식들을 추출.
+def _fmt_hits_in_segment(seg_text: str, seg_raw: str) -> set:
+    """한 세그먼트(문장/구)에서 언급된 파일 형식 키워드를 추출.
 
-    영어/한국어 키워드 모두 인식. 실제 generator 도구가 있는 형식만 반환:
-    - pdf, pptx, xlsx, docx, png
-    SVG/MD는 코드 유사 출력으로 취급해 포함하지 않음(우리가 generate_svg를
-    가지고 있지 않으므로). 호출자가 enforcement를 결정한다.
+    seg_text = seg_raw.lower(). 실제 generator 도구가 있는 형식만 반환:
+    pdf, pptx, xlsx, docx, png. (SVG/MD는 코드 유사 출력이라 제외.)
+    """
+    hits = set()
+    if re.search(r"(?:^|[^a-z])pdf(?:[^a-z]|$)", seg_text) or ".pdf" in seg_text:
+        hits.add("pdf")
+    if (re.search(r"(?:^|[^a-z])pptx(?:[^a-z]|$)", seg_text) or ".pptx" in seg_text
+            or "파워포인트" in seg_raw or "프레젠테이션" in seg_raw
+            or "슬라이드" in seg_raw or "powerpoint" in seg_text):
+        hits.add("pptx")
+    if (re.search(r"(?:^|[^a-z])xlsx(?:[^a-z]|$)", seg_text) or ".xlsx" in seg_text
+            or "엑셀" in seg_raw or "스프레드시트" in seg_raw or "excel" in seg_text):
+        hits.add("xlsx")
+    if (re.search(r"(?:^|[^a-z])docx(?:[^a-z]|$)", seg_text) or ".docx" in seg_text
+            or "워드" in seg_raw or re.search(r"(?:^|[^a-z])word(?:[^a-z]|$)", seg_text)):
+        hits.add("docx")
+    if (re.search(r"(?:^|[^a-z])(?:png|jpg|jpeg|image)(?:[^a-z]|$)", seg_text)
+            or "이미지" in seg_raw or "그림" in seg_raw or "사진" in seg_raw):
+        hits.add("png")
+    return hits
+
+
+# 파일 생성을 명시적으로 거부/제외하는 부정 문맥 신호.
+# 이 신호가 형식 키워드와 같은 세그먼트에 있으면 그 형식은 "요청"으로 보지 않는다.
+_FMT_NEG_RE = re.compile(
+    r"(하지\s*마|하지마|마세요|마셈|만들지\s*(?:마|말|않)|생성\s*(?:하지|치\s*마|금지|안\s)"
+    r"|필요\s*없|필요없|말고|제외|금지|없이|빼고|말아|불필요"
+    r"|do\s*not|don['’]?t|without|no\s+need|not\s+(?:create|make|generate|need|required))"
+)
+# 실제 파일 생성을 요청하는 긍정 의도 신호. 형식 키워드가 "요청"으로 인정되려면
+# 같은 세그먼트에 이 신호가 함께 있어야 한다(단순 언급/부정 맥락 오탐 방지).
+_FMT_POS_RE = re.compile(
+    r"(생성|만들|작성|제작|그려|그리|출력|저장|뽑아|제출|내보|변환|첨부"
+    r"|해\s*줘|해줘|해\s*주|부탁|원해|원합|주세요|줘"
+    r"|create|make|generate|draw|write|build|export|produce|convert|want|need|give\s+me)"
+)
+
+
+def _extract_required_formats(user_prompt: str) -> set:
+    """사용자 프롬프트에서 *명시적으로 생성 요청된* 파일 형식들을 추출.
+
+    강제성 완화(사용자 요청): 형식 키워드가 프롬프트에 등장하기만 해서는
+    강제 생성 대상으로 삼지 않는다. 세그먼트(문장/구) 단위로 판정하며,
+    다음을 모두 만족하는 형식만 반환한다:
+      1) 같은 세그먼트에 파일 생성을 요청하는 *긍정 의도*(만들/생성/작성 등)가 있고,
+      2) 같은 세그먼트에 *부정/거부 문맥*(하지 마/없이/제외/금지 등)이 없다.
+
+    이로써 "요청하지 않은 파일(PDF/PPTX 등) 생성은 하지 마세요" 같은 부정문이나,
+    이전 답변/로그가 섞인 종합 프롬프트의 단순 형식 언급이 강제 생성을 유발하지
+    않는다. 실제 generator 도구가 있는 형식(pdf/pptx/xlsx/docx/png)만 대상.
 
     Returns:
-        set[str] — lowercase 확장자 집합. 빈 프롬프트/형식 미언급이면 빈 set.
+        set[str] — lowercase 확장자 집합. 명시 요청이 없으면 빈 set.
     """
     if not user_prompt:
         return set()
-    text = user_prompt.lower()
 
-    formats = set()
+    # 문장/구 단위 분할 — 형식과 부정/긍정 신호의 지역성(locality)을 판정하기 위함.
+    # 주의: 긍정 동사(만들고 등)를 분할자로 쓰면 앞 세그먼트가 긍정 신호를 잃으므로
+    # 문장부호와 명확한 접속사만 분할자로 사용한다. 복합 대조문
+    # ("A는 만들고 B는 만들지 마")은 부정 우선으로 보수적 처리(강제 생성 안 함) —
+    # planner가 문맥으로 보완하므로 안전하다.
+    segments = re.split(r"[.!?\n,;·:•]|그리고|또한|하지만|반면", user_prompt)
+    requested = set()
+    excluded = set()
+    for seg_raw in segments:
+        seg_text = seg_raw.lower()
+        hits = _fmt_hits_in_segment(seg_text, seg_raw)
+        if not hits:
+            continue
+        if _FMT_NEG_RE.search(seg_raw) or _FMT_NEG_RE.search(seg_text):
+            # 부정 문맥 → 이 형식은 강제하지 않음(오탐 방지)
+            excluded |= hits
+        elif _FMT_POS_RE.search(seg_raw) or _FMT_POS_RE.search(seg_text):
+            # 긍정 생성 의도가 명확할 때만 요청으로 인정
+            requested |= hits
+        # 긍정도 부정도 없는 단순 언급은 강제하지 않음(보수적 — 강제성 제거)
 
-    # PDF
-    if re.search(r"(?:^|[^a-z])pdf(?:[^a-z]|$)", text) or ".pdf" in text:
-        formats.add("pdf")
-
-    # PPTX / 한국어 별칭
-    if (re.search(r"(?:^|[^a-z])pptx(?:[^a-z]|$)", text) or ".pptx" in text
-            or "파워포인트" in user_prompt or "프레젠테이션" in user_prompt
-            or "슬라이드" in user_prompt or "powerpoint" in text):
-        formats.add("pptx")
-
-    # XLSX / 엑셀
-    if (re.search(r"(?:^|[^a-z])xlsx(?:[^a-z]|$)", text) or ".xlsx" in text
-            or "엑셀" in user_prompt or "스프레드시트" in user_prompt
-            or "excel" in text):
-        formats.add("xlsx")
-
-    # DOCX / 워드
-    if (re.search(r"(?:^|[^a-z])docx(?:[^a-z]|$)", text) or ".docx" in text
-            or "워드" in user_prompt
-            or re.search(r"(?:^|[^a-z])word(?:[^a-z]|$)", text)):
-        formats.add("docx")
-
-    # PNG / JPG / 이미지 / 그림
-    if (re.search(r"(?:^|[^a-z])(?:png|jpg|jpeg|image)(?:[^a-z]|$)", text)
-            or "이미지" in user_prompt or "그림" in user_prompt
-            or "사진" in user_prompt):
-        formats.add("png")
-
-    # SVG / MD — 코드 유사 출력. enforcement 대상이 아니므로 추가하지 않음.
-    # (사용자가 SVG만 요청한 경우 텍스트/코드 경로로 처리 — 강제 보강하지 않음)
-
-    return formats
+    return requested - excluded
 
 
 def _subtask_primary_format(st: dict) -> str:
