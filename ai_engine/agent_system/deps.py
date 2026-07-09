@@ -1,0 +1,36 @@
+"""GraphDeps — 그래프/서브그래프 빌더에 주입하는 의존성 컨테이너.
+
+Task 1.12 산출물. design.md 섹션 4의 서브그래프 빌더 시그니처(`build_*_subgraph(deps)`)가
+받는 `deps` 객체의 표준 형태를 정의한다.
+
+⚠️ 보안 (요구사항 8.1 — 자격증명 미저장):
+- 이 컨테이너에는 AWS 자격증명(accessKeyId / secretAccessKey / sessionToken)을 절대
+  담지 않는다. `gateway`(GatewayClient)는 런타임에 assume-role / 주입으로 자격증명을
+  획득하며, 이 dataclass 는 gateway 참조와 모델 ID / checkpointer 참조만 보관한다.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Optional
+
+# design.md 서브그래프 분할 기준: coding/media/research/ops 는 sonnet-4-5 기본.
+_DEFAULT_CODING_MODEL = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+
+
+@dataclass
+class GraphDeps:
+    """그래프 빌더 의존성.
+
+    Attributes:
+        gateway:      GatewayClient (converse / stream_sse_realtime 제공). LLM 호출은
+                      반드시 이 게이트웨이 경유(직접 SDK 금지 — 요구사항 2.2).
+        model_coding: coding 서브그래프 model 노드가 사용할 Bedrock model_id.
+        checkpointer: LangGraph BaseCheckpointSaver. Top 그래프 compile 시에만 주입되며
+                      서브그래프는 부모의 checkpointer 를 상속한다(API_NOTES 항목 6).
+                      Phase 1 단일 서브그래프 스모크에서는 None 이어도 무방.
+    """
+
+    gateway: Any = None
+    model_coding: str = _DEFAULT_CODING_MODEL
+    checkpointer: Optional[Any] = None

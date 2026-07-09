@@ -8,9 +8,10 @@ class AgentGraph:
     """Multi-agent workflow graph."""
 
     def __init__(self, gateway_client):
-        self.planner = GatewayChatModel(gateway_client, "anthropic.claude-3-opus-20240229-v1:0")
-        self.coder = GatewayChatModel(gateway_client, "anthropic.claude-3-5-sonnet-20241022-v2:0")
-        self.reviewer = GatewayChatModel(gateway_client, "anthropic.claude-3-opus-20240229-v1:0")
+        # 라이브 실측 활성 모델(2026-07). 기존 opus-3/sonnet-3.5는 EOL이라 게이트웨이 거부.
+        self.planner = GatewayChatModel(gateway_client, "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
+        self.coder = GatewayChatModel(gateway_client, "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
+        self.reviewer = GatewayChatModel(gateway_client, "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
         self.tools = ToolRegistry()
 
     async def _plan(self, state: AgentState) -> AgentState:

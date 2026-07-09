@@ -9112,6 +9112,136 @@ async def run_agent_stream(request: Request):
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# LangGraph 그래프 경로 (Phase 1 골격) — feature flag `AE_LANGGRAPH`
+#
+# design.md 5단계 마이그레이션의 Phase 1. 기존 `/api/agents/run-stream` 과 **병행**
+# 하는 신규 라우트 `/api/agents/graph-stream` 을 노출한다(요구사항 7.1).
+#   - flag on:  coding 서브그래프를 compile 해 astream_events 로 실행(요구사항 7.2).
+#   - flag off: 기존 run_agent_stream 핸들러로 위임(요구사항 7.3).
+#   - 준비(compile/deps) 단계 실패: 기존 경로로 자동 fallback(요구사항 7.4).
+#   - 스트리밍 시작 후 실패: `{error}` + `[DONE]` 로 종료(스트림은 되돌릴 수 없음).
+#
+# ⚠️ Phase 1 SSE 는 **최소 매핑**(on_chat_model_stream → {text}, 종료 → [DONE])만 한다.
+#    완전한 이벤트 매핑(tool/verifiedFiles/agent_*/heartbeat)은 sse_bridge(Task 5.4)에서 교체.
+# ⚠️ API_NOTES CRITICAL 2: 스트림 소비 루프(async for)를 asyncio.wait_for 로 감싸지 않는다
+#    (Python 3.14 에서 취소 시 hang). per-node 타임아웃 + recursion_limit 로만 상한을 건다.
+# ─────────────────────────────────────────────────────────────────────────────
+def _langgraph_enabled() -> bool:
+    """`AE_LANGGRAPH` 환경변수가 활성(1/true/on)인지 여부."""
+    return os.environ.get("AE_LANGGRAPH", "").strip().lower() in ("1", "true", "on")
+
+
+@app.post("/api/agents/graph-stream")
+async def run_agent_graph_stream(request: Request):
+    """LangGraph coding 서브그래프 기반 SSE 스트림 (Phase 1 골격).
+
+    body 필드는 `/api/agents/run-stream` 과 동일(prompt/sessionId/projectPath/openFile/
+    openFileContent/awsProfile/bedrockUser/templateId/model 등).
+    """
+    # flag 비활성 → 기존 경로로 위임(요구사항 7.3). body 재파싱은 FastAPI 가 캐시하므로 안전.
+    if not _langgraph_enabled():
+        return await run_agent_stream(request)
+
+    body = await request.json()
+
+    # ── 그래프 경로 준비(compile/deps). 이 단계 예외는 기존 경로로 fallback(요구사항 7.4). ──
+    try:
+        from langchain_core.messages import HumanMessage
+        from ai_engine.agent_system.deps import GraphDeps
+        from ai_engine.agent_system.subgraphs.coding import build_coding_subgraph
+        from ai_engine.agent_system.checkpoint_store import JsonFileCheckpointSaver
+
+        prompt = body.get("prompt", "")
+        model = body.get("model", "anthropic.claude-sonnet-4-5-20250929-v1:0")
+        system_prompt = body.get("systemPrompt", "")
+        aws_profile = body.get("awsProfile", os.environ.get("AWS_PROFILE", "bedrock-gw"))
+        bedrock_user = body.get("bedrockUser", os.environ.get("BEDROCK_USER", ""))
+        project_path = body.get("projectPath", "")
+        open_file = body.get("openFile", "")
+        open_file_content = body.get("openFileContent", "")
+        template_id = body.get("templateId", "")
+        session_id = body.get("sessionId", "default")
+
+        # GatewayClient — 기존 run-stream 과 동일한 방식(런타임 자격증명 주입, 파일 저장 없음).
+        gw = _get_gw(aws_profile, bedrock_user)
+
+        # checkpointer base_dir 는 userData 하위로 한정(요구사항 4.3 / 8.3).
+        # Electron 이 주입한 AE_GENERATED_ROOT(userData) 하위 checkpoints/langgraph 를 우선.
+        _env_root = os.environ.get("AE_GENERATED_ROOT", "").strip()
+        if _env_root:
+            _ckpt_dir = os.path.join(_env_root, "checkpoints", "langgraph")
+        else:
+            _ckpt_dir = ""  # JsonFileCheckpointSaver 기본(AE_CHECKPOINT_DIR / ~/.agentic-editor)
+        checkpointer = JsonFileCheckpointSaver(_ckpt_dir)
+
+        # Phase 1 은 coding 단일 그래프(Top Supervisor 는 Phase 2). deps 로 gateway/model/ckpt 주입.
+        deps = GraphDeps(
+            gateway=gw,
+            model_coding=_resolve_callable_model_id(model, aws_profile, bedrock_user),
+            checkpointer=checkpointer,
+        )
+        compiled = build_coding_subgraph(deps)
+
+        # 초기 GraphState — 자격증명은 담지 않고 profile name / bedrock_user 문자열만(요구사항 8.1).
+        initial_state = {
+            "prompt": prompt,
+            "session_id": session_id,
+            "project_path": project_path,
+            "open_file": open_file,
+            "open_file_content": open_file_content,
+            "aws_profile": aws_profile,
+            "bedrock_user": bedrock_user,
+            "template_id": template_id,
+            "system_prompt": system_prompt,
+            "messages": [HumanMessage(content=prompt)],
+        }
+        graph_config = {
+            "configurable": {"thread_id": session_id},
+            "recursion_limit": int(os.environ.get("AE_GRAPH_RECURSION", "50")),
+        }
+    except Exception as _prep_err:
+        print(f"[graph-stream] 준비 실패 → 기존 run-stream 경로로 fallback: {_prep_err}")
+        return await run_agent_stream(request)
+
+    async def graph_stream():
+        """astream_events(v2) 를 최소 매핑으로 SSE 중계.
+
+        ⚠️ 이 async for 루프를 asyncio.wait_for 로 감싸지 않는다(API_NOTES CRITICAL 2).
+        """
+        try:
+            async for event in compiled.astream_events(
+                initial_state, config=graph_config, version="v2"
+            ):
+                if event.get("event") != "on_chat_model_stream":
+                    continue
+                chunk = (event.get("data") or {}).get("chunk")
+                text = getattr(chunk, "content", "") if chunk is not None else ""
+                # content 가 리스트(멀티모달 블록)면 text 조각만 이어붙임.
+                if isinstance(text, list):
+                    text = "".join(
+                        p.get("text", "") if isinstance(p, dict) else str(p)
+                        for p in text
+                    )
+                if text:
+                    yield f"data: {json.dumps({'text': text}, ensure_ascii=False)}\n\n"
+        except Exception as _stream_err:
+            # 스트리밍이 이미 시작된 후의 실패는 fallback 불가 → error 이벤트로 종료.
+            print(f"[graph-stream] 스트림 실패: {_stream_err}")
+            yield f"data: {json.dumps({'error': str(_stream_err)}, ensure_ascii=False)}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        graph_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
 @app.post("/api/agents/run-agent")
 async def run_agent_with_tools(request: Request):
     """에이전트 모드 — 도구 실행 루프 포함. 모델이 tool_use로 응답하면 실행 후 재호출.
