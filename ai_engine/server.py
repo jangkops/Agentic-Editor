@@ -9965,6 +9965,7 @@ async def run_agent_parallel(request: Request):
         # asyncio.create_task로 명시적 즉시 스케줄링 → 진짜 동시 실행 보장
         import time as _time
         batch_size = 10
+        _collected = []  # 병렬 결과 수집 — 요약 체크포인트 반영용
         for i in range(0, len(models), batch_size):
             batch = models[i:i+batch_size]
             _batch_t0 = _time.time()
@@ -9974,11 +9975,34 @@ async def run_agent_parallel(request: Request):
             # as_completed로 완료 순서대로 yield
             for coro in asyncio.as_completed(tasks):
                 result = await coro
+                _collected.append(result)
                 yield f"data: {json.dumps(result, ensure_ascii=False)}\n\n"
             print(f"[Parallel] BATCH done elapsed={_time.time()-_batch_t0:.2f}s")
             # 배치 간 heartbeat — 클라이언트 idle timeout 방지
             if i + batch_size < len(models):
                 yield f"data: {json.dumps({'heartbeat': True, 'progress': min(i+batch_size, len(models)), 'total': len(models)})}\n\n"
+
+        # === 병렬 연속성 — 결과를 세션 요약 체크포인트에 반영 ===
+        # 병렬 assistant 응답(합본)을 chat_history에 이어붙여 요약을 트리거한다.
+        # 다음 턴의 _build_messages가 이 요약 체크포인트를 주입하므로, 병렬만 계속
+        # 이어가는 긴 세션에서도 초반 맥락이 밀려나지 않고 유지된다(요구사항: 체크포인트
+        # 컨텍스트 유지). 비동기 task로 던져 SSE 종료를 막지 않는다.
+        try:
+            _ok = [r for r in _collected
+                   if isinstance(r, dict) and r.get("status") == "done" and r.get("content")]
+            if _ok:
+                _digest_parts = []
+                for r in _ok:
+                    _nm = r.get("modelId", "model")
+                    _digest_parts.append(f"[{_nm}]\n{(r.get('content') or '')[:800]}")
+                _digest = "\n\n".join(_digest_parts)[:4000]
+                _summ_hist = list(chat_history or []) + [
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": _digest},
+                ]
+                asyncio.create_task(_maybe_summarize(session_id, _summ_hist, gw))
+        except Exception as _se:
+            print(f"[Parallel] 요약 체크포인트 트리거 실패(무시): {_se}")
 
         yield "data: [DONE]\n\n"
 

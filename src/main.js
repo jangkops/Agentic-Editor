@@ -128,7 +128,7 @@ rebuildModelList();
 let allSkills = [];
 
 // ===== Fix 4: 대화 세션 탭 =====
-let chatSessions = [{ id:'s-'+Date.now(), name:'대화 1', messages:[] }];
+let chatSessions = [{ id:'s-'+Date.now(), name:'대화 1', messages:[], createdAt: Date.now() }];
 let activeSessionIdx = 0;
 
 const state = {
@@ -1439,13 +1439,28 @@ function renderParallelSlotList() {
 
 // ===== Chat Tabs =====
 function initChatTabs() { renderChatTabs(); }
+
+// 세션 탭의 표시 라벨 — 이름 + (구분용) 메시지 수/생성시각 툴팁.
+function _sessionTabTooltip(s, i) {
+  const nm = s.name || `대화 ${i + 1}`;
+  const created = s.createdAt ? new Date(s.createdAt).toLocaleString('ko-KR', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
+  const msgCount = (s.messages || []).filter(m => m.role === 'user').length;
+  const parts = [nm];
+  if (created) parts.push(`생성: ${created}`);
+  parts.push(`질문 ${msgCount}개`);
+  parts.push('더블클릭하여 이름 변경');
+  return parts.join('\n');
+}
+
 function renderChatTabs() {
   const bar = document.getElementById('chat-tabs-bar'); if (!bar) return;
-  bar.innerHTML = chatSessions.map((s, i) => `
-    <button class="chat-tab ${i === activeSessionIdx ? 'active' : ''}" data-idx="${i}">
-      ${s.name}${chatSessions.length > 1 ? `<span class="chat-tab-close" data-close="${i}">✕</span>` : ''}
-    </button>
-  `).join('') + `<button class="chat-tab-add" id="btn-new-session">+</button>`;
+  bar.innerHTML = chatSessions.map((s, i) => {
+    const nm = esc(s.name || `대화 ${i + 1}`);
+    return `
+    <button class="chat-tab ${i === activeSessionIdx ? 'active' : ''}" data-idx="${i}" title="${esc(_sessionTabTooltip(s, i))}">
+      <span class="chat-tab-label" data-label="${i}">${nm}</span>${chatSessions.length > 1 ? `<span class="chat-tab-close" data-close="${i}" title="대화 닫기">✕</span>` : ''}
+    </button>`;
+  }).join('') + `<button class="chat-tab-add" id="btn-new-session" title="새 대화">+</button>`;
 
   bar.querySelectorAll('.chat-tab').forEach(el => {
     el.addEventListener('click', e => {
@@ -1453,18 +1468,66 @@ function renderChatTabs() {
         const idx = +e.target.dataset.close;
         chatSessions.splice(idx, 1);
         if (activeSessionIdx >= chatSessions.length) activeSessionIdx = chatSessions.length - 1;
-        renderChatTabs(); renderMessages();
+        renderChatTabs(); renderMessages(); saveConversation();
         return;
       }
       activeSessionIdx = +el.dataset.idx;
       renderChatTabs(); renderMessages();
     });
+    // 더블클릭 → 인라인 이름 편집
+    el.addEventListener('dblclick', e => {
+      e.preventDefault(); e.stopPropagation();
+      _beginRenameSession(+el.dataset.idx, el);
+    });
   });
   document.getElementById('btn-new-session')?.addEventListener('click', () => {
-    chatSessions.push({ id:'s-'+Date.now(), name:`대화 ${chatSessions.length+1}`, messages:[] });
+    chatSessions.push({ id:'s-'+Date.now(), name:`대화 ${chatSessions.length+1}`, messages:[], createdAt: Date.now() });
     activeSessionIdx = chatSessions.length - 1;
-    renderChatTabs(); renderMessages();
+    renderChatTabs(); renderMessages(); saveConversation();
   });
+}
+
+// 탭 더블클릭 시 인라인 input으로 세션 이름 편집. Enter=확정, Esc=취소, blur=확정.
+function _beginRenameSession(idx, tabEl) {
+  const s = chatSessions[idx]; if (!s || !tabEl) return;
+  const labelEl = tabEl.querySelector('.chat-tab-label'); if (!labelEl) return;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'chat-tab-rename-input';
+  input.value = s.name || '';
+  input.maxLength = 40;
+  input.style.cssText = 'width:120px;font-size:12px;padding:1px 5px;border:1px solid var(--color-accent);border-radius:3px;background:var(--color-bg-input,#1e1e1e);color:var(--color-text-primary);outline:none;';
+  labelEl.replaceWith(input);
+  input.focus(); input.select();
+  let done = false;
+  const commit = (save) => {
+    if (done) return; done = true;
+    if (save) {
+      const v = input.value.trim();
+      if (v) { s.name = v.slice(0, 40); s._renamed = true; }
+    }
+    renderChatTabs(); saveConversation();
+  };
+  input.addEventListener('keydown', ev => {
+    ev.stopPropagation();
+    if (ev.key === 'Enter') { ev.preventDefault(); commit(true); }
+    else if (ev.key === 'Escape') { ev.preventDefault(); commit(false); }
+  });
+  input.addEventListener('blur', () => commit(true));
+  input.addEventListener('click', ev => ev.stopPropagation());
+  input.addEventListener('dblclick', ev => ev.stopPropagation());
+}
+
+// 사용자가 첫 질문을 보낼 때, 세션 이름이 아직 기본값("대화 N")이고 사용자가
+// 수동 변경(_renamed)하지 않았다면 질문 앞부분으로 자동 제목을 부여해 세션을 구분 가능하게 한다.
+function _autoNameSession(text) {
+  const s = chatSessions[activeSessionIdx];
+  if (!s || s._renamed) return;
+  if (!/^대화\s*\d+$/.test((s.name || '').trim())) return;
+  const t = (text || '').replace(/\s+/g, ' ').trim();
+  if (!t) return;
+  s.name = t.length > 22 ? t.slice(0, 22) + '…' : t;
+  try { renderChatTabs(); } catch (_) {}
 }
 
 // ===== Chat + File Attach =====
@@ -1745,8 +1808,10 @@ async function sendMessage() {
       const newIdx = chatSessions.length;
       const newSession = {
         id: 's-' + Date.now(),
-        name: `대화 ${newIdx + 1}`,
+        name: `${oldName} (이어짐)`,
         messages: [],
+        createdAt: Date.now(),
+        _renamed: true,
       };
 
       // 3) 새 탭 첫 메시지 — 인계 문서를 user 컨텍스트로 주입
@@ -1830,6 +1895,8 @@ async function sendMessage() {
   }
   const userMsg={role:'user',content,attachments:[...state.attachedFiles]};
   state.messages.push(userMsg);state.attachedFiles=[];renderAttachedFiles();
+  // 세션 자동 제목 — 기본 이름일 때만 첫 질문 앞부분으로 구분 가능하게 부여
+  _autoNameSession(text);
   // 이 user 메시지를 뷰포트 최상단에 고정할 핀 인덱스 기록 (스트리밍 중 자동 스크롤 억제용)
   state._pinUserMsgIdx = state.messages.length - 1;
   state._pinAnchorSet = false;
@@ -2147,9 +2214,10 @@ function _apiBody(extra) {
     const c = m.content || '';
     if (m.role === 'user') return c.substring(0, 6000);
     if (m.isParallel && m.hiddenInChat) {
-      // 병렬 합본은 첫 N모델 이름만 남긴 초압축 요약으로 + sanitize
-      const head = _sanitizeAssistant(c.substring(0, 400));
-      return head + (c.length > 400 ? `\n\n…[병렬 합본 축약됨: ${m.parallelCount || '?'}개 모델, 원본 ${c.length}자]` : '');
+      // 병렬 합본 — 다음 턴 연속 추론을 위해 충분한 맥락 유지(과거 400자는 정보 손실 과다).
+      // 서버 요약 체크포인트가 오래된 맥락을 보존하므로 최근 합본은 넉넉히(1500자) 전달한다.
+      const head = _sanitizeAssistant(c.substring(0, 1500));
+      return head + (c.length > 1500 ? `\n\n…[병렬 합본 일부 축약: ${m.parallelCount || '?'}개 모델, 원본 ${c.length}자]` : '');
     }
     // assistant 응답은 sanitize 후 자르기
     if (m.isConsensus) return _sanitizeAssistant(c).substring(0, 4000);

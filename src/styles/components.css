@@ -347,6 +347,8 @@
 .chat-tab:hover{color:var(--color-text-primary);}
 .chat-tab-close{font-size:10px;opacity:0.4;cursor:pointer;}
 .chat-tab-close:hover{opacity:1;color:var(--color-error);}
+.chat-tab-label{max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;vertical-align:bottom;}
+.chat-tab-rename-input{font-family:var(--font-ui,inherit);}
 .chat-tab-add{
   background:transparent;border:none;color:var(--color-text-muted);
   font-size:14px;cursor:pointer;padding:0 8px;transition:color var(--transition);
