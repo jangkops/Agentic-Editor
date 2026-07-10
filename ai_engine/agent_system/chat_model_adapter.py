@@ -249,6 +249,50 @@ def _lc_messages_to_bedrock(messages: Sequence[BaseMessage]) -> tuple[list, str]
     return merged, "\n\n".join(system_parts)
 
 
+def bedrock_messages_to_lc(messages: Any) -> list:
+    """Bedrock converse messages(dict) → LangChain BaseMessage 리스트 (역변환).
+
+    ConversationMemory.build_messages 가 만드는 Bedrock 형식
+    ``[{"role": "user"/"assistant", "content": [{"text": ...} | {"image": ...}]}]`` 을
+    LangGraph 초기 상태의 messages(LangChain 메시지)로 되돌린다. 멀티턴 대화 맥락 복원
+    (요구사항: graph-stream 멀티턴 회귀 수정)에 사용한다.
+
+    - text 블록은 이어붙여 content(str)로.
+    - image 블록(과거 첨부)은 텍스트 맥락 복원 목적상 ``[이미지 첨부됨]`` placeholder 로
+      대체한다(현재 턴 프롬프트의 실제 이미지 처리와 무관 — 히스토리 텍스트 맥락만 복원).
+    - role=assistant → AIMessage, 그 외 → HumanMessage.
+    - 입력이 비었거나 형식이 어긋나면 빈 리스트를 반환(비차단).
+    """
+    out: list = []
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role")
+        content = m.get("content")
+        text_parts: list[str] = []
+        has_image = False
+        if isinstance(content, str):
+            if content:
+                text_parts.append(content)
+        elif isinstance(content, list):
+            for b in content:
+                if isinstance(b, dict):
+                    if isinstance(b.get("text"), str) and b["text"]:
+                        text_parts.append(b["text"])
+                    elif "image" in b:
+                        has_image = True
+                elif isinstance(b, str) and b:
+                    text_parts.append(b)
+        text = "\n".join(text_parts)
+        if has_image and role == "user":
+            text = (text + "\n[이미지 첨부됨]").strip()
+        if role == "assistant":
+            out.append(AIMessage(content=text))
+        else:
+            out.append(HumanMessage(content=text))
+    return out
+
+
 def _joined_text(content: Any) -> str:
     """content(list) 중 텍스트 파트만 이어붙인다."""
     if isinstance(content, str):

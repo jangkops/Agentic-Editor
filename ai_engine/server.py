@@ -9186,6 +9186,7 @@ async def run_agent_graph_stream(request: Request):
         from ai_engine.agent_system.supervisor import build_top_graph
         from ai_engine.agent_system.checkpoint_store import JsonFileCheckpointSaver
         from ai_engine.agent_system.sse_bridge import graph_events_to_sse
+        from ai_engine.agent_system.chat_model_adapter import bedrock_messages_to_lc
 
         prompt = body.get("prompt", "")
         model = body.get("model", "anthropic.claude-sonnet-4-5-20250929-v1:0")
@@ -9219,9 +9220,22 @@ async def run_agent_graph_stream(request: Request):
         )
         compiled = build_top_graph(deps)
 
+        # ── 멀티턴 대화 맥락 주입 (멀티턴 회귀 수정) ──
+        # 기존 run-stream/run-agent 와 동일하게 ConversationMemory(요약 체크포인트 + 최근 원본)
+        # 기반으로 messages 를 구성해 LangChain 메시지로 변환한다. 이렇게 해야 graph-stream
+        # 에서도 이전 대화 맥락과 요약이 유지된다(단순 [HumanMessage(prompt)] 는 맥락 유실).
+        chat_history = body.get("chatHistory", [])
+        try:
+            _bedrock_msgs = _build_messages(chat_history, prompt, session_id)
+            _lc_msgs = bedrock_messages_to_lc(_bedrock_msgs)
+        except Exception as _mm_err:
+            print(f"[graph-stream] 멀티턴 messages 구성 실패 → 단일 프롬프트로 폴백: {_mm_err}")
+            _lc_msgs = []
+        if not _lc_msgs:
+            _lc_msgs = [HumanMessage(content=prompt)]
+
         # 초기 GraphState — 자격증명은 담지 않고 profile name / bedrock_user 문자열만(요구사항 8.1).
-        # visited_routes 는 라우터 hop cap(요구사항 6.5)용 누적 리스트 — 명시적으로 [] 로 초기화한다
-        # (reducer operator.add 기본값과 동일하나, 계약을 분명히 하기 위해 초기 상태에 포함).
+        # visited_routes 는 라우터 hop cap(요구사항 6.5)용 누적 리스트 — 명시적으로 [] 로 초기화한다.
         initial_state = {
             "prompt": prompt,
             "session_id": session_id,
@@ -9232,12 +9246,16 @@ async def run_agent_graph_stream(request: Request):
             "bedrock_user": bedrock_user,
             "template_id": template_id,
             "system_prompt": system_prompt,
-            "messages": [HumanMessage(content=prompt)],
+            "messages": _lc_msgs,
             "visited_routes": [],
         }
-        # config: thread_id(체크포인트 영속) + recursion_limit(요구사항 6.6, AE_GRAPH_RECURSION 기본 50).
+        # config: thread_id + recursion_limit(요구사항 6.6, AE_GRAPH_RECURSION 기본 50).
+        # ⚠️ 대화 맥락은 위 ConversationMemory 로 완전히 주입되므로(단일 진실 소스), checkpointer
+        # 가 같은 session_id 의 이전 messages 를 다시 로드해 "중복"되는 것을 피하기 위해 thread_id 를
+        # 요청별 고유값으로 둔다. checkpointer 는 이번 그래프 실행(멀티홉 중간상태) 영속/복구 용도.
+        _thread_id = f"{session_id}:{uuid.uuid4().hex[:8]}"
         graph_config = {
-            "configurable": {"thread_id": session_id},
+            "configurable": {"thread_id": _thread_id},
             "recursion_limit": int(os.environ.get("AE_GRAPH_RECURSION", "50")),
         }
         # 그래프 전체 상한 / heartbeat 주기(요구사항 6.6/6.7/6.8, Property 4). ⚠️ API_NOTES
@@ -9273,6 +9291,12 @@ async def run_agent_graph_stream(request: Request):
             total_timeout=graph_total_timeout,
         ):
             yield sse_line
+        # [DONE] 후 대화 요약 체크포인트 갱신(긴 세션 맥락 유지) — 기존 run-stream 경로와 동일.
+        # 비차단: 실패해도 스트림은 이미 완료됨.
+        try:
+            asyncio.create_task(_maybe_summarize(session_id, chat_history, gw))
+        except Exception as _sm_err:
+            print(f"[graph-stream] 요약 트리거 실패(무시): {_sm_err}")
 
     return StreamingResponse(
         graph_stream(),
