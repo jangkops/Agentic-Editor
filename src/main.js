@@ -2313,14 +2313,12 @@ function isSimpleQuery(prompt) {
 }
 
 async function runSingle(prompt) {
-  // simple_qa나 일반 채팅이면 도구 없는 채팅으로, 코드/파일 작업은 에이전트로
-  // intent가 안 잡히면 무조건 에이전트 모드 (기존 동작 유지)
-  const looksSimple = isSimpleQuery(prompt);
-  if (looksSimple) {
-    await runSimpleChat(prompt);
-  } else {
-    await runAgentWorkflow(prompt);
-  }
+  // 단일호출을 LangGraph graph-stream 으로 일원화한다(작업 실행 경로 통합).
+  // 기존에는 간단질문→runSimpleChat, 코드/파일작업→runAgentWorkflow(커스텀 run-agent)로
+  // 갈렸으나, graph-stream 의 라우터가 chat/coding 등 도메인을 판단하고 coding 서브그래프가
+  // 도구(read_file/write_file/run_command/search_files)를 사용하므로 커스텀 run-agent 경로를
+  // 대체한다. 이로써 단일호출도 supervisor-of-supervisors 계층 그래프를 탄다.
+  return runSimpleChat(prompt);
 }
 
 // 멀티-에이전트 오케스트레이터 호출 (Planner → N agents with tools → Merger)
