@@ -2326,16 +2326,24 @@ async function runSingle(prompt) {
 // 멀티-에이전트 오케스트레이터 호출 (Planner → N agents with tools → Merger)
 async function runOrchestrated(prompt) {
   if (!prompt) return;
+  // === LangGraph 계층 오케스트레이터로 전환 (supervisor-of-supervisors) ===
+  // 기존 커스텀 run-orchestrated(Planner→병렬워커→Merger)는 LangGraph 를 전혀 사용하지
+  // 않았다. 이제 오케스트레이터 실행도 graph-stream(build_top_graph)으로 라우팅되어 실제
+  // 계층 그래프 + 멀티도메인 체이닝을 탄다. 사용자 메시지 등록만 유지하고 실제 스트리밍은
+  // graph-stream 을 소비하는 runSimpleChat(orchestrated=true) 에 위임한다.
+  {
+    const lastMsg = state.messages[state.messages.length - 1];
+    const _alreadyPushed = lastMsg && lastMsg.role === 'user' && lastMsg.content === prompt;
+    if (!_alreadyPushed) { state.messages.push({ role: 'user', content: prompt }); renderMessages(); }
+  }
+  return runSimpleChat(prompt, { orchestrated: true });
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // ↓ 레거시 커스텀 run-orchestrated 경로 (deprecated / unreachable) — 후속 정리 예정 ↓
+  // ───────────────────────────────────────────────────────────────────────────
   state.isStreaming = true;
   state._streamStartTime = Date.now();
   state._abortController = new AbortController();
-
-  // 사용자 메시지로 prompt 등록 (이미 sendMessage에서 push했으면 중복 방지)
-  const lastMsg = state.messages[state.messages.length - 1];
-  const _alreadyPushed = lastMsg && lastMsg.role === 'user' && lastMsg.content === prompt;
-  if (!_alreadyPushed) {
-    state.messages.push({ role: 'user', content: prompt });
-  }
   state.messages.push({
     role: 'system',
     content: '멀티-에이전트 오케스트레이션 시작 — Planner가 작업을 분해하고 N개 에이전트가 도구로 실행합니다.',
@@ -2785,12 +2793,17 @@ async function _openChatStream(fetchOpts) {
 }
 
 // 간단한 질문 — 워크플로우 없이 바로 응답
-async function runSimpleChat(prompt) {
+async function runSimpleChat(prompt, opts = {}) {
+  // orchestrated=true 면 "오케스트레이터" 진입(라벨만 다름). 실제 실행 경로는 동일한
+  // graph-stream(LangGraph supervisor-of-supervisors) 이다 — 오케스트레이터 버튼도
+  // 이 함수로 위임되어 계층 그래프 + 멀티도메인 체이닝을 탄다.
+  const _orchestrated = !!opts.orchestrated;
+  const _thinkLabel = _orchestrated ? '오케스트레이터(LangGraph) 실행 중' : 'thinking';
   state.isStreaming = true;
   state._streamStartTime = Date.now();
   state._abortController = new AbortController();
   const timeoutId = setTimeout(() => { if (state._abortController) state._abortController.abort(); }, 300000);
-  addLiveLog('request', `채팅: ${state.selectedModel.name}`, prompt.substring(0, 100));
+  addLiveLog('request', _orchestrated ? `오케스트레이터(LangGraph): ${state.selectedModel.name}` : `채팅: ${state.selectedModel.name}`, prompt.substring(0, 100));
   const msg = { role:'assistant', content:'' };
   state.messages.push(msg);
   renderMessages();
@@ -2802,7 +2815,7 @@ async function runSimpleChat(prompt) {
     if (el) {
       const elapsed = Math.floor((Date.now() - _chatStartTime) / 1000);
       const timeText = elapsed >= 3600 ? `${Math.floor(elapsed/3600)}h ${Math.floor((elapsed%3600)/60)}m` : elapsed >= 60 ? `${Math.floor(elapsed/60)}m ${elapsed%60}s` : `${elapsed}s`;
-      el.innerHTML = `<span class="thinking-dots"><span></span><span></span><span></span></span> thinking ${timeText}`;
+      el.innerHTML = `<span class="thinking-dots"><span></span><span></span><span></span></span> ${esc(_thinkLabel)} ${timeText}`;
     }
   }, 1000);
   try {
@@ -2838,6 +2851,33 @@ async function runSimpleChat(prompt) {
           }
           if (p.tool) {
             // 도구 실행 이벤트 — 채팅에 표시하지 않음 (로그만)
+            try { addLiveLog('system', `도구 ${p.tool} ${p.status || ''}`.trim()); } catch (_) {}
+            continue;
+          }
+          if (p.type === 'agent_start') {
+            // LangGraph 도메인 서브그래프 진입(chat/coding/media/research/ops) — 라우팅 배지/로그.
+            if (p.taskId) {
+              addLiveLog('system', `라우팅 → ${p.taskId}`);
+              const el = document.querySelector('.thinking-indicator');
+              if (el && _orchestrated) {
+                el.setAttribute('data-route', String(p.taskId));
+              }
+            }
+            continue;
+          }
+          if (p.type === 'agent_done') {
+            if (p.taskId) addLiveLog('system', `${p.taskId} 완료`);
+            continue;
+          }
+          if (p.verifiedFiles) {
+            // 디스크 실측된 생성 파일 — 로그로 알림(본문 오염 방지). 미리보기는 .generated 패널이 담당.
+            try {
+              const files = Array.isArray(p.verifiedFiles) ? p.verifiedFiles : [];
+              if (files.length) {
+                msg._verifiedFiles = (msg._verifiedFiles || []).concat(files);
+                addLiveLog('response', `파일 생성 ${files.length}건`, files.join(', ').slice(0, 200));
+              }
+            } catch (_) {}
             continue;
           }
           if (p.error) {
@@ -2886,13 +2926,17 @@ async function runSimpleChat(prompt) {
             continue;
           }
           if (p.text) { msg.content += p.text; continue; }
+          // JSON 파싱 성공했으나 위 어떤 이벤트에도 해당하지 않으면 제어 메타로 간주하고
+          // 본문에 raw JSON 을 추가하지 않는다(agent_* / verifiedFiles 등 오염 방지).
+          continue;
         } catch {}
+        // JSON 파싱 실패 = 순수 텍스트 조각만 본문에 누적한다.
         msg.content += d;
       }
       renderMessages();
     }
     trackUsage(prompt.length, msg.content.length);
-    addLiveLog('response', `완료: ${state.selectedModel.name}`, `${msg.content.length}자`);
+    addLiveLog('response', _orchestrated ? `오케스트레이터 완료` : `완료: ${state.selectedModel.name}`, `${msg.content.length}자`);
   } catch (e) {
     clearTimeout(timeoutId);
     const errMsg = e.name === 'AbortError' ? '요청 시간 초과 또는 취소됨' : e.message;
