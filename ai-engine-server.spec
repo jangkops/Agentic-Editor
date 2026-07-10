@@ -41,6 +41,7 @@ _THIRD_PARTY = [
     'google', 'google_auth_httplib2', 'requests', 'urllib3',
     'certifi', 'charset_normalizer', 'idna',
     'langgraph', 'langchain_core',  # ← 'langgraph' RELEASE-CRITICAL
+    'langchain_mcp_adapters', 'mcp',  # MCP 도구 연동(옵트인 AE_MCP_ENABLED)
     # RAG 다국어 신경망 임베딩(ONNX·CPU). 오프라인 교차언어 검색용 —
     # onnxruntime 네이티브 라이브러리/tokenizers/모델 메타를 collect_all로 포함.
     'fastembed', 'onnxruntime', 'tokenizers', 'huggingface_hub',
