@@ -72,12 +72,15 @@ def _merge_verified_files(
     """
     left = left or []
     right = right or []
-    seen = {vf["absPath"] for vf in left}
-    merged = list(left)
-    for vf in right:
-        if vf["absPath"] not in seen:
+    # left 는 통상 이전 reduce 결과(이미 dedup)지만, 방어적으로 left 내부 중복도 제거해
+    # "결과 absPath 는 항상 유일" 불변식을 입력과 무관하게 보장한다.
+    merged: List[VerifiedFile] = []
+    seen: set = set()
+    for vf in list(left) + list(right):
+        ap = vf["absPath"]
+        if ap not in seen:
             merged.append(vf)
-            seen.add(vf["absPath"])
+            seen.add(ap)
     return merged
 
 
