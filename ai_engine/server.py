@@ -9235,6 +9235,7 @@ async def run_agent_graph_stream(request: Request):
         from ai_engine.agent_system.checkpoint_store import JsonFileCheckpointSaver
         from ai_engine.agent_system.sse_bridge import graph_events_to_sse
         from ai_engine.agent_system.chat_model_adapter import bedrock_messages_to_lc
+        from ai_engine.agent_system.mcp_tools import get_mcp_tools
 
         prompt = body.get("prompt", "")
         model = body.get("model", "anthropic.claude-sonnet-4-5-20250929-v1:0")
@@ -9269,12 +9270,23 @@ async def run_agent_graph_stream(request: Request):
             print(f"[graph-stream] Store 초기화 실패 → 장기메모리 비활성: {_st_err}")
             memory_store = None
 
-        # Phase 2: Top Supervisor + graph-of-graphs(build_top_graph). deps 로 gateway/model/ckpt/store 주입.
+        # MCP 도구 로드(옵트인 AE_MCP_ENABLED, 실패/비활성 시 빈 리스트로 no-op). research/ops
+        # 서브그래프에 병합되어 model 에 노출되고 GatewayToolNode 가 ainvoke 로 실행한다.
+        try:
+            _mcp_tools, _mcp_names = await get_mcp_tools()
+        except Exception as _mcp_err:
+            print(f"[graph-stream] MCP 로드 실패(무시): {_mcp_err}")
+            _mcp_tools, _mcp_names = [], set()
+        _mcp_map = {getattr(t, "name", ""): t for t in (_mcp_tools or []) if getattr(t, "name", "")}
+
+        # Phase 2: Top Supervisor + graph-of-graphs. deps 로 gateway/model/ckpt/store/mcp 주입.
         deps = GraphDeps(
             gateway=gw,
             model_coding=_resolve_callable_model_id(model, aws_profile, bedrock_user),
             checkpointer=checkpointer,
             store=memory_store,
+            mcp_tools=_mcp_tools,
+            mcp_tool_map=_mcp_map,
         )
         # 병렬 fan-out 그래프: planner 가 요청을 독립 서브태스크로 분해해 Send 로 도메인 워커를
         # 병렬 실행한다(단일 작업이면 워커 1개 = 순차와 동일). AE_LANGGRAPH_PARALLEL=0 으로

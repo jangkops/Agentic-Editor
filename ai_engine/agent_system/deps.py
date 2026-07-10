@@ -38,3 +38,8 @@ class GraphDeps:
     # 주입되며 노드는 deps.store 를 직접 참조하거나 부모 그래프에서 전파받는다. None 이면
     # 장기 메모리 비활성(비차단). 자격증명은 저장하지 않는다(요구사항 8.x).
     store: Optional[Any] = None
+    # MCP 도구 — langchain-mcp-adapters 로 로드한 LangChain BaseTool 리스트(도메인 서브그래프에
+    # 병합되어 bind_tools 로 model 에 노출). mcp_tool_map 은 {name: BaseTool} 로 GatewayToolNode
+    # 가 ainvoke 로 실행할 때 사용. 기본 빈 값(MCP 비활성 시 no-op).
+    mcp_tools: Optional[Any] = None       # list[BaseTool]
+    mcp_tool_map: Optional[Any] = None    # dict[str, BaseTool]

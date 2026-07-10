@@ -58,9 +58,11 @@ def build_ops_subgraph(deps: Any):
     구성은 coding 과 동일한 ReAct 루프(retrieve → model → tools → verify)이며 도구 집합만
     OPS_TOOLS(run_command 중심)로 다르다. model_id 는 deps.model_coding(sonnet-4-5).
     """
+    # MCP 도구(있으면)를 ops 도구에 병합 — API/인프라 조작 계열 MCP 서버에 적합.
+    mcp = list(getattr(deps, "mcp_tools", None) or [])
     return build_domain_subgraph(
         deps,
-        tools=OPS_TOOLS,
+        tools=OPS_TOOLS + mcp,
         model_id=deps.model_coding,
         domain="ops",
     )

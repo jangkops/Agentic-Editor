@@ -70,9 +70,11 @@ def build_research_subgraph(deps: Any):
     구성은 coding 과 동일한 ReAct 루프(retrieve → model → tools → verify)이며 도구 집합만
     RESEARCH_TOOLS(읽기/검색 전용)로 다르다. model_id 는 deps.model_coding(sonnet-4-5).
     """
+    # MCP 도구(있으면)를 research 도구에 병합 — 웹/문서 조회(aws-documentation 등)에 적합.
+    mcp = list(getattr(deps, "mcp_tools", None) or [])
     return build_domain_subgraph(
         deps,
-        tools=RESEARCH_TOOLS,
+        tools=RESEARCH_TOOLS + mcp,
         model_id=deps.model_coding,
         domain="research",
     )

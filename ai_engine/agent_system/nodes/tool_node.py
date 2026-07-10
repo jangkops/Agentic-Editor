@@ -248,10 +248,24 @@ class GatewayToolNode:
             args = tc.get("args") or {}
             tc_id = tc.get("id")
 
-            use_bridge = is_remote_session and bridge_remote and name in _BRIDGE_TOOLS
-            # 미디어 생성 도구는 긴 상한 적용(이미지 생성 + 렌더 + 조립).
+            # MCP 도구(LangChain BaseTool)는 deps.mcp_tool_map 을 통해 ainvoke 로 실행한다.
+            mcp_map = getattr(self.deps, "mcp_tool_map", None) or {}
             is_media = name in _MEDIA_TOOLS
             eff_timeout = self.media_timeout if is_media else self.timeout
+            if name in mcp_map:
+                try:
+                    _mcp_tool = mcp_map[name]
+                    raw = await asyncio.wait_for(_mcp_tool.ainvoke(args), timeout=eff_timeout)
+                except asyncio.TimeoutError:
+                    raw = f"[MCP 도구 시간 초과: {name} ({eff_timeout}s)]"
+                except Exception as e:  # noqa: BLE001 — MCP 실패는 비차단
+                    raw = f"[MCP 도구 오류: {name} — {str(e)[:300]}]"
+                # MCP 도구 결과는 파일 산출물이 아니므로 verified_files 미대상.
+                tool_messages.append(ToolMessage(content=str(raw), tool_call_id=tc_id))
+                continue
+
+            use_bridge = is_remote_session and bridge_remote and name in _BRIDGE_TOOLS
+            # 미디어 생성 도구는 긴 상한 적용(이미지 생성 + 렌더 + 조립).
             try:
                 if use_bridge:
                     raw = await asyncio.wait_for(
