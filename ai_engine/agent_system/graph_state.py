@@ -123,7 +123,12 @@ class GraphState(TypedDict, total=False):
     # reducer로 누적: 노드가 부분 메시지를 반환하면 LangGraph가 병합.
     messages: Annotated[List[BaseMessage], add_messages]
     route: Annotated[RouteName, _take_right]      # Top Supervisor 결정
-    visited_routes: Annotated[List[str], operator.add]  # 재라우팅 순환 방지 cap
+    # 관측용(라우터 프롬프트의 방문 도메인 표시). 서브그래프 echo로 중복 누적될 수 있어
+    # hop cap 판정에는 쓰지 않음 — route_hops 사용.
+    visited_routes: Annotated[List[str], operator.add]
+    # 라우터 재라우팅 hop 계수 — 서브그래프 공유 채널(operator.add) echo에 면역인 last-wins
+    # 카운터. hop cap 판정의 신뢰 지표.
+    route_hops: Annotated[int, _take_right]
     iteration: Annotated[int, _take_right]        # 서브그래프 내 model↔tool 반복 카운터
     # 병렬 fan-out 계획: [{"domain": <route>, "subtask": <str>}, ...]. planner 노드가 1회
     # 세팅한다. len>=2 이면 Send 로 병렬 실행, <=1 이면 단일 실행.

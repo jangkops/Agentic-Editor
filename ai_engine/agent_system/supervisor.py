@@ -8,9 +8,12 @@ Task 3.1 산출물. design.md 섹션 3(Top Supervisor + StateGraph 조립) + API
   을 통해 LLM 분류를 수행해야 하므로 `deps`(GraphDeps: gateway / model_coding) 주입이
   필요하다. `build_top_graph` 에서 `g.add_node("router", make_top_router_node(deps))`
   형태로 배선하기 쉽도록 노드 콜러블을 반환하는 팩토리로 구현한다.
-- **hop cap (요구사항 6.5 / Property 4):** `visited_routes` 길이가 `MAX_ROUTE_HOPS`
-  (기본 4, `AE_MAX_ROUTE_HOPS`)에 도달하면 LLM 호출 없이 즉시 `{"route": "done"}` 를
-  반환하여 재라우팅 순환을 종료한다(무한 순환 차단 — 과거 hang 이력 대응).
+- **hop cap (요구사항 6.5 / Property 4):** `route_hops`(last-wins reducer)가
+  `MAX_ROUTE_HOPS`(기본 4, `AE_MAX_ROUTE_HOPS`)에 도달하면 LLM 호출 없이 즉시
+  `{"route": "done"}` 를 반환하여 재라우팅 순환을 종료한다(무한 순환 차단 — 과거 hang
+  이력 대응). **주의:** `visited_routes`(operator.add)는 서브그래프 공유 채널이라 부모
+  리듀서에 재합산돼 hop마다 복리로 폭증(echo)하므로 hop cap 판정에는 쓰지 않는다 —
+  echo에 면역인 last-wins 정수 카운터 `route_hops` 를 신뢰 지표로 사용한다.
 - **분류 안정화:** GatewayChatModel(sonnet-4-5)에 단일 라벨을 강제로 얻기 위해
   toolChoice(강제 스키마) 를 우선 시도하고, tool_calls 가 없으면 응답 텍스트에서 라벨을
   파싱한다. 어느 쪽도 유효 라벨을 못 얻으면 휴리스틱 폴백(`_is_code_related` /
@@ -73,7 +76,8 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-# 재라우팅 hop 상한(요구사항 6.5). visited_routes 길이가 이 값에 도달하면 route="done".
+# 재라우팅 hop 상한(요구사항 6.5). route_hops(last-wins) 가 이 값에 도달하면 route="done".
+# visited_routes(operator.add)는 서브그래프 echo로 복리 폭증하므로 판정에 쓰지 않는다.
 MAX_ROUTE_HOPS: int = _env_int("AE_MAX_ROUTE_HOPS", 4)
 # 라우터 LLM 개별 호출 상한(초). 스트림 아님(ainvoke). 초과/실패는 비차단 폴백.
 ROUTER_TIMEOUT: float = _env_float("AE_ROUTER_TIMEOUT", 60.0)
@@ -181,7 +185,10 @@ def _build_router_prompt(state: GraphState) -> str:
 
     visited = state.get("visited_routes") or []
     if visited:
-        parts.append(f"[이미 수행한 도메인(순서대로)]\n{', '.join(visited)}")
+        # visited_routes 는 operator.add 채널이라 서브그래프 echo로 같은 도메인이 중복
+        # 누적될 수 있다. 프롬프트 품질을 위해 순서를 보존하며 중복만 제거해 표시한다.
+        visited_display = list(dict.fromkeys(visited))
+        parts.append(f"[이미 수행한 도메인(순서대로)]\n{', '.join(visited_display)}")
         last_text = _last_ai_text(state.get("messages") or [])
         if last_text:
             parts.append(f"[직전 응답 요약]\n{last_text}")
@@ -317,45 +324,54 @@ def make_top_router_node(deps: Any):
 
     반환 노드의 계약:
       Precondition:  state["prompt"] 는 비어있지 않다.
-      Postcondition: hop cap 도달 시 {"route": "done"}(visited_routes 미증가) 반환.
-                     첫 진입(visited 비었음): done 불가 분류 → {"route": <label>, "visited_routes": [<label>]}.
-                     재진입(visited 있음): 라우터가 원래 요청 충족 여부를 판정 —
-                       · done 이면 {"route": "done"}(visited 미증가)로 종료.
-                       · 다른 도메인이 남았으면 {"route": <label>, "visited_routes": [<label>]}로
-                         멀티도메인 체이닝 계속(supervisor-of-supervisors).
+      Postcondition: hop cap 도달(route_hops >= MAX_ROUTE_HOPS) 시 {"route": "done"} 반환.
+                     첫 진입(route_hops==0): done 불가 분류 →
+                       {"route": <label>, "visited_routes": [<label>], "route_hops": 1}.
+                     재진입(route_hops>0): 라우터가 원래 요청 충족 여부를 판정 —
+                       · done 이면 {"route": "done"}(route_hops 미증가)로 종료.
+                       · 다른 도메인이 남았으면 {"route": <label>, "visited_routes": [<label>],
+                         "route_hops": route_hops+1}로 멀티도메인 체이닝 계속.
       Invariant:     LLM 호출은 GatewayChatModel(gateway 경유)만. 분류 실패는 비차단
-                     (재진입 실패 시 done 으로 안전 종료). hop cap 이 순환을 유한 종료.
+                     (재진입 실패 시 done 으로 안전 종료). hop cap 은 route_hops(last-wins,
+                     echo 면역)로 판정하여 순환을 유한 종료한다. visited_routes(operator.add)는
+                     서브그래프 echo로 복리 폭증하므로 판정에 쓰지 않고 관측/프롬프트용으로만
+                     유지한다.
     """
 
     async def top_router_node(state: GraphState) -> dict:
         visited = state.get("visited_routes", []) or []
+        # hop cap 판정 지표: route_hops(last-wins, 서브그래프 echo에 면역인 정확한 hop 계수).
+        hops = state.get("route_hops", 0) or 0
 
         # 요구사항 6.5 / Property 4: hop cap 도달 시 LLM 없이 즉시 종료(무한 순환 차단).
-        if len(visited) >= MAX_ROUTE_HOPS:
+        if hops >= MAX_ROUTE_HOPS:
             return {"route": "done"}
 
         # 방어: 마지막 메시지가 도구호출 대기(tool_calls 있는 AIMessage)면 서브그래프 내부에서
         # 처리돼야 하며 여기 도달하면 안 되지만, 안전하게 done 으로 종료한다.
         messages = state.get("messages") or []
-        if visited and messages:
+        if hops > 0 and messages:
             last = messages[-1]
             if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
                 return {"route": "done"}
 
         # 첫 진입엔 done 불가(반드시 도메인 하나 실행). 재진입엔 done 허용(완료 판정).
-        allow_done = bool(visited)
+        # 재진입 판정은 route_hops>0 로 한다(visited echo와 무관하게 정확).
+        allow_done = hops > 0
         route, subtask = await _classify_route(state, deps, allow_done=allow_done)
 
         if route == "done":
             return {"route": "done"}
 
-        out: dict = {"route": route, "visited_routes": [route]}
+        # route_hops 를 함께 증가시켜 다음 hop 판정을 정확하게 유지한다. visited_routes 는
+        # 관측/프롬프트용으로 계속 반환(operator.add 로 누적되지만 hop cap 판정에는 미사용).
+        out: dict = {"route": route, "visited_routes": [route], "route_hops": hops + 1}
 
         # 재진입(멀티도메인 체이닝)에서 다음 도메인에 명확한 지시를 전달한다. 직전 도메인의
         # 최종 AIMessage 로 messages 가 끝나 있으면, 새 도메인의 model 호출이 "생성할 것 없음"
         # (No generations found in stream)을 반환하므로, subtask 를 HumanMessage 로 추가해
         # messages 가 사용자 턴으로 끝나게 하고 다음 워커에게 작업을 지시한다(supervisor→worker).
-        if visited:
+        if hops > 0:
             instruction = subtask or (state.get("prompt") or "")
             if instruction:
                 out["messages"] = [HumanMessage(content=instruction)]
@@ -394,8 +410,9 @@ def build_top_graph(deps: Any):
 
     무한 순환 차단(요구사항 1.5 / Property 4): 재라우팅은 router 의 hop cap
     (make_top_router_node 내부 `MAX_ROUTE_HOPS`)에 의해 유한하게 종료된다. router 는
-    visited_routes 길이가 상한에 도달하면 LLM 호출 없이 route="done" 을 반환하고,
-    route_selector→END 로 유한 종료한다.
+    route_hops(last-wins reducer)가 상한에 도달하면 LLM 호출 없이 route="done" 을 반환하고,
+    route_selector→END 로 유한 종료한다. route_hops 는 서브그래프 공유 채널
+    (visited_routes=operator.add)의 echo 복리 폭증에 면역이라 hop 예산을 정확히 집행한다.
 
     Args:
         deps: GraphDeps (gateway / model_coding / checkpointer). checkpointer 는 이
