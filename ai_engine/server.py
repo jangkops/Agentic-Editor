@@ -7255,6 +7255,54 @@ def _build_messages(chat_history: list, current_prompt: str, session_id: str = "
     messages, _ = mem.build_messages(session_id or "default", chat_history, current_prompt)
     return messages
 
+async def _maybe_extract_memories(user: str, prompt: str, gw, store, model_id: str = ""):
+    """사용자 발화에서 세션 간 기억할 '지속적 사실'을 경량 추출해 Store 에 저장(비차단).
+
+    Store(LangGraph BaseStore) namespace=("memories", user) 에 {"text": fact} 로 put 한다.
+    haiku 로 사용자 발화에서 이름/소속/선호/목표 등 지속적 사실만 추출하고, 일시적 요청/질문은
+    제외한다. Store 미주입/추출 실패/사실 없음이면 아무것도 하지 않는다(요구사항 8.x: 자격증명
+    미저장 — 추출 대상은 사용자 발화의 사실뿐).
+    """
+    if store is None or not (prompt or "").strip():
+        return
+    try:
+        import time as _t, hashlib as _hh
+        sys = (
+            "너는 장기 기억 관리자다. 사용자 발화에서 '향후 대화에 계속 기억해야 할 사용자에 대한 "
+            "지속적 사실'(이름, 소속/직무, 선호, 목표 등)만 각 줄에 하나씩 추출한다. 일시적 요청, "
+            "질문, 명령, 코드 내용은 제외한다. 저장할 사실이 없으면 정확히 'NONE' 만 출력한다."
+        )
+        messages = [{"role": "user", "content": [{"text": (prompt or "")[:2000]}]}]
+        # 활성/검증된 모델을 사용한다(호출자가 resolve 한 model_id 우선). 미지정 시 sonnet-4-5.
+        _mid = (model_id or "").strip() or "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+        result = await asyncio.wait_for(
+            gw.converse(model_id=_mid, messages=messages, system_prompt=sys),
+            timeout=60,
+        )
+        if not isinstance(result, dict) or result.get("decision") != "ALLOW":
+            return
+        output = result.get("output", {}).get("message", {}).get("content", [])
+        text = "\n".join(c.get("text", "") for c in output if isinstance(c, dict) and "text" in c).strip()
+        if not text or text.upper().startswith("NONE"):
+            return
+        ns = ("memories", (user or "default").strip() or "default")
+        saved = 0
+        for line in text.split("\n"):
+            fact = line.strip("-*• \t").strip()
+            if not fact or fact.upper() == "NONE" or len(fact) < 3:
+                continue
+            key = _hh.md5(fact.encode("utf-8")).hexdigest()[:12]
+            try:
+                await store.aput(ns, key, {"text": fact, "ts": _t.time()})
+                saved += 1
+            except Exception:
+                continue
+        if saved:
+            print(f"[Memory-LT] {ns[1]} 장기 기억 {saved}건 저장")
+    except Exception as e:
+        print(f"[Memory-LT] 추출 실패(무시): {e}")
+
+
 async def _maybe_summarize(session_id: str, chat_history: list, gw):
     """대화가 길어지면 비동기로 요약 체크포인트 생성."""
     try:
@@ -9211,12 +9259,22 @@ async def run_agent_graph_stream(request: Request):
             _ckpt_dir = ""  # JsonFileCheckpointSaver 기본(AE_CHECKPOINT_DIR / ~/.agentic-editor)
         checkpointer = JsonFileCheckpointSaver(_ckpt_dir)
 
-        # Phase 2: Top Supervisor + graph-of-graphs(build_top_graph). deps 로 gateway/model/ckpt 주입.
-        # (Phase 1 의 build_coding_subgraph 단일 그래프를 대체 — 요구사항 1.1/1.3/6.5.)
+        # Store(BaseStore) — 세션 간(cross-thread) 장기 메모리. userData 하위 store/langgraph 에
+        # JSON 파일로 영속. namespace ("memories", <user>) 에 사용자 사실을 저장/조회한다.
+        from ai_engine.agent_system.store import JsonFileStore
+        _store_dir = os.path.join(_env_root, "store", "langgraph") if _env_root else ""
+        try:
+            memory_store = JsonFileStore(_store_dir)
+        except Exception as _st_err:
+            print(f"[graph-stream] Store 초기화 실패 → 장기메모리 비활성: {_st_err}")
+            memory_store = None
+
+        # Phase 2: Top Supervisor + graph-of-graphs(build_top_graph). deps 로 gateway/model/ckpt/store 주입.
         deps = GraphDeps(
             gateway=gw,
             model_coding=_resolve_callable_model_id(model, aws_profile, bedrock_user),
             checkpointer=checkpointer,
+            store=memory_store,
         )
         compiled = build_top_graph(deps)
 
@@ -9283,20 +9341,32 @@ async def run_agent_graph_stream(request: Request):
         내부가 담당한다. ⚠️ API_NOTES CRITICAL 2: 이 중계 루프를 asyncio.wait_for 로 감싸지
         않는다(스트림 제너레이터 취소 시 hang).
         """
-        async for sse_line in graph_events_to_sse(
-            compiled,
-            initial_state,
-            graph_config,
-            heartbeat_interval=heartbeat_interval,
-            total_timeout=graph_total_timeout,
-        ):
-            yield sse_line
-        # [DONE] 후 대화 요약 체크포인트 갱신(긴 세션 맥락 유지) — 기존 run-stream 경로와 동일.
-        # 비차단: 실패해도 스트림은 이미 완료됨.
         try:
-            asyncio.create_task(_maybe_summarize(session_id, chat_history, gw))
-        except Exception as _sm_err:
-            print(f"[graph-stream] 요약 트리거 실패(무시): {_sm_err}")
+            async for sse_line in graph_events_to_sse(
+                compiled,
+                initial_state,
+                graph_config,
+                heartbeat_interval=heartbeat_interval,
+                total_timeout=graph_total_timeout,
+            ):
+                yield sse_line
+        finally:
+            # [DONE] 후(또는 클라이언트 disconnect=GeneratorExit 시에도) 후처리를 보장한다.
+            # finally 이므로 스트림이 정상 종료되든 취소되든 백그라운드 태스크가 스케줄된다:
+            #   - 대화 요약 체크포인트 갱신(긴 세션 맥락 유지)
+            #   - 세션 간 장기 기억(Store) 추출/저장
+            # 둘 다 비차단(서버 이벤트루프가 살아있는 한 태스크는 계속 실행됨).
+            try:
+                asyncio.create_task(_maybe_summarize(session_id, chat_history, gw))
+            except Exception as _sm_err:
+                print(f"[graph-stream] 요약 트리거 실패(무시): {_sm_err}")
+            try:
+                asyncio.create_task(_maybe_extract_memories(
+                    bedrock_user, prompt, gw, memory_store,
+                    model_id=_resolve_callable_model_id(model, aws_profile, bedrock_user),
+                ))
+            except Exception as _lt_err:
+                print(f"[graph-stream] 장기메모리 트리거 실패(무시): {_lt_err}")
 
     return StreamingResponse(
         graph_stream(),

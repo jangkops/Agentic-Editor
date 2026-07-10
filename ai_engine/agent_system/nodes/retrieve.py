@@ -52,6 +52,30 @@ def _supports_return_evidence(func: Any) -> bool:
     return False
 
 
+def _load_memories(deps: Any, state: Any) -> str:
+    """Store(BaseStore)에서 세션 간 사용자 기억을 조회해 시스템 컨텍스트 블록으로 만든다.
+
+    namespace = ("memories", <bedrock_user or "default">). value={"text": ...} 형태를 가정.
+    Store 미주입/조회 실패/기억 없음이면 "" 반환(비차단).
+    """
+    store = getattr(deps, "store", None)
+    if store is None:
+        return ""
+    user = (state.get("bedrock_user") or "default").strip() or "default"
+    try:
+        items = store.search(("memories", user), limit=20)
+    except Exception:
+        return ""
+    facts = []
+    for it in items or []:
+        v = getattr(it, "value", None)
+        if isinstance(v, dict) and v.get("text"):
+            facts.append(str(v["text"]).strip())
+    if not facts:
+        return ""
+    return "[기억된 사용자 정보]\n" + "\n".join(f"- {f}" for f in facts[:20])
+
+
 def make_retrieve_node(deps: Any, domain: str = "coding"):
     """retrieve 노드 팩토리 → `async def retrieve_node(state) -> dict`.
 
@@ -70,9 +94,17 @@ def make_retrieve_node(deps: Any, domain: str = "coding"):
     """
 
     async def retrieve_node(state: Any) -> dict:
+        # ── 세션 간 장기 기억(Store) 조회 — chat/RAG 무관하게 시스템 컨텍스트에 주입 ──
+        mem_ctx = _load_memories(deps, state)
+        base_sys = state.get("system_prompt", "") or ""
+        merged_sys_base = (base_sys + ("\n\n" + mem_ctx if mem_ctx else "")).strip()
+
         # ── 비차단 스킵 조건 (요구사항 3.2) ──
         project_path = state.get("project_path")
         if not project_path or domain == "chat":
+            # RAG 는 스킵하되, 장기 기억이 있으면 system_prompt 에 주입한다.
+            if mem_ctx:
+                return {"evidence": None, "system_prompt": merged_sys_base}
             return {"evidence": None}
 
         try:
@@ -90,7 +122,7 @@ def make_retrieve_node(deps: Any, domain: str = "coding"):
                     query=state.get("prompt", ""),
                     open_file=state.get("open_file"),
                     open_file_content=state.get("open_file_content"),
-                    base_system_prompt=state.get("system_prompt", "") or "",
+                    base_system_prompt=merged_sys_base,
                     aws_profile=state.get("aws_profile", "") or "",
                     bedrock_user=state.get("bedrock_user", "") or "",
                     gateway_client=gateway,

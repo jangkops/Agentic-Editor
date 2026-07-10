@@ -439,8 +439,13 @@ def build_top_graph(deps: Any):
     for name in _SUBGRAPH_ROUTES:
         g.add_edge(name, "router")
 
-    # ── compile: checkpointer 는 최상위에서만 주입(API_NOTES 항목 6 / 요구사항 4.6) ──
+    # ── compile: checkpointer + store 는 최상위에서만 주입(API_NOTES 항목 6 / 요구사항 4.6) ──
+    # store(BaseStore)는 세션 간 장기 메모리. 부모 그래프에 주입하면 서브그래프 노드로 전파된다.
+    compile_kwargs: dict = {}
     checkpointer = getattr(deps, "checkpointer", None)
     if checkpointer is not None:
-        return g.compile(checkpointer=checkpointer)
-    return g.compile()
+        compile_kwargs["checkpointer"] = checkpointer
+    store = getattr(deps, "store", None)
+    if store is not None:
+        compile_kwargs["store"] = store
+    return g.compile(**compile_kwargs)

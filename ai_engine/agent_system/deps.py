@@ -34,3 +34,7 @@ class GraphDeps:
     gateway: Any = None
     model_coding: str = _DEFAULT_CODING_MODEL
     checkpointer: Optional[Any] = None
+    # LangGraph Store(BaseStore) — 세션 간(cross-thread) 장기 메모리. Top 그래프 compile 시
+    # 주입되며 노드는 deps.store 를 직접 참조하거나 부모 그래프에서 전파받는다. None 이면
+    # 장기 메모리 비활성(비차단). 자격증명은 저장하지 않는다(요구사항 8.x).
+    store: Optional[Any] = None

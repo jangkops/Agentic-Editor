@@ -30,10 +30,13 @@ def build_chat_subgraph(deps: Any):
     Postcondition: sg.compile() 결과(CompiledStateGraph)를 반환한다. checkpointer 는
                    주입하지 않는다(부모 그래프가 주입).
     """
+    # with_retrieve=True: retrieve 노드를 거친다. domain=="chat" 이라 RAG(프로젝트 색인 검색)는
+    # 스킵되지만, 세션 간 장기 기억(Store)은 조회해 시스템 컨텍스트에 주입한다(cross-session
+    # 기억 유지). 도구는 여전히 없으므로 START→retrieve→model→verify→END 로 유한 종료한다.
     return build_domain_subgraph(
         deps,
         tools=None,
         model_id=deps.model_coding,
-        with_retrieve=False,
+        with_retrieve=True,
         domain="chat",
     )
