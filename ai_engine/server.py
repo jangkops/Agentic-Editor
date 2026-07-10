@@ -9227,6 +9227,15 @@ async def run_agent_graph_stream(request: Request):
 
     body = await request.json()
 
+    # 회귀 수정: OpenAI provider 모델(openai.*)은 /openai/responses 전용 라우트가 필요하다.
+    # graph-stream(GatewayChatModel=converse)에는 OpenAI 분기가 없으므로, is_openai_model 을
+    # 올바르게 처리하는 검증된 run-stream 경로로 위임한다(GPT 5.x 등 호출 복구).
+    try:
+        if is_openai_model(body.get("model", "")):
+            return await run_agent_stream(request)
+    except Exception:
+        pass
+
     # ── 그래프 경로 준비(compile/deps). 이 단계 예외는 기존 경로로 fallback(요구사항 7.4). ──
     try:
         from langchain_core.messages import HumanMessage

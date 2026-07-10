@@ -476,7 +476,21 @@ class GatewayChatModel(BaseChatModel):
             system_prompt=system_text,
             tool_config=tool_config,
         )
-        _raise_on_gateway_error(result)
+        try:
+            _raise_on_gateway_error(result)
+        except GatewayModelError as e:
+            # 도구 미지원 모델(nemotron 등) → 도구 없이 1회 재시도(graceful degradation).
+            # 도구 거부가 아닌 오류(토큰 만료/allowlist 등)는 그대로 전파.
+            if tool_config and _is_tool_rejection(str(e)):
+                result = await self.gateway.converse(
+                    model_id=self.model_id,
+                    messages=bedrock_msgs,
+                    system_prompt=system_text,
+                    tool_config=None,
+                )
+                _raise_on_gateway_error(result)
+            else:
+                raise
 
         output_message = (result.get("output") or {}).get("message") or {}
         ai_message = _bedrock_output_to_ai_message(output_message)
@@ -559,6 +573,21 @@ def _normalize_tool_choice(tool_choice: Optional[str]) -> dict:
     if isinstance(tool_choice, dict):
         return tool_choice
     return {"auto": {}}
+
+
+def _is_tool_rejection(msg: str) -> bool:
+    """게이트웨이 오류 메시지가 '도구(toolConfig/tool_use) 미지원/거부'인지 판정.
+
+    도구와 무관한 오류(토큰 만료/allowlist 거부 등)에는 매칭되지 않도록 'tool' 언급을
+    전제로 한다.
+    """
+    low = (msg or "").lower()
+    if "tool" not in low:
+        return False
+    return any(k in low for k in (
+        "not support", "unsupported", "invalid", "does not support",
+        "doesn't support", "not allowed", "cannot use", "toolconfig", "tooluse",
+    ))
 
 
 def _raise_on_gateway_error(result: dict) -> None:
