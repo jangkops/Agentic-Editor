@@ -34,6 +34,7 @@ from typing import Any, List, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Send
 
 from ai_engine.agent_system.chat_model_adapter import (
     GatewayChatModel,
@@ -441,6 +442,189 @@ def build_top_graph(deps: Any):
 
     # ── compile: checkpointer + store 는 최상위에서만 주입(API_NOTES 항목 6 / 요구사항 4.6) ──
     # store(BaseStore)는 세션 간 장기 메모리. 부모 그래프에 주입하면 서브그래프 노드로 전파된다.
+    compile_kwargs: dict = {}
+    checkpointer = getattr(deps, "checkpointer", None)
+    if checkpointer is not None:
+        compile_kwargs["checkpointer"] = checkpointer
+    store = getattr(deps, "store", None)
+    if store is not None:
+        compile_kwargs["store"] = store
+    return g.compile(**compile_kwargs)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 병렬 fan-out (Send API) — 독립 다중 도메인 요청을 동시에 실행 (map-reduce)
+# ─────────────────────────────────────────────────────────────────────────────
+# 순차 멀티홉(build_top_graph)은 "A 완료 → 재라우팅 → B" 로 도메인을 하나씩 처리한다.
+# 요청에 서로 독립적인 여러 산출물이 있을 때(예: "PPT 도 만들고 코드도 리팩터"), 이를
+# 동시에 실행하면 지연이 크게 준다. LangGraph 의 Send 로 planner 가 분해한 서브태스크들을
+# 병렬 워커(도메인 서브그래프)로 fan-out 하고, aggregate 노드에서 fan-in 한다.
+#
+# 무한/과다 fan-out 방지: 최대 MAX_PARALLEL_TASKS(기본 4) 개로 제한. planner 실패/단일이면
+# 워커 1개(사실상 순차와 동일). recursion_limit 는 planner→workers→aggregate 로 얕다.
+MAX_PARALLEL_TASKS: int = _env_int("AE_MAX_PARALLEL_TASKS", 4)
+
+_PLAN_TOOL: dict = {
+    "name": "select_plan",
+    "description": (
+        "사용자 요청을 '서로 독립적으로 동시에 처리 가능한' 서브태스크들로 분해한다. "
+        "각 서브태스크는 도메인(coding/media/research/ops/chat)과 그 도메인이 수행할 구체적 "
+        "작업(subtask)을 가진다. 요청이 단일 작업이면 subtasks 를 1개만 만든다. 뒤 작업이 앞 "
+        "작업의 결과에 의존하면 하나의 subtask 로 합친다(병렬은 독립 작업에만)."
+    ),
+    "inputSchema": {
+        "json": {
+            "type": "object",
+            "properties": {
+                "subtasks": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "domain": {"type": "string", "enum": list(_ROUTE_LABELS)},
+                            "subtask": {"type": "string", "description": "해당 도메인이 수행할 구체적 작업(한국어)"},
+                        },
+                        "required": ["domain", "subtask"],
+                    },
+                }
+            },
+            "required": ["subtasks"],
+        }
+    },
+}
+
+_PLANNER_SYSTEM_PROMPT = (
+    "너는 작업 분해 플래너다. 사용자 요청을 '서로 독립적으로 동시 처리 가능한' 서브태스크로 "
+    "나눠 select_plan 을 호출한다. 독립 작업이 여러 개면 각각 분리하고, 단일 작업이거나 "
+    "앞 결과에 의존하면 subtasks 를 1개로 둔다. 도메인은 coding/media/research/ops/chat 중 선택."
+)
+
+
+async def _make_plan(state: GraphState, deps: Any) -> List[dict]:
+    """요청을 [{"domain","subtask"}] 로 분해. LLM 실패/애매 시 단일 휴리스틱 폴백(비차단)."""
+    prompt = state.get("prompt") or ""
+    fallback = [{"domain": _heuristic_route(state), "subtask": prompt}]
+    gateway = getattr(deps, "gateway", None)
+    if gateway is None:
+        return fallback
+    model_id = getattr(deps, "model_coding", None) or _DEFAULT_ROUTER_MODEL
+    try:
+        llm = GatewayChatModel(gateway=gateway, model_id=model_id).bind_tools(
+            [_PLAN_TOOL], tool_choice="select_plan"
+        )
+        messages = [
+            SystemMessage(content=_PLANNER_SYSTEM_PROMPT),
+            HumanMessage(content=_build_router_prompt(state)),
+        ]
+        ai = await asyncio.wait_for(llm.ainvoke(messages), timeout=ROUTER_TIMEOUT)
+    except (asyncio.TimeoutError, GatewayModelError, Exception):
+        return fallback
+
+    for tc in (getattr(ai, "tool_calls", None) or []):
+        args = tc.get("args") if isinstance(tc, dict) else None
+        if isinstance(args, dict) and isinstance(args.get("subtasks"), list):
+            out: List[dict] = []
+            for it in args["subtasks"]:
+                if not isinstance(it, dict):
+                    continue
+                dom = it.get("domain")
+                sub = it.get("subtask")
+                if dom in _ROUTE_LABELS and isinstance(sub, str) and sub.strip():
+                    out.append({"domain": dom, "subtask": sub.strip()})
+            if out:
+                return out[:MAX_PARALLEL_TASKS]
+    return fallback
+
+
+def make_planner_node(deps: Any):
+    """planner 노드 팩토리 → async def planner_node(state) -> {"plan": [...]}"""
+
+    async def planner_node(state: GraphState) -> dict:
+        plan = await _make_plan(state, deps)
+        return {"plan": plan}
+
+    return planner_node
+
+
+# 병렬 워커에 전달할 state 필수 필드(자격증명 제외 — 문자열 식별자만, 요구사항 8.1).
+_WORKER_STATE_KEYS = (
+    "prompt", "session_id", "project_path", "open_file", "open_file_content",
+    "aws_profile", "bedrock_user", "template_id", "system_prompt", "is_remote",
+)
+
+
+def plan_dispatch(state: GraphState):
+    """conditional edge — plan 의 각 서브태스크를 Send 로 도메인 워커에 병렬 fan-out.
+
+    각 워커는 공유 messages(대화 맥락) + 자신의 subtask HumanMessage 를 받아 독립 실행한다.
+    반환값(messages/verified_files)은 GraphState reducer 로 병합된다(add_messages dedup /
+    verified_files dedup). plan 이 비면 chat 단일로 폴백.
+    """
+    plan = state.get("plan") or []
+    if not plan:
+        plan = [{"domain": "chat", "subtask": state.get("prompt", "")}]
+    base = {k: state.get(k) for k in _WORKER_STATE_KEYS if state.get(k) is not None}
+    base_msgs = list(state.get("messages") or [])
+    sends = []
+    for item in plan[:MAX_PARALLEL_TASKS]:
+        domain = item.get("domain") if item.get("domain") in _SUBGRAPH_ROUTES else "chat"
+        sub = item.get("subtask") or state.get("prompt", "")
+        worker_state = {
+            **base,
+            "messages": base_msgs + [HumanMessage(content=sub)],
+            "iteration": 0,
+            "visited_routes": [domain],
+        }
+        sends.append(Send(domain, worker_state))
+    return sends
+
+
+def make_aggregate_node(deps: Any):
+    """aggregate(fan-in) 노드 — 모든 병렬 워커 완료 후 1회 실행.
+
+    워커들이 이미 messages/verified_files 를 상태에 병합하고 텍스트를 스트리밍했으므로
+    여기서는 추가 LLM 호출 없이 통과한다(no-op). 향후 종합 요약이 필요하면 여기서 수행.
+    """
+
+    async def aggregate_node(state: GraphState) -> dict:
+        return {}
+
+    return aggregate_node
+
+
+def build_parallel_top_graph(deps: Any):
+    """planner → (Send fan-out) → 도메인 워커 병렬 → aggregate(fan-in) → END.
+
+    독립 다중 도메인 요청을 동시에 처리한다(LangGraph Send map-reduce). planner 가 단일
+    서브태스크만 만들면 워커 1개로 순차와 동일하게 동작한다. 무회귀를 위해 기존
+    build_top_graph(순차 멀티홉)는 그대로 유지되며, 이 그래프는 graph-stream 에서 선택적으로
+    사용된다.
+
+    구성:
+        START → planner
+        conditional(planner, plan_dispatch) → [Send(domain, substate), ...]  (병렬)
+        각 도메인 워커(컴파일된 서브그래프) → aggregate
+        aggregate → END
+
+    유한 종료: planner→workers→aggregate 로 depth 가 얕고, fan-out 은 MAX_PARALLEL_TASKS 로
+    제한된다. 각 워커 서브그래프는 자체 iteration cap 으로 유한 종료한다.
+    """
+    g = StateGraph(GraphState)
+
+    g.add_node("planner", make_planner_node(deps))
+    g.add_node("coding", build_coding_subgraph(deps))
+    g.add_node("media", build_media_subgraph(deps))
+    g.add_node("research", build_research_subgraph(deps))
+    g.add_node("ops", build_ops_subgraph(deps))
+    g.add_node("chat", build_chat_subgraph(deps))
+    g.add_node("aggregate", make_aggregate_node(deps))
+
+    g.add_edge(START, "planner")
+    g.add_conditional_edges("planner", plan_dispatch, list(_SUBGRAPH_ROUTES))
+    for name in _SUBGRAPH_ROUTES:
+        g.add_edge(name, "aggregate")
+    g.add_edge("aggregate", END)
+
     compile_kwargs: dict = {}
     checkpointer = getattr(deps, "checkpointer", None)
     if checkpointer is not None:

@@ -20,7 +20,7 @@ Task 1.2 산출물. design.md의 Data Models(State 스키마)와 API_NOTES.md(�
 from __future__ import annotations
 
 import operator
-from typing import Annotated, List, Literal, Optional, TypedDict
+from typing import Annotated, Any, List, Literal, Optional, TypedDict
 
 from langchain_core.messages import BaseMessage
 
@@ -54,6 +54,17 @@ class VerifiedFile(TypedDict):
     path: str
     absPath: str
     tool: str
+
+
+def _take_right(left: Any, right: Any) -> Any:
+    """스칼라 채널 병합 reducer — last-wins(우측 우선, None 이면 좌측 보존).
+
+    병렬 fan-out(Send)에서 여러 워커 서브그래프가 같은 단일값 채널(prompt/system_prompt/
+    final_text 등)을 동시에 반환하면 LangGraph 가 INVALID_CONCURRENT_GRAPH_UPDATE 를 던진다.
+    이 채널들에 reducer 를 부여하면 여러 값이 와도 하나로 병합된다(마지막 non-None 채택).
+    순차 실행에서는 단일 write 뿐이라 동작이 바뀌지 않는다(무회귀).
+    """
+    return right if right is not None else left
 
 
 def _merge_verified_files(
@@ -94,31 +105,37 @@ class GraphState(TypedDict, total=False):
     """
 
     # ── 입력 컨텍스트 ──
-    prompt: str
-    session_id: str
-    project_path: str
-    open_file: str
-    open_file_content: str
-    aws_profile: str          # 프로파일 *이름* 문자열만 (자격증명 아님)
-    bedrock_user: str         # assume-role 대상 사용자 *이름* 문자열만 (자격증명 아님)
-    template_id: str
-    system_prompt: str
-    is_remote: bool
+    # ⚠️ 병렬 fan-out(Send)에서 여러 워커 서브그래프가 이 스칼라 채널들을 동시에 반환하면
+    # INVALID_CONCURRENT_GRAPH_UPDATE 가 발생하므로 last-wins reducer(_take_right)를 부여한다.
+    # 순차 실행에는 영향 없다(단일 write).
+    prompt: Annotated[str, _take_right]
+    session_id: Annotated[str, _take_right]
+    project_path: Annotated[str, _take_right]
+    open_file: Annotated[str, _take_right]
+    open_file_content: Annotated[str, _take_right]
+    aws_profile: Annotated[str, _take_right]          # 프로파일 *이름* 문자열만 (자격증명 아님)
+    bedrock_user: Annotated[str, _take_right]         # assume-role 대상 사용자 *이름* 문자열만
+    template_id: Annotated[str, _take_right]
+    system_prompt: Annotated[str, _take_right]
+    is_remote: Annotated[bool, _take_right]
 
     # ── 대화 / 추론 ──
     # reducer로 누적: 노드가 부분 메시지를 반환하면 LangGraph가 병합.
     messages: Annotated[List[BaseMessage], add_messages]
-    route: RouteName                              # Top Supervisor 결정
+    route: Annotated[RouteName, _take_right]      # Top Supervisor 결정
     visited_routes: Annotated[List[str], operator.add]  # 재라우팅 순환 방지 cap
-    iteration: int                                # 서브그래프 내 model↔tool 반복 카운터
+    iteration: Annotated[int, _take_right]        # 서브그래프 내 model↔tool 반복 카운터
+    # 병렬 fan-out 계획: [{"domain": <route>, "subtask": <str>}, ...]. planner 노드가 1회
+    # 세팅한다. len>=2 이면 Send 로 병렬 실행, <=1 이면 단일 실행.
+    plan: Annotated[List[dict], _take_right]
 
     # ── RAG / 검증 ──
-    evidence: Optional[Evidence]
-    citations: dict           # {"verified": [...], "unverified": [...]}
-    answer_quality: dict      # answer_quality metadata
+    evidence: Annotated[Optional[Evidence], _take_right]
+    citations: Annotated[dict, _take_right]       # {"verified": [...], "unverified": [...]}
+    answer_quality: Annotated[dict, _take_right]  # answer_quality metadata
 
     # ── 산출물 ──
     # absPath 기준 dedup 병합 reducer.
     verified_files: Annotated[List[VerifiedFile], _merge_verified_files]
-    final_text: str
-    error: str
+    final_text: Annotated[str, _take_right]
+    error: Annotated[str, _take_right]

@@ -9231,7 +9231,7 @@ async def run_agent_graph_stream(request: Request):
     try:
         from langchain_core.messages import HumanMessage
         from ai_engine.agent_system.deps import GraphDeps
-        from ai_engine.agent_system.supervisor import build_top_graph
+        from ai_engine.agent_system.supervisor import build_top_graph, build_parallel_top_graph
         from ai_engine.agent_system.checkpoint_store import JsonFileCheckpointSaver
         from ai_engine.agent_system.sse_bridge import graph_events_to_sse
         from ai_engine.agent_system.chat_model_adapter import bedrock_messages_to_lc
@@ -9276,7 +9276,11 @@ async def run_agent_graph_stream(request: Request):
             checkpointer=checkpointer,
             store=memory_store,
         )
-        compiled = build_top_graph(deps)
+        # 병렬 fan-out 그래프: planner 가 요청을 독립 서브태스크로 분해해 Send 로 도메인 워커를
+        # 병렬 실행한다(단일 작업이면 워커 1개 = 순차와 동일). AE_LANGGRAPH_PARALLEL=0 으로
+        # 끄면 기존 순차 멀티홉(build_top_graph)을 사용한다(무회귀 안전장치).
+        _parallel_on = os.environ.get("AE_LANGGRAPH_PARALLEL", "on").strip().lower() not in ("0", "false", "off", "no")
+        compiled = build_parallel_top_graph(deps) if _parallel_on else build_top_graph(deps)
 
         # ── 멀티턴 대화 맥락 주입 (멀티턴 회귀 수정) ──
         # 기존 run-stream/run-agent 와 동일하게 ConversationMemory(요약 체크포인트 + 최근 원본)

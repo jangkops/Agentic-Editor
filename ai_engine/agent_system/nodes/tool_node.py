@@ -76,6 +76,29 @@ def _default_media_timeout() -> float:
         return 600.0
 
 
+# ── 전역 미디어 동시성 세마포어 (부하 폭주 방지) ──
+# 병렬 fan-out(Send)에서 여러 워커가 무거운 미디어 도구(이미지/PPTX/PDF 생성 = CPU/IO/
+# 게이트웨이 집약)를 동시에 실행하면 로컬 워크스테이션이 포화되어 프로세스 생성 불가 상태에
+# 빠질 수 있다(실측된 회귀). 미디어 생성만 전역 세마포어로 직렬화(기본 동시 1개)해 안정화한다.
+# 텍스트 도메인(chat/coding/research/ops)의 게이트웨이 호출은 제한하지 않아 병렬성을 유지한다.
+def _media_concurrency() -> int:
+    try:
+        return max(1, int(os.environ.get("AE_MEDIA_CONCURRENCY", "1")))
+    except (TypeError, ValueError):
+        return 1
+
+
+_MEDIA_SEMAPHORE: Optional[asyncio.Semaphore] = None
+
+
+def _get_media_semaphore() -> asyncio.Semaphore:
+    """미디어 동시성 세마포어를 지연 생성(실행 중 이벤트루프에 바인딩)."""
+    global _MEDIA_SEMAPHORE
+    if _MEDIA_SEMAPHORE is None:
+        _MEDIA_SEMAPHORE = asyncio.Semaphore(_media_concurrency())
+    return _MEDIA_SEMAPHORE
+
+
 def _tool_name(t: Any) -> str:
     """도구 정의에서 이름 추출 — dict / BaseTool / Callable 모두 방어적으로 처리.
 
@@ -227,13 +250,22 @@ class GatewayToolNode:
 
             use_bridge = is_remote_session and bridge_remote and name in _BRIDGE_TOOLS
             # 미디어 생성 도구는 긴 상한 적용(이미지 생성 + 렌더 + 조립).
-            eff_timeout = self.media_timeout if name in _MEDIA_TOOLS else self.timeout
+            is_media = name in _MEDIA_TOOLS
+            eff_timeout = self.media_timeout if is_media else self.timeout
             try:
                 if use_bridge:
                     raw = await asyncio.wait_for(
                         asyncio.to_thread(self._run_bridge, name, args),
                         timeout=eff_timeout,
                     )
+                elif is_media:
+                    # 미디어 생성은 전역 세마포어로 직렬화(부하 폭주 방지). 세마포어 대기는
+                    # 타임아웃에 포함하지 않고, 실제 실행만 wait_for 로 감싼다.
+                    async with _get_media_semaphore():
+                        raw = await asyncio.wait_for(
+                            asyncio.to_thread(self._run_local, name, args, state),
+                            timeout=eff_timeout,
+                        )
                 else:
                     raw = await asyncio.wait_for(
                         asyncio.to_thread(self._run_local, name, args, state),
