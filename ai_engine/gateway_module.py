@@ -178,6 +178,45 @@ def _extract_model_token_limit(msg: str) -> int:
     return 0
 
 
+def _is_prefix_form_error(msg: str) -> bool:
+    """모델 ID prefix 형태(bare vs us./eu./global.) 불일치로 인한 거부인지 감지.
+
+    게이트웨이 /converse 실측(2026-07)에서 확인된 형태:
+    - CRIS 필수 모델에 bare ID 사용 → "not in allowed"
+    - ON_DEMAND 모델에 us./global. prefix 사용 → "model identifier is invalid" (ValidationException)
+    양방향 prefix 폴백의 트리거로 사용한다.
+    """
+    if not msg:
+        return False
+    low = str(msg).lower()
+    if "not in allowed" in low:
+        return True
+    if "model identifier is invalid" in low:
+        return True
+    if "invalid model identifier" in low:
+        return True
+    if "unknown model" in low:
+        return True
+    if "model not found" in low:
+        return True
+    if "resourcenotfound" in low and "model" in low:
+        return True
+    return False
+
+
+def _strip_region_prefix(model_id: str) -> str:
+    """us./eu./global. prefix를 제거한 bare 모델 ID 반환. prefix 없으면 원본."""
+    for p in ("us.", "eu.", "global."):
+        if model_id.startswith(p):
+            return model_id[len(p):]
+    return model_id
+
+
+def _has_region_prefix(model_id: str) -> bool:
+    """us./eu./global. prefix가 붙어 있으면 True."""
+    return model_id.startswith("us.") or model_id.startswith("eu.") or model_id.startswith("global.")
+
+
 class GatewayClient:
     STREAM_URL = "https://5kzi5pmk6leqq74cq64jza37lu0qipbk.lambda-url.us-west-2.on.aws/"
 
@@ -381,6 +420,9 @@ class GatewayClient:
         import urllib.request, urllib.error
         loop = asyncio.get_event_loop()
 
+        # 양방향 prefix 폴백은 정확히 1회만 수행 (무한루프 방지)
+        _prefix_fallback_used = False
+
         for attempt in range(3):
             headers = self._sign("POST", url, body_bytes)
             def _call(h=headers, b=body_bytes):
@@ -407,15 +449,23 @@ class GatewayClient:
                     await asyncio.sleep(0.5)
                     continue
 
-            # 원본 ID로 DENY/ERROR → us. prefix로 재시도
+            # prefix 형태 불일치로 거부 → 반대 형태로 1회 폴백 (양방향)
             err_or_deny = result.get("decision") in ("ERROR", "DENY")
             deny_reason = result.get("denial_reason", "") + result.get("error", "")
-            if err_or_deny and self._try_us_prefix and "not in allowed" in deny_reason and attempt == 0:
-                print(f"[GW] 원본 ID '{model_id}' 거부 → us.{model_id} 로 재시도")
-                payload["modelId"] = f"us.{model_id}"
-                body_bytes = json.dumps(payload).encode()
-                self._try_us_prefix = False  # 한 번만 재시도
-                continue
+            if err_or_deny and not _prefix_fallback_used and _is_prefix_form_error(deny_reason):
+                cur_id = payload.get("modelId", model_id)
+                if _has_region_prefix(cur_id):
+                    # 이미 prefix 있음 → bare로 재시도 (3P 신규 모델의 invalid identifier 복구)
+                    new_id = _strip_region_prefix(cur_id)
+                else:
+                    # bare → us. prefix로 재시도 (CRIS 필수 모델)
+                    new_id = f"us.{cur_id}"
+                if new_id != cur_id:
+                    print(f"[GW] prefix 형태 거부 '{cur_id}' → '{new_id}' 로 재시도")
+                    payload["modelId"] = new_id
+                    body_bytes = json.dumps(payload).encode()
+                    _prefix_fallback_used = True  # 정확히 1회만
+                    continue
 
             if result.get("decision") == "ACCEPTED":
                 # 비동기 모델 — S3 폴링으로 결과 대기
@@ -436,6 +486,7 @@ class GatewayClient:
     async def converse_stream_live(self, model_id, messages, system_prompt="", tool_config=None):
         """Lambda Function URL — 토큰 만료 시 자동 갱신 + 재시도 (최대 3회)."""
         result = None
+        _prefix_fallback_used = False  # 양방향 prefix 폴백은 정확히 1회
         for _retry in range(3):
             result = await self._converse_stream_live_once(model_id, messages, system_prompt, tool_config)
             err = result.get("error", "")
@@ -444,11 +495,17 @@ class GatewayClient:
                 self.force_refresh_creds()
                 await asyncio.sleep(0.5)
                 continue
-            # "not in allowed list" → us. prefix로 재시도
-            if "not in allowed" in err and not model_id.startswith("us.") and _retry == 0:
-                print(f"[Stream] '{model_id}' 거부 → us.{model_id} 로 재시도")
-                model_id = f"us.{model_id}"
-                continue
+            # prefix 형태 불일치로 거부 → 반대 형태로 1회 폴백 (양방향)
+            if not _prefix_fallback_used and _is_prefix_form_error(err):
+                if _has_region_prefix(model_id):
+                    new_id = _strip_region_prefix(model_id)
+                else:
+                    new_id = f"us.{model_id}"
+                if new_id != model_id:
+                    print(f"[Stream] prefix 형태 거부 '{model_id}' → '{new_id}' 로 재시도")
+                    model_id = new_id
+                    _prefix_fallback_used = True
+                    continue
             return result
         return result
 
@@ -459,6 +516,7 @@ class GatewayClient:
         """
         max_retries = 2
         attempt = 0
+        _prefix_fallback_used = False  # 양방향 prefix 폴백은 정확히 1회
         # 시작점 — 모델별 사전 한계
         current_max = _resolve_model_max_tokens(model_id)
         # env_cap
@@ -539,6 +597,20 @@ class GatewayClient:
             except Exception as e:
                 error_event = {"type": "error", "error": str(e)}
 
+            # prefix 형태 불일치로 거부 → 반대 형태로 1회 폴백 (양방향, 데이터 미방출 시에만)
+            if error_event is not None and not had_data and not _prefix_fallback_used:
+                _emsg = str(error_event.get("message") or error_event.get("error") or "")
+                if _is_prefix_form_error(_emsg):
+                    if _has_region_prefix(model_id):
+                        _new_id = _strip_region_prefix(model_id)
+                    else:
+                        _new_id = f"us.{model_id}"
+                    if _new_id != model_id:
+                        print(f"[GW SSE] prefix 형태 거부 '{model_id}' → '{_new_id}' 로 재시도")
+                        model_id = _new_id
+                        _prefix_fallback_used = True
+                        error_event = None
+                        continue
             # 재시도 케이스 (max_tokens 줄임)
             if error_event is None and not had_data and attempt <= max_retries:
                 continue

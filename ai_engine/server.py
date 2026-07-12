@@ -8003,9 +8003,15 @@ def _resolve_callable_model_id(model_id, aws_profile, bedrock_user):
         if not any(model_id.startswith(p) for p in ("us.", "eu.", "global.")):
             return f"us.{raw_id}"
         return model_id
-    # 둘 다 또는 알 수 없음 → 기본 CRIS (기존 동작 유지)
-    if not any(model_id.startswith(p) for p in ("us.", "eu.", "global.")):
-        return f"us.{raw_id}"
+    if has_on_demand and has_inference_profile:
+        # 둘 다 지원 → 기본 CRIS (기존 동작 유지)
+        if not any(model_id.startswith(p) for p in ("us.", "eu.", "global.")):
+            return f"us.{raw_id}"
+        return model_id
+    # 캐시에 정보가 전혀 없음(unknown, types 빈 리스트) → 원본 model_id 그대로 반환.
+    # 3P 신규 모델(nvidia/google/qwen/zai/minimax/moonshotai/mistral 신규/deepseek 등)은
+    # bare ID로만 converse 200 OK 이며, us. 강제 시 'model identifier is invalid'로 거부된다.
+    # 반대 형태가 필요한 경우는 gateway_module의 양방향 prefix 폴백(수정 A)이 1회 복구한다.
     return model_id
 
 
@@ -8487,6 +8493,64 @@ async def rag_status(request: Request):
     return {"indexed": False, "chunks": 0}
 
 
+# 게이트웨이 /converse 실측 2026-07 기준(account 107650139384, us-west-2) 호출 불가 모델.
+# 카탈로그에 노출되더라도 실제 호출 시 NO_ACCESS(콘솔 미부여) 또는 UNAVAILABLE
+# (계정/리전 미제공·구모델)로 거부되므로 /api/models 응답에서 제외한다.
+# base id(us./eu./global. prefix 제거)로 비교하여 prefix 변형도 함께 숨긴다.
+_UNINVOKABLE_MODEL_IDS = frozenset({
+    # NO_ACCESS — 콘솔에서 모델 액세스 미부여
+    "cohere.command-r-plus-v1:0",
+    "cohere.command-r-v1:0",
+    # UNAVAILABLE — 계정/리전 미제공 또는 구모델
+    "amazon.titan-embed-text-v1:2:8k",
+    "amazon.titan-image-generator-v2:0",
+    "amazon.titan-tg1-large",
+    "anthropic.claude-3-5-haiku-20241022-v1:0",
+    "anthropic.claude-3-5-sonnet-20240620-v1:0",
+    "anthropic.claude-3-5-sonnet-20241022-v2:0",
+    "anthropic.claude-3-7-sonnet-20250219-v1:0",
+    "anthropic.claude-3-haiku-20240307-v1:0",
+    "anthropic.claude-3-sonnet-20240229-v1:0",
+    "cohere.embed-english-v3:0:512",
+    "cohere.embed-multilingual-v3:0:512",
+    "meta.llama3-1-405b-instruct-v1:0",
+    "meta.llama3-1-70b-instruct-v1:0:128k",
+    "meta.llama3-1-8b-instruct-v1:0:128k",
+    "meta.llama3-2-11b-instruct-v1:0",
+    "meta.llama3-2-1b-instruct-v1:0",
+    "meta.llama3-2-3b-instruct-v1:0",
+    "meta.llama3-2-90b-instruct-v1:0",
+    "meta.llama3-3-70b-instruct-v1:0:128k",
+})
+
+
+def _base_model_id(model_id: str) -> str:
+    """us./eu./global. prefix를 제거한 base 모델 ID 반환."""
+    if not model_id:
+        return model_id
+    for p in ("us.", "eu.", "global."):
+        if model_id.startswith(p):
+            return model_id[len(p):]
+    return model_id
+
+
+def _filter_uninvokable(catalog: dict) -> dict:
+    """카탈로그(dict[provider -> list[{id,...}]])에서 _UNINVOKABLE_MODEL_IDS에
+    해당하는 모델을 제외한 새 dict 반환. base id로 비교해 prefix 변형도 제외.
+    빈 provider 리스트는 결과에서 제거한다."""
+    if not catalog:
+        return catalog
+    filtered = {}
+    for provider, items in catalog.items():
+        kept = [
+            it for it in (items or [])
+            if _base_model_id(it.get("id", "")) not in _UNINVOKABLE_MODEL_IDS
+        ]
+        if kept:
+            filtered[provider] = kept
+    return filtered
+
+
 @app.get("/api/models")
 @app.post("/api/models")
 async def list_models(request: Request):
@@ -8720,6 +8784,12 @@ async def list_models(request: Request):
             catalog = _oc.merge_openai_into_catalog(catalog, _openai_entries)
         except Exception as _oe:
             print(f"[Models] OpenAI 병합 실패 → Bedrock-only: {str(_oe)[:200]}")
+        # 호출 불가 모델(게이트웨이 /converse 실측 2026-07) 숨김 — 전 카테고리 적용.
+        catalog = _filter_uninvokable(catalog)
+        image_catalog = _filter_uninvokable(image_catalog)
+        video_catalog = _filter_uninvokable(video_catalog)
+        embed_catalog = _filter_uninvokable(embed_catalog)
+        rerank_catalog = _filter_uninvokable(rerank_catalog)
         _text_count = sum(len(v) for v in catalog.values())
         _image_count = sum(len(v) for v in image_catalog.values())
         _video_count = sum(len(v) for v in video_catalog.values())
