@@ -32,15 +32,15 @@ context_builder/indexer/embedder/citation/answer_quality)은 **재구현하지 �
     - `_lc_messages_to_bedrock` / `_bedrock_output_to_ai_message` / `_lc_tool_to_bedrock_toolspec` / `GatewayModelError`
     - _Requirements: 2.1, 2.2, 2.3, 2.5, 2.6, 2.7_
 
-  - [ ]* 1.4 Property test: toolUse ↔ ToolCall 왕복 (hypothesis, Gateway mock)
+  - [x]* 1.4 Property test: toolUse ↔ ToolCall 왕복 (hypothesis, Gateway mock)
     - **Property 2: toolUse ↔ ToolCall 왕복 보존**
     - **Validates: Requirements 2.3, 2.4**
 
-  - [ ]* 1.5 Property test: LLM 호출은 항상 Gateway 경유 (직접 SDK import 부재)
+  - [x]* 1.5 Property test: LLM 호출은 항상 Gateway 경유 (직접 SDK import 부재)
     - **Property 1: LLM 호출은 항상 Gateway 경유**
     - **Validates: Requirements 2.2, 8.4**
 
-  - [ ]* 1.6 단위 테스트: 메시지 변환 헬퍼 엣지 (이미지 첨부 / toolResult / user·assistant 교대)
+  - [x]* 1.6 단위 테스트: 메시지 변환 헬퍼 엣지 (이미지 첨부 / toolResult / user·assistant 교대)
     - _Requirements: 2.6_
 
   - [x] 1.7 JsonFileCheckpointSaver 구현 (`agent_system/checkpoint_store.py`)
@@ -48,11 +48,11 @@ context_builder/indexer/embedder/citation/answer_quality)은 **재구현하지 �
     - `.json` 파일만 저장, 저장 경로를 `userData/checkpoints/langgraph/`로 한정, SQLite 미사용
     - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 8.3_
 
-  - [ ]* 1.8 Property test: checkpointer는 JSON 파일만 사용 (hypothesis, fake fs)
+  - [x]* 1.8 Property test: checkpointer는 JSON 파일만 사용 (hypothesis, fake fs)
     - **Property 5: checkpointer는 JSON 파일만 사용**
     - **Validates: Requirements 4.2, 4.3**
 
-  - [ ]* 1.9 Property test: 자격증명은 state/checkpoint 어디에도 저장되지 않음
+  - [x]* 1.9 Property test: 자격증명은 state/checkpoint 어디에도 저장되지 않음
     - **Property 8: 자격증명 미저장**
     - **Validates: Requirements 8.2, 8.3**
 
@@ -62,7 +62,7 @@ context_builder/indexer/embedder/citation/answer_quality)은 **재구현하지 �
     - verified_files 디스크 실측(`os.path.isfile` & size>0) 후 append
     - _Requirements: 3.7, 6.2, 7.5_
 
-  - [ ]* 1.11 Property test: verified_files는 반드시 디스크에 실재 (hypothesis, fake fs)
+  - [x]* 1.11 Property test: verified_files는 반드시 디스크에 실재 (hypothesis, fake fs)
     - **Property 3: verified_files는 반드시 디스크에 실재**
     - **Validates: Requirements 3.7, 3.8**
 
@@ -96,11 +96,11 @@ context_builder/indexer/embedder/citation/answer_quality)은 **재구현하지 �
     - 공통 패턴 재사용, Route별 도구 집합 바인딩(media: generate_*, ops: run_command/git/브리지, research: read_file, chat: 도구 없음)
     - _Requirements: 1.6_
 
-  - [ ]* 3.4 Property test: 그래프는 유한 시간에 종료 (hop / recursion cap)
+  - [x]* 3.4 Property test: 그래프는 유한 시간에 종료 (hop / recursion cap)
     - **Property 4: 그래프는 유한 시간에 종료**
     - **Validates: Requirements 6.4, 6.5, 6.6, 6.7**
 
-  - [ ]* 3.5 통합 테스트: coding→media 재라우팅 및 done 종료 (Gateway mock)
+  - [x]* 3.5 통합 테스트: coding→media 재라우팅 및 done 종료 (Gateway mock)
     - _Requirements: 1.3, 1.4, 1.5_
 
   - [x] 3.6 recursion_limit / GRAPH_TOTAL_TIMEOUT / MAX_ROUTE_HOPS / SUBGRAPH_RECURSION 설정 배선
@@ -122,7 +122,7 @@ context_builder/indexer/embedder/citation/answer_quality)은 **재구현하지 �
     - answer_quality 메타데이터, 파일 의도 있으나 verified_files 0건이면 `_force_generate_from_text` 호출 후 병합
     - _Requirements: 3.3, 3.4, 3.5, 3.6, 3.8, 7.5_
 
-  - [ ]* 5.3 Property test: citation 검증은 답변을 차단하지 않음
+  - [x]* 5.3 Property test: citation 검증은 답변을 차단하지 않음
     - **Property 7: citation 검증은 답변을 차단하지 않음**
     - **Validates: Requirements 3.5**
 
@@ -131,7 +131,7 @@ context_builder/indexer/embedder/citation/answer_quality)은 **재구현하지 �
     - 디스크 실측 path만 `{verifiedFiles}`, `HEARTBEAT_INTERVAL`마다 `{heartbeat}`, 종료 시 `[DONE]`
     - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.6, 6.7_
 
-  - [ ]* 5.5 Property test: SSE 이벤트 키 부분집합 + `[DONE]` 종료
+  - [x]* 5.5 Property test: SSE 이벤트 키 부분집합 + `[DONE]` 종료
     - **Property 6: SSE 이벤트 계약 호환**
     - **Validates: Requirements 5.5, 5.6**
 
@@ -150,7 +150,7 @@ context_builder/indexer/embedder/citation/answer_quality)은 **재구현하지 �
   - [x] 7.2 graph-stream 실패 시 기존 라우트 자동 fallback 배선 (프론트/서버)
     - _Requirements: 7.4_
 
-  - [ ]* 7.3 통합 테스트: flag on/off 및 실패 fallback 시나리오
+  - [x]* 7.3 통합 테스트: flag on/off 및 실패 fallback 시나리오
     - _Requirements: 7.1, 7.2, 7.3, 7.4_
 
 - [x] 8. Phase 4 체크포인트
@@ -168,7 +168,7 @@ context_builder/indexer/embedder/citation/answer_quality)은 **재구현하지 �
     - `langgraph.checkpoint.base`, `langgraph.checkpoint.serde.jsonplus`, `langgraph.prebuilt`, `langchain_core.language_models` import 검증
     - _Requirements: 9.2_
 
-  - [ ]* 9.4 회귀 테스트: 기존 `run_agent_stream` 경로 무회귀
+  - [x]* 9.4 회귀 테스트: 기존 `run_agent_stream` 경로 무회귀
     - _Requirements: 9.3_
 
 - [x] 10. 최종 체크포인트

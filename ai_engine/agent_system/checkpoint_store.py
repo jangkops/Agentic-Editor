@@ -14,6 +14,8 @@ import re
 import json
 import base64
 import asyncio
+import tempfile
+import threading
 from typing import Any, AsyncIterator, Iterator, Optional, Sequence
 
 from langgraph.checkpoint.base import (
@@ -84,6 +86,11 @@ class JsonFileCheckpointSaver(BaseCheckpointSaver):
         super().__init__(serde=serde or JsonPlusSerializer())
         self.base_dir = base_dir or _default_checkpoint_dir()
         os.makedirs(self.base_dir, exist_ok=True)
+        # 동시성 방어: LangGraph 는 한 superstep 의 여러 쓰기(put / put_writes)를
+        # asyncio.to_thread 로 **동시에** 스케줄할 수 있다. 비원자적 파일 쓰기 + 동시
+        # read-modify-write 가 겹치면 빈/부분 파일을 읽어 JSONDecodeError 가 나거나 write 가
+        # 유실된다. 프로세스 내 락으로 파일 RMW 를 직렬화하고, 쓰기는 원자적으로 수행한다.
+        self._lock = threading.Lock()
 
     # ─────────────────────────── 경로/직렬화 헬퍼 ───────────────────────────
 
@@ -108,6 +115,27 @@ class JsonFileCheckpointSaver(BaseCheckpointSaver):
         """{"type","data"} → serde.loads_typed((tag, bytes))."""
         data = base64.b64decode(wrapped["data"].encode("ascii"))
         return self.serde.loads_typed((wrapped["type"], data))
+
+    @staticmethod
+    def _atomic_write(path: str, text: str) -> None:
+        """같은 디렉터리 temp 파일에 기록 후 os.replace 로 원자적 교체.
+
+        원자적 교체는 리더가 부분/빈 파일을 절대 보지 못하게 한다(동시 put_writes 의
+        json.load 가 빈 파일을 읽어 JSONDecodeError 나는 레이스 제거).
+        """
+        d = os.path.dirname(path)
+        os.makedirs(d, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+            os.replace(tmp, path)
+        except Exception:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
 
     @staticmethod
     def _assert_no_credentials(*objs: Any) -> None:
@@ -161,9 +189,9 @@ class JsonFileCheckpointSaver(BaseCheckpointSaver):
         serialized = json.dumps(record, ensure_ascii=False)
 
         path = self._checkpoint_path(thread_id, checkpoint_ns, checkpoint_id)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(serialized)
+        # 락 + 원자적 쓰기로 동시 put/put_writes 레이스 방지.
+        with self._lock:
+            self._atomic_write(path, serialized)
 
         return {
             "configurable": {
@@ -189,31 +217,34 @@ class JsonFileCheckpointSaver(BaseCheckpointSaver):
             return
 
         path = self._checkpoint_path(thread_id, checkpoint_ns, checkpoint_id)
-        if not os.path.isfile(path):
-            # 대응 체크포인트가 아직 없으면 스킵(방어)
-            return
-
-        with open(path, "r", encoding="utf-8") as f:
-            record = json.load(f)
 
         self._assert_no_credentials(writes)
 
-        existing = record.get("writes", [])
-        for idx, (channel, value) in enumerate(writes):
-            existing.append(
-                {
-                    "task_id": task_id,
-                    "task_path": task_path,
-                    "idx": idx,
-                    "channel": channel,
-                    "value": self._encode(value),
-                }
-            )
-        record["writes"] = existing
+        # 락으로 read-modify-write 를 직렬화(동시 put_writes 간 write 유실/부분 읽기 방지).
+        with self._lock:
+            if not os.path.isfile(path):
+                # 대응 체크포인트가 아직 없으면 스킵(방어)
+                return
+            record = self._read_record(path)
+            if record is None:
+                # 부분/빈 파일 등으로 파싱 실패 시 비차단 스킵(원자적 쓰기로 정상 시엔 발생 안 함).
+                return
 
-        serialized = json.dumps(record, ensure_ascii=False)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(serialized)
+            existing = record.get("writes", [])
+            for idx, (channel, value) in enumerate(writes):
+                existing.append(
+                    {
+                        "task_id": task_id,
+                        "task_path": task_path,
+                        "idx": idx,
+                        "channel": channel,
+                        "value": self._encode(value),
+                    }
+                )
+            record["writes"] = existing
+
+            serialized = json.dumps(record, ensure_ascii=False)
+            self._atomic_write(path, serialized)
 
     def get_tuple(self, config: RunnableConfig) -> Optional[CheckpointTuple]:
         """thread_id로 체크포인트 조회.
