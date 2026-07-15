@@ -56,6 +56,26 @@ class VerifiedFile(TypedDict):
     tool: str
 
 
+class Evaluation(TypedDict, total=False):
+    """Evaluator_Node 채점 결과 (langgraph-reasoning-upgrade).
+
+    aggregate 이후 evaluator 노드가 원래 사용자 목표 대비 현재 산출물/답변의 달성
+    여부를 채점하여 이 형태로 상태의 `evaluation` 채널에 기록한다.
+
+    - achieved:        원래 요청이 모두 충족되었는가(달성/미달).
+    - reason:          판정 사유(한국어).
+    - missing_domains: 미달 시 보완이 필요한 도메인 라벨 목록. 항상 유효 도메인
+                       라벨(_ROUTE_LABELS)의 부분집합만 포함한다.
+
+    ⚠️ 보안(요구사항 10.1): 이 dict 에는 AWS 자격증명(accessKeyId / secretAccessKey /
+    sessionToken)을 절대 담지 않는다. 평가 메타데이터만 보관한다.
+    """
+
+    achieved: bool
+    reason: str
+    missing_domains: List[str]
+
+
 def _take_right(left: Any, right: Any) -> Any:
     """스칼라 채널 병합 reducer — last-wins(우측 우선, None 이면 좌측 보존).
 
@@ -65,6 +85,31 @@ def _take_right(left: Any, right: Any) -> Any:
     순차 실행에서는 단일 write 뿐이라 동작이 바뀌지 않는다(무회귀).
     """
     return right if right is not None else left
+
+
+def _take_max_int(left: Any, right: Any) -> int:
+    """정수 채널 병합 reducer — 두 값 중 큰 정수를 반환하는 monotonic MAX(단조 증가).
+
+    None 은 0 으로 취급하고, 둘 다 None 이면 0 을 반환한다. 정수로 해석할 수 없는 값도
+    방어적으로 0 으로 취급한다(비차단).
+
+    ⚠️ Send fan-out echo/reset 면역 — 워커가 0 을 emit해도 running max 유지:
+    병렬 fan-out(Send)으로 분기된 워커 서브그래프는 동일한 GraphState 스키마를 공유하므로,
+    병합 시 refine_count 채널에 0 을 emit할 수 있다. last-wins(_take_right)라면
+    `_take_right(1, 0) == 0` 이 되어 카운터가 리셋되고 cap 판정(refine_count >= cap)이 절대
+    성립하지 않아 Refine_Loop 가 무한 반복한다(과거 GraphRecursionError 이력). MAX reducer 는
+    `_take_max_int(1, 0) == 1` 로 워커의 0-리셋에 면역이며, 0→1→2 로 단조 증가하는 카운터
+    의미상 정확하다(cap 판정이 `>=` 이므로 running max 로 충분).
+    """
+    def _to_int(v: Any) -> int:
+        if v is None:
+            return 0
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return 0
+
+    return max(_to_int(left), _to_int(right))
 
 
 def _merge_verified_files(
@@ -130,8 +175,18 @@ class GraphState(TypedDict, total=False):
     # 카운터. hop cap 판정의 신뢰 지표.
     route_hops: Annotated[int, _take_right]
     iteration: Annotated[int, _take_right]        # 서브그래프 내 model↔tool 반복 카운터
-    # 병렬 fan-out 계획: [{"domain": <route>, "subtask": <str>}, ...]. planner 노드가 1회
-    # 세팅한다. len>=2 이면 Send 로 병렬 실행, <=1 이면 단일 실행.
+    # 병렬 fan-out 계획(의존성 인식 DAG 확장):
+    #   [{"id": <str>, "domain": <route>, "subtask": <str>, "depends_on": List[str]}, ...]
+    # planner 노드가 1회 세팅한다. len>=2 이면 Send 로 병렬 실행, <=1 이면 단일 실행.
+    # - id:         서브태스크 고유 식별자(누락 시 "t{i}" 로 보정).
+    # - depends_on: 이 서브태스크 시작 전 완료되어야 할 선행 서브태스크 id 목록(기본 []).
+    #               위상정렬(topological_waves)으로 Wave 를 분할하는 근거.
+    # reducer(_take_right)는 불변 유지 — DAG_Planner off 시 depends_on 을 무시하고 기존
+    # 단일 Wave 동작을 그대로 수행한다(무회귀).
+    # ⚠️ Send fan-out echo/reset 주의: 워커 서브그래프가 병합 시 plan=[] 를 echo 하면
+    # `_take_right(plan, [])=[]` 로 plan 이 지워져 다중 Wave 스케줄이 소실된다. 이를 막기 위해
+    # supervisor.plan_dispatch 가 현재 plan 을 워커 substate 로 함께 전달해 워커가 같은 값을
+    # echo 하도록 만든다(`_take_right(plan, plan)=plan`, 리셋 차단).
     plan: Annotated[List[dict], _take_right]
 
     # ── RAG / 검증 ──
@@ -144,3 +199,24 @@ class GraphState(TypedDict, total=False):
     verified_files: Annotated[List[VerifiedFile], _merge_verified_files]
     final_text: Annotated[str, _take_right]
     error: Annotated[str, _take_right]
+
+    # ── 신규: Evaluator 재계획 루프 (langgraph-reasoning-upgrade) ──
+    # evaluator 노드가 채점 결과를 1회 기록. 단일 노드만 write 하므로 last-wins 안전.
+    evaluation: Annotated[Optional[Evaluation], _take_right]
+    # 재계획(Refine_Loop) 수행 횟수. monotonic MAX reducer(_take_max_int) —
+    # Send fan-out echo/reset 면역: 워커 서브그래프가 병합 시 refine_count=0 을 emit해도
+    # running max 를 유지하므로 카운터가 리셋되지 않는다. last-wins(_take_right)는
+    # `_take_right(1, 0)=0` 으로 워커의 0-리셋을 막지 못해 cap 판정(refine_count >= cap)이
+    # 절대 성립하지 않고 Refine_Loop 가 무한 반복했다(과거 GraphRecursionError 이력, 요구사항
+    # 2.2/2.4 및 Property 1 위반). refine_count 는 0→1→2 로 단조 증가하고 cap 판정이 `>=`
+    # 이므로 MAX reducer 가 의미상 정확하다(요구사항 2.3).
+    refine_count: Annotated[int, _take_max_int]
+
+    # ── 신규: DAG Wave 스케줄링 (langgraph-reasoning-upgrade) ──
+    # 완료된 Wave 수. 다음 dispatch 대상 Wave 인덱스로 사용. last-wins(_take_right) —
+    # planner 가 새 plan 생성(refine) 시 0 으로 리셋해야 하므로 MAX reducer 를 쓸 수 없다.
+    # ⚠️ Send fan-out echo/reset 면역은 reducer 가 아니라 supervisor.plan_dispatch 가
+    # completed_waves(및 plan)를 워커 substate 로 함께 전달해 워커가 같은 값을 echo 하도록
+    # 만들어 확보한다(`_take_right(x, x)=x`). substate 로 전달하지 않으면 워커가 기본값 0 을
+    # echo 해 Wave 커서가 되감기고 다중 Wave 가 무한 재-dispatch 된다.
+    completed_waves: Annotated[int, _take_right]

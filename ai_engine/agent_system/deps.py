@@ -17,6 +17,13 @@ from typing import Any, Optional
 # design.md 서브그래프 분할 기준: coding/media/research/ops 는 sonnet-4-5 기본.
 _DEFAULT_CODING_MODEL = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
 
+# ── 모델 역할 배분 (steering project.md / 요구사항 9) ──
+# Planner=Opus, Generator=Sonnet, Evaluator=Opus. 미주입 시 아래 기본값을 사용하며,
+# deps 로 특정 역할 model_id 가 주입되면 해당 역할 노드가 그 값을 사용한다(요구사항 9.5).
+_DEFAULT_PLANNER_MODEL = "us.anthropic.claude-opus-4-1-20250805-v1:0"      # Planner=Opus
+_DEFAULT_GENERATOR_MODEL = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"  # Generator=Sonnet
+_DEFAULT_EVALUATOR_MODEL = "us.anthropic.claude-opus-4-1-20250805-v1:0"    # Evaluator=Opus
+
 
 @dataclass
 class GraphDeps:
@@ -26,6 +33,9 @@ class GraphDeps:
         gateway:      GatewayClient (converse / stream_sse_realtime 제공). LLM 호출은
                       반드시 이 게이트웨이 경유(직접 SDK 금지 — 요구사항 2.2).
         model_coding: coding 서브그래프 model 노드가 사용할 Bedrock model_id.
+        model_planner:   DAG_Planner 노드가 사용할 model_id(기본 Opus, 요구사항 9.2).
+        model_generator: Generator(도메인 model 노드)가 사용할 model_id(기본 Sonnet, 9.4).
+        model_evaluator: Evaluator_Node 가 사용할 model_id(기본 Opus, 9.3).
         checkpointer: LangGraph BaseCheckpointSaver. Top 그래프 compile 시에만 주입되며
                       서브그래프는 부모의 checkpointer 를 상속한다(API_NOTES 항목 6).
                       Phase 1 단일 서브그래프 스모크에서는 None 이어도 무방.
@@ -33,6 +43,11 @@ class GraphDeps:
 
     gateway: Any = None
     model_coding: str = _DEFAULT_CODING_MODEL
+    # ── 모델 역할 배분 (요구사항 9) ──
+    # 미주입 시 기본값(Opus/Sonnet/Opus)을 사용. 기존 model_coding 필드는 하위 호환 유지.
+    model_planner: str = _DEFAULT_PLANNER_MODEL        # DAG_Planner 역할 (기본 Opus)
+    model_generator: str = _DEFAULT_GENERATOR_MODEL    # Generator 역할 (기본 Sonnet)
+    model_evaluator: str = _DEFAULT_EVALUATOR_MODEL    # Evaluator 역할 (기본 Opus)
     checkpointer: Optional[Any] = None
     # LangGraph Store(BaseStore) — 세션 간(cross-thread) 장기 메모리. Top 그래프 compile 시
     # 주입되며 노드는 deps.store 를 직접 참조하거나 부모 그래프에서 전파받는다. None 이면
