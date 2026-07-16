@@ -110,6 +110,12 @@ def _obs_log(prefix: str, message: str) -> None:
 MAX_ROUTE_HOPS: int = _env_int("AE_MAX_ROUTE_HOPS", 4)
 # 라우터 LLM 개별 호출 상한(초). 스트림 아님(ainvoke). 초과/실패는 비차단 폴백.
 ROUTER_TIMEOUT: float = _env_float("AE_ROUTER_TIMEOUT", 60.0)
+# 플래너 LLM 개별 호출 상한(초). 스트림 아님(ainvoke). 초과/실패는 단일 서브태스크 폴백.
+# ⚠️ 게이트웨이 /converse 는 toolConfig 동반 호출을 비동기 S3 잡 폴링(최대 300s)으로 처리하므로,
+# planner 타임아웃이 폴링 상한보다 짧으면(과거 60s) 게이트웨이가 응답하기 전에 조기 폴백되어
+# DAG 분해가 통째로 무력화된다(단일 서브태스크로 축약). 폴링 상한과 정렬해 게이트웨이가
+# 스스로 종결할 때까지 기다린다(정상 시엔 모델 응답 즉시 반환되어 지연 없음).
+PLANNER_TIMEOUT: float = _env_float("AE_PLANNER_TIMEOUT", 300.0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -677,7 +683,13 @@ async def _make_plan(state: GraphState, deps: Any) -> List[dict]:
     gateway = getattr(deps, "gateway", None)
     if gateway is None:
         return fallback
-    model_id = getattr(deps, "model_coding", None) or _DEFAULT_ROUTER_MODEL
+    # 역할 모델 배분(요구사항 9.2): planner 는 전용 model_planner 를 우선 사용하고,
+    # 미주입 시 model_coding → 기본값으로 폴백한다.
+    model_id = (
+        getattr(deps, "model_planner", None)
+        or getattr(deps, "model_coding", None)
+        or _DEFAULT_ROUTER_MODEL
+    )
     try:
         llm = GatewayChatModel(gateway=gateway, model_id=model_id).bind_tools(
             [_PLAN_TOOL], tool_choice="select_plan"
@@ -686,7 +698,8 @@ async def _make_plan(state: GraphState, deps: Any) -> List[dict]:
             SystemMessage(content=_PLANNER_SYSTEM_PROMPT),
             HumanMessage(content=_build_router_prompt(state)),
         ]
-        ai = await asyncio.wait_for(llm.ainvoke(messages), timeout=ROUTER_TIMEOUT)
+        # PLANNER_TIMEOUT(폴링 상한 정렬) — 게이트웨이 비동기 잡을 조기 폴백하지 않는다.
+        ai = await asyncio.wait_for(llm.ainvoke(messages), timeout=PLANNER_TIMEOUT)
     except (asyncio.TimeoutError, GatewayModelError, Exception):
         return fallback
 
