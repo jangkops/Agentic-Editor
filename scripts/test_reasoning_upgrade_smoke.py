@@ -8,8 +8,9 @@ Validates: Requirements 6.5, 7.2, 8.4, 9.1
   import 부재(요구사항 7.2 — 모든 LLM 호출은 GatewayChatModel 경유).
 - 신규 LLM 호출 노드에 `wait_for(...ainvoke...)` 패턴 존재, 스트림 소비 루프(`async for`)를
   wait_for 로 감싸지 않음(요구사항 8.1~8.4 — 무한대기 차단).
-- GraphDeps 에 model_planner/model_generator/model_evaluator 필드 존재 + 기본값 Opus/
-  Sonnet/Opus(요구사항 9.1~9.4).
+- GraphDeps 에 model_planner/model_generator/model_evaluator 필드 존재 + 프로덕션 기본값
+  모두 Sonnet 4.5(동기 신뢰 경로. Opus 는 비동기 폴링→wait_for 타임아웃 폴백되어 기본값
+  제외, deps 주입으로 사용). Opus 는 요구사항 9.5 주입 경로로 실현.
 - 플래그 on/off 조립 스냅샷(요구사항 6.2/6.3 무회귀).
 
 실행:
@@ -100,10 +101,12 @@ def test_graphdeps_has_model_role_fields():
     deps = GraphDeps()
     for field in ("model_planner", "model_generator", "model_evaluator"):
         assert hasattr(deps, field), f"GraphDeps 에 {field} 필드 없음"
-    # 역할 배분: Planner=Opus, Generator=Sonnet, Evaluator=Opus.
-    assert "opus" in deps.model_planner.lower()
+    # 프로덕션 기본값: 세 역할 모두 Sonnet 4.5(동기 신뢰 경로).
+    # Opus 는 게이트웨이 비동기 폴링 경로 → evaluator/planner wait_for 타임아웃 폴백되므로
+    # 기본값에서 제외하고 deps 주입으로만 사용(test_graphdeps_model_roles_injectable 참고).
+    assert "sonnet" in deps.model_planner.lower()
     assert "sonnet" in deps.model_generator.lower()
-    assert "opus" in deps.model_evaluator.lower()
+    assert "sonnet" in deps.model_evaluator.lower()
 
 
 def test_graphdeps_model_roles_injectable():

@@ -61,13 +61,10 @@ def _build_gateway():
     except Exception as e:  # noqa: BLE001
         _fail(f"GatewayClient import 실패: {e}")
 
-    # GatewayClient 시그니처는 배포본 기준. 실패 시 사용자가 인자를 조정하도록 원인을 노출.
-    try:
-        gw = GatewayClient(profile_name=profile, bedrock_user=bedrock_user or None)
-    except TypeError:
-        # 시그니처가 다르면 인자 없이 시도(환경변수 기반 구성).
-        from ai_engine.gateway_module import GatewayClient as _GC
-        gw = _GC()
+    # 실제 GatewayClient 시그니처: (gateway_url, aws_profile, region, bedrock_user).
+    # bedrock_user 는 BedrockUser-{name} assume-role 대상. 미지정 시 프로파일 default 자격증명이
+    # 그대로 쓰여 execute-api:Invoke 권한이 없으면 403 이 난다(반드시 지정 권장).
+    gw = GatewayClient(aws_profile=profile, bedrock_user=bedrock_user or "")
     return gw, profile, bedrock_user
 
 
@@ -77,7 +74,11 @@ async def main():
     from langchain_core.messages import HumanMessage
 
     gw, profile, bedrock_user = _build_gateway()
-    deps = GraphDeps(gateway=gw)  # 모델 역할 기본값(Planner/Evaluator=Opus, Generator=Sonnet)
+    # 모델 역할 기본값: Planner/Generator/Evaluator 모두 Sonnet 4.5(동기 신뢰 경로).
+    # Opus 는 게이트웨이 비동기 폴링→evaluator wait_for 타임아웃 폴백되어 기본값에서 제외.
+    # Opus 라이브 검증이 필요하면 아래처럼 주입 + 타임아웃 상향:
+    #   deps = GraphDeps(gateway=gw, model_evaluator=os.environ["AE_OPUS_ID"])
+    deps = GraphDeps(gateway=gw)
 
     prompt = os.environ.get(
         "AE_SMOKE_PROMPT",
@@ -108,10 +109,26 @@ async def main():
     refine_count = final.get("refine_count", 0) or 0
     evaluation = final.get("evaluation") or {}
 
+    # evaluator 가 실제 verdict 를 냈는지 vs 비차단 폴백인지 구분(이번 수정의 핵심 증거).
+    # 타임아웃/호출실패 폴백은 reason="평가 호출 실패 - 비차단 종료" 로 표식된다.
+    eval_reason = str(evaluation.get("reason") or "")
+    eval_timed_out = "평가 호출 실패" in eval_reason
+    eval_cap_hit = "재계획 상한" in eval_reason
+    eval_genuine = bool(evaluation) and not eval_timed_out and not eval_cap_hit
+
     print(f"\n⏱  총 소요: {elapsed:.1f}s")
     print(f"final_text 길이: {len(final_text)}")
     print(f"refine_count: {refine_count} (cap={AE_MAX_REFINE})")
     print(f"evaluation.achieved: {evaluation.get('achieved')}")
+    print(f"evaluation.reason: {eval_reason[:160]!r}")
+    print(
+        "evaluator 판정 경로: "
+        + (
+            "실제 LLM verdict ✅"
+            if eval_genuine
+            else ("타임아웃/실패 폴백 ⚠️" if eval_timed_out else ("cap 도달 종료" if eval_cap_hit else "미실행/빈 평가"))
+        )
+    )
     print(f"메시지 수: {len(final.get('messages', []))}")
     print("\n--- 최종 답변(앞 500자) ---")
     print(final_text[:500] if final_text else "(final_text 비어있음 — 단일 워커 스킵일 수 있음)")
@@ -129,7 +146,17 @@ async def main():
             print(f"  ❌ {p}")
         raise SystemExit(1)
 
+    # evaluator 가 실행됐는데 타임아웃 폴백이면 이번 수정(동기 Sonnet 기본값)이 무력한 것 →
+    # 명확히 경고. (evaluator 미실행 경로는 정상일 수 있어 hard-fail 로 두지 않음.)
+    if eval_timed_out:
+        print(
+            "\n⚠️  evaluator 가 타임아웃/실패 폴백으로 종료됨 — 동기 Sonnet 기본값에서 이는 "
+            "네트워크 문제이거나 모델 지연. AE_EVALUATOR_TIMEOUT 확인 필요."
+        )
+
     print("\n✅ 라이브 게이트웨이 e2e 스모크 통과: 유한 종료 + 자격증명 미유출 + 실제 응답 처리 정상")
+    if eval_genuine:
+        print("   evaluator 가 실제 LLM verdict 를 반환함(동기 Sonnet 경로 정상 작동 실증).")
 
 
 if __name__ == "__main__":

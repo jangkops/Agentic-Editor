@@ -468,14 +468,35 @@ class GatewayClient:
                     continue
 
             if result.get("decision") == "ACCEPTED":
-                # 비동기 모델 — S3 폴링으로 결과 대기
+                # 비동기 모델 — S3 폴링으로 결과 대기.
+                # ⚠️ 구조화 dict 를 그대로 받아 toolUse 블록을 보존한다(도구 호출 필수).
+                #    과거엔 text 만 뽑아 반환해 toolUse 가 유실 → planner/evaluator 등
+                #    toolChoice 강제 호출이 tool_calls 를 못 받아 폴백되던 결함이 있었다.
                 job_id = result.get("job_id", "")
                 if job_id:
-                    text = await self._poll_job_result(job_id, max_wait=300)
-                    if text:
-                        return {"decision": "ALLOW", "output": {"message": {"content": [{"text": text}]}},
+                    data = await self._poll_job_data(job_id, max_wait=300)
+                    if isinstance(data, dict):
+                        out_msg = (data.get("output") or {}).get("message")
+                        if isinstance(out_msg, dict) and out_msg.get("content"):
+                            # 구조화 응답(toolUse/text 블록 포함) 손실 없이 전달.
+                            merged = {
+                                "decision": "ALLOW",
+                                "output": {"message": out_msg},
                                 "remaining_quota": result.get("remaining_quota", {}),
-                                "estimated_cost_krw": result.get("estimated_cost_krw", 0)}
+                                "estimated_cost_krw": result.get("estimated_cost_krw", 0),
+                            }
+                            # 사용량/종료사유 등 부가 필드가 있으면 함께 전달(있을 때만).
+                            for k in ("usage", "stopReason", "metrics"):
+                                if k in data:
+                                    merged[k] = data[k]
+                            return merged
+                        # content 가 없으면 텍스트로 폴백(하위 호환).
+                        text = self._job_data_to_text(data)
+                        if text:
+                            return {"decision": "ALLOW",
+                                    "output": {"message": {"content": [{"text": text}]}},
+                                    "remaining_quota": result.get("remaining_quota", {}),
+                                    "estimated_cost_krw": result.get("estimated_cost_krw", 0)}
                     return {"decision": "ERROR", "error": f"비동기 작업 시간 초과 (job: {job_id[:12]}...)"}
                 if attempt < 2:
                     await asyncio.sleep(2)
@@ -762,7 +783,15 @@ class GatewayClient:
             if "text" in c:
                 yield c["text"]
 
-    async def _poll_job_result(self, job_id, max_wait=300):
+    async def _poll_job_data(self, job_id, max_wait=300):
+        """비동기 잡 결과(S3)를 **구조화 dict 그대로** 폴링해 반환한다.
+
+        반환: 파싱된 전체 응답 엔벨로프 dict(예: ``{"output": {"message": {...}}}``) 또는
+              시간 초과 시 None.
+
+        ⚠️ 이 메서드는 toolUse 블록을 포함한 전체 content 를 손실 없이 보존한다.
+           텍스트만 필요하면 _poll_job_result 를 쓴다(내부적으로 이 메서드를 재사용).
+        """
         creds = self._get_creds()
         s3 = boto3.client("s3", aws_access_key_id=creds.access_key, aws_secret_access_key=creds.secret_key, aws_session_token=creds.token, region_name=self.region)
         try:
@@ -775,13 +804,32 @@ class GatewayClient:
             await asyncio.sleep(1)
             try:
                 obj = s3.get_object(Bucket=bucket, Key=key)
-                data = json.loads(obj["Body"].read().decode())
-                content = data.get("output", {}).get("message", {}).get("content", [])
-                texts = [c.get("text", "") for c in content if "text" in c]
-                return "\n".join(texts) if texts else json.dumps(data, ensure_ascii=False)[:500]
+                return json.loads(obj["Body"].read().decode())
             except Exception:
                 continue
-        return ""
+        return None
+
+    @staticmethod
+    def _job_data_to_text(data) -> str:
+        """잡 결과 dict → text 블록만 이어붙인 문자열(toolUse 등 비텍스트는 무시).
+
+        텍스트 블록이 없으면 원본 dict 를 JSON 으로 직렬화(앞 500자)해 진단용으로 반환한다.
+        """
+        if not isinstance(data, dict):
+            return ""
+        content = data.get("output", {}).get("message", {}).get("content", []) or []
+        texts = [c.get("text", "") for c in content if isinstance(c, dict) and "text" in c]
+        return "\n".join(texts) if texts else json.dumps(data, ensure_ascii=False)[:500]
+
+    async def _poll_job_result(self, job_id, max_wait=300):
+        """비동기 잡 결과를 폴링해 **텍스트**만 반환(하위 호환 — 스트리밍/미디어 경로용).
+
+        toolUse 를 보존해야 하는 converse 는 _poll_job_data 를 직접 사용한다.
+        """
+        data = await self._poll_job_data(job_id, max_wait=max_wait)
+        if data is None:
+            return ""
+        return self._job_data_to_text(data)
 
     # ─────────────────────────────────────────────────────────────────
     # OpenAI Responses 라우트 통합 — 신규 메서드 (순수 add)
