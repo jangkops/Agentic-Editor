@@ -522,6 +522,43 @@ class GatewayChatModel(BaseChatModel):
             tool_config=tool_config,
         )
 
+    async def _converse_fallback_chunks(
+        self, bedrock_msgs: list, system_text: str, tool_config: Any
+    ) -> AsyncIterator[ChatGenerationChunk]:
+        """스트리밍 실패(에러/무응답) 시 converse(비스트리밍) 로 폴백해 결과를 청크로 방출.
+
+        일부 모델(예: Opus)은 게이트웨이 스트리밍 엔드포인트를 지원하지 않아 스트림이 에러/무응답
+        으로 끝난다. 이때 converse(async 잡 경로 포함)로 한 번 더 시도해 산출물을 확보하고, 이를
+        단일 AIMessageChunk(content + tool_call_chunks)로 방출한다. converse 도 실패하면
+        _raise_on_gateway_error 가 예외를 던진다(상위 노드가 비차단 폴백 처리).
+
+        정상 스트리밍(Sonnet 등)에서는 호출되지 않으므로 기존 동작은 불변이다(무손상).
+        """
+        import json as _json
+
+        result = await self.gateway.converse(
+            model_id=self.model_id,
+            messages=bedrock_msgs,
+            system_prompt=system_text,
+            tool_config=tool_config,
+        )
+        _raise_on_gateway_error(result)
+        msg = (result.get("output") or {}).get("message") or {}
+        ai = _bedrock_output_to_ai_message(msg)
+        tool_call_chunks = [
+            {
+                "name": tc.get("name"),
+                "args": _json.dumps(tc.get("args") or {}, ensure_ascii=False),
+                "id": tc.get("id"),
+                "index": i,
+                "type": "tool_call_chunk",
+            }
+            for i, tc in enumerate(getattr(ai, "tool_calls", None) or [])
+        ]
+        yield ChatGenerationChunk(
+            message=AIMessageChunk(content=ai.content, tool_call_chunks=tool_call_chunks)
+        )
+
     # ── 비동기 스트리밍: astream_events 가 소비 ──
     async def _astream(
         self,
@@ -534,6 +571,10 @@ class GatewayChatModel(BaseChatModel):
         tool_config = kwargs.get("_bedrock_tool_config") or self._bound_tools
 
         tool_index = -1  # content_block_start(toolUse) 마다 증가
+        # 스트림이 실제 콘텐츠(text/toolUse)를 냈는지 추적. 스트리밍 미지원 모델(예: Opus)은
+        # 에러/무응답으로 끝나므로, 콘텐츠가 하나도 없으면 converse 로 폴백한다(무손상 — 정상
+        # 스트리밍에서는 content_yielded=True 라 폴백 미발생).
+        content_yielded = False
 
         # 주의(API_NOTES CRITICAL 2): 스트림 소비 루프 전체를 asyncio.wait_for 로
         # 감싸면 Python 3.14 에서 취소 시 hang. 개별 await 만 필요 시 감싼다.
@@ -554,6 +595,7 @@ class GatewayChatModel(BaseChatModel):
                         {"toolUseId": tu.get("toolUseId"), "name": tu.get("name"), "input": ""},
                         index=tool_index,
                     )
+                    content_yielded = True
                     yield ChatGenerationChunk(message=chunk)
 
             elif etype == "content_block_delta":
@@ -565,11 +607,13 @@ class GatewayChatModel(BaseChatModel):
                         await run_manager.on_llm_new_token(
                             text, chunk=ChatGenerationChunk(message=chunk)
                         )
+                    content_yielded = True
                     yield ChatGenerationChunk(message=chunk)
                 elif "toolUse" in delta:
                     tu = delta["toolUse"] or {}
                     frag = tu.get("input", "")
                     idx = tool_index if tool_index >= 0 else 0
+                    content_yielded = True
                     yield ChatGenerationChunk(
                         message=_tooluse_delta_to_chunk({"input": frag}, index=idx)
                     )
@@ -582,10 +626,26 @@ class GatewayChatModel(BaseChatModel):
                 )
 
             elif etype == "error":
+                # 스트림 에러. 아직 콘텐츠를 하나도 방출하지 않았다면(예: Opus 등 스트리밍
+                # 미지원 모델) converse 로 폴백한다. 이미 부분 콘텐츠를 방출한 뒤라면 중간
+                # 복구가 불가하므로 예외를 전파한다(부분 스트림 오염 방지).
+                if not content_yielded:
+                    async for c in self._converse_fallback_chunks(
+                        bedrock_msgs, system_text, tool_config
+                    ):
+                        yield c
+                    return
                 raise GatewayModelError(
                     evt.get("message") or evt.get("error") or "stream error"
                 )
             # message_delta / message_stop / settlement 등은 토큰 스트림과 무관 → 무시
+
+        # 스트림이 에러 이벤트조차 없이 콘텐츠 없이 종료됨(예: Opus 무응답) → converse 폴백.
+        if not content_yielded:
+            async for c in self._converse_fallback_chunks(
+                bedrock_msgs, system_text, tool_config
+            ):
+                yield c
 
 
 def _normalize_tool_choice(tool_choice: Optional[str]) -> dict:
