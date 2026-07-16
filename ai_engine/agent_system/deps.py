@@ -20,21 +20,27 @@ _DEFAULT_CODING_MODEL = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
 # ── 모델 역할 배분 (steering project.md / 요구사항 9) ──
 # 설계 의도(steering project.md): Planner=Opus, Generator=Sonnet, Evaluator=Opus.
 #
-# ⚠️ 프로덕션 기본값 결정 (라이브 게이트웨이 e2e 검증 근거 — 2026):
-#   게이트웨이 `/converse` 는 일부 모델(특히 Opus, 그리고 toolConfig 를 동반한 Sonnet 호출)
-#   에서 동기 응답 대신 `ACCEPTED` 를 반환하고 비동기 S3 잡 폴링 경로를 탄다. 이 경로는:
-#     (1) [지연] 폴링이 최대 300s 까지 걸려, 재계획 루프 안 `wait_for(AE_*_TIMEOUT)` 단발
-#         ainvoke 가 Opus 에서 자주 타임아웃 폴백된다. Sonnet 은 폴링이 훨씬 빨라 안정적.
-#     (2) [toolUse — 별도 수정됨] 과거 폴링 헬퍼가 text 블록만 뽑아 toolUse 를 유실 →
-#         planner(select_plan)/evaluator(submit_evaluation) 강제 스키마가 tool_calls 를
-#         못 받아 폴백되던 결함. gateway_module._poll_job_data 로 구조화 보존하여 해결.
-#   → (1) 지연 안정성을 위해 Planner/Evaluator 기본값으로 동기·저지연 경로인 Sonnet 4.5
-#      를 채택한다. tight 한 평가/재계획 루프에서 라이브 검증으로 실제 동작을 확인했다.
+# ⚠️ 프로덕션 기본값 결정 (라이브 게이트웨이 e2e 검증 근거 — 2026, 두 경로 모두 실측):
+#   Opus 계열은 reasoning 메타 노드(planner/evaluator)에서 **양쪽 실행 경로 모두 실패**한다:
+#     (A) [프로덕션 경로 = astream_events → _astream → stream_sse_realtime]
+#         Opus 는 게이트웨이 스트리밍(Lambda) 엔드포인트를 지원하지 않아 decision=ERROR /
+#         "No generation chunks" 로 실패한다(라이브 실측: converse_stream_live 3.4s ERROR).
+#         → 노드가 예외를 잡아 폴백(evaluator: achieved=True 기본값)하므로 **재계획 루프가
+#         프로덕션에서 무력화**된다. 이것이 Sonnet 기본값이 필요한 핵심(프로덕션) 이유다.
+#     (B) [비스트리밍 경로 = ainvoke → _agenerate → converse]
+#         Opus 는 `ACCEPTED` → 비동기 S3 잡 폴링(최대 300s)을 타 wait_for 타임아웃 폴백된다.
+#   → 두 경로 모두에서 안정 동작하는 Sonnet 4.5 를 Planner/Evaluator 기본값으로 채택한다.
+#     라이브 검증: 프로덕션 경로(astream_events)에서 planner 2 subtasks 분해 + evaluator
+#     achieved 판정(reason 212자) + refine 루프 정상 동작 확인.
 #
-# Opus 는 여전히 1급 시민이다: `deps.model_planner` / `deps.model_evaluator` 로 주입하면
-# 해당 역할 노드가 그 값을 사용한다(요구사항 9.5). Opus 를 쓰려면 호출자가 비동기 폴링
-# 지연을 수용하도록 `AE_PLANNER_TIMEOUT` / `AE_EVALUATOR_TIMEOUT` 를 폴링 상한 이상으로
-# 올려 주입하면 된다(toolUse 파싱은 모델 무관하게 이미 정상 동작).
+#   참고(별도 수정): 과거 converse 비동기 폴링 헬퍼가 text 만 뽑아 toolUse 를 유실하던 결함은
+#   gateway_module._poll_job_data 로 해결(비스트리밍 경로 방어 — 프로덕션 주경로 _astream 은
+#   원래 toolUse 델타를 직접 파싱해 영향 없었음).
+#
+# ⚠️ Opus 주입 주의(요구사항 9.5): `deps.model_planner`/`deps.model_evaluator` 로 주입은
+# 가능하나, 위 (A) 때문에 **프로덕션(스트리밍) 경로에서는 Opus reasoning 메타 호출이 실패해
+# 폴백**된다. Opus 를 실제로 쓰려면 스트리밍 엔드포인트가 Opus 를 지원하도록 게이트웨이가
+# 개선되어야 한다. 그 전까지 reasoning 메타 노드에는 스트리밍 지원 모델(Sonnet 계열)을 쓴다.
 _DEFAULT_PLANNER_MODEL = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"    # Planner(동기 신뢰 경로)
 _DEFAULT_GENERATOR_MODEL = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"  # Generator=Sonnet
 _DEFAULT_EVALUATOR_MODEL = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"  # Evaluator(동기 신뢰 경로)
