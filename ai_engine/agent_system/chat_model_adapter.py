@@ -391,6 +391,13 @@ class GatewayChatModel(BaseChatModel):
     gateway: Any = None  # GatewayClient (arbitrary_types_allowed=True)
     model_id: str = ""
     request_timeout: float = 300.0
+    # 비스트리밍 ainvoke(_agenerate) 를 스트리밍 경로(converse_stream_live)로 처리할지 여부.
+    # 게이트웨이 /converse 는 일부 모델·toolConfig 호출을 비동기 S3 잡 폴링으로 처리해 느리다
+    # (라이브 실측: 동일 select_plan 호출 converse 35s vs stream_live 7.6s, 약 4.6x). 스트리밍
+    # 경로는 실시간 반환 + toolUse 를 converse 호환 형태로 조립하므로, 지연이 중요한 reasoning
+    # 메타 노드(router/planner/evaluator/aggregate)가 opt-in 으로 켠다. 스트리밍 호출이 실패하면
+    # converse 로 자동 폴백해 무회귀를 보장한다(기본 False — 도메인 워커 등 기존 경로 불변).
+    prefer_streaming: bool = False
 
     # 도구 바인딩 상태는 pydantic model field 가 아니라 private attr / self.bind(...) 로 관리.
     # (API_NOTES 5) 실제 도구는 bind_tools 가 self.bind(_bedrock_tool_config=...)로 넘기고
@@ -470,24 +477,14 @@ class GatewayChatModel(BaseChatModel):
         bedrock_msgs, system_text = _lc_messages_to_bedrock(messages)
         tool_config = kwargs.get("_bedrock_tool_config") or self._bound_tools
 
-        result = await self.gateway.converse(
-            model_id=self.model_id,
-            messages=bedrock_msgs,
-            system_prompt=system_text,
-            tool_config=tool_config,
-        )
+        result = await self._invoke_gateway(bedrock_msgs, system_text, tool_config)
         try:
             _raise_on_gateway_error(result)
         except GatewayModelError as e:
             # 도구 미지원 모델(nemotron 등) → 도구 없이 1회 재시도(graceful degradation).
             # 도구 거부가 아닌 오류(토큰 만료/allowlist 등)는 그대로 전파.
             if tool_config and _is_tool_rejection(str(e)):
-                result = await self.gateway.converse(
-                    model_id=self.model_id,
-                    messages=bedrock_msgs,
-                    system_prompt=system_text,
-                    tool_config=None,
-                )
+                result = await self._invoke_gateway(bedrock_msgs, system_text, None)
                 _raise_on_gateway_error(result)
             else:
                 raise
@@ -495,6 +492,35 @@ class GatewayChatModel(BaseChatModel):
         output_message = (result.get("output") or {}).get("message") or {}
         ai_message = _bedrock_output_to_ai_message(output_message)
         return ChatResult(generations=[ChatGeneration(message=ai_message)])
+
+    async def _invoke_gateway(self, bedrock_msgs: list, system_text: str, tool_config: Any) -> dict:
+        """단발(non-stream) 게이트웨이 호출 — prefer_streaming 이면 스트리밍 경로 우선.
+
+        prefer_streaming=True 이면 converse_stream_live(실시간 SSE, toolUse 를 converse 호환
+        output.message 로 조립)를 먼저 시도하고, 그 결과가 ERROR 이거나 예외면 converse 로
+        폴백한다(무회귀 안전장치). prefer_streaming=False 면 기존대로 converse 만 사용한다.
+        어느 경로든 반환 형태는 동일한 converse 결과 dict 이다.
+        """
+        use_stream = bool(self.prefer_streaming) and hasattr(self.gateway, "converse_stream_live")
+        if use_stream:
+            try:
+                streamed = await self.gateway.converse_stream_live(
+                    model_id=self.model_id,
+                    messages=bedrock_msgs,
+                    system_prompt=system_text,
+                    tool_config=tool_config,
+                )
+                # 스트리밍이 정상(ALLOW + output) 이면 그대로 사용. ERROR/빈 결과면 converse 폴백.
+                if isinstance(streamed, dict) and streamed.get("decision") == "ALLOW" and (streamed.get("output") or {}).get("message"):
+                    return streamed
+            except Exception:  # noqa: BLE001 — 스트리밍 실패는 비차단, converse 로 폴백.
+                pass
+        return await self.gateway.converse(
+            model_id=self.model_id,
+            messages=bedrock_msgs,
+            system_prompt=system_text,
+            tool_config=tool_config,
+        )
 
     # ── 비동기 스트리밍: astream_events 가 소비 ──
     async def _astream(

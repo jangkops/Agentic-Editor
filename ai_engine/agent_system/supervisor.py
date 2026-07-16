@@ -317,7 +317,9 @@ async def _classify_route(
     model_id = getattr(deps, "model_coding", None) or _DEFAULT_ROUTER_MODEL
 
     try:
-        llm = GatewayChatModel(gateway=gateway, model_id=model_id).bind_tools(
+        llm = GatewayChatModel(
+            gateway=gateway, model_id=model_id, prefer_streaming=True
+        ).bind_tools(
             [_make_route_tool(allow_done)], tool_choice="select_route"
         )
         messages = [
@@ -691,7 +693,9 @@ async def _make_plan(state: GraphState, deps: Any) -> List[dict]:
         or _DEFAULT_ROUTER_MODEL
     )
     try:
-        llm = GatewayChatModel(gateway=gateway, model_id=model_id).bind_tools(
+        llm = GatewayChatModel(
+            gateway=gateway, model_id=model_id, prefer_streaming=True
+        ).bind_tools(
             [_PLAN_TOOL], tool_choice="select_plan"
         )
         messages = [
@@ -943,7 +947,7 @@ def make_aggregate_node(deps: Any):
 
         model_id = getattr(deps, "model_generator", None) or _DEFAULT_ROUTER_MODEL
         try:
-            llm = GatewayChatModel(gateway=gateway, model_id=model_id)
+            llm = GatewayChatModel(gateway=gateway, model_id=model_id, prefer_streaming=True)
             messages = [
                 SystemMessage(content=_AGGREGATE_SYSTEM_PROMPT),
                 HumanMessage(content=_build_aggregate_prompt(state)),
@@ -1091,7 +1095,9 @@ def make_evaluator_node(deps: Any):
 
         model_id = getattr(deps, "model_evaluator", None) or _DEFAULT_ROUTER_MODEL
         try:
-            llm = GatewayChatModel(gateway=gateway, model_id=model_id).bind_tools(
+            llm = GatewayChatModel(
+                gateway=gateway, model_id=model_id, prefer_streaming=True
+            ).bind_tools(
                 [_EVAL_TOOL], tool_choice="submit_evaluation"
             )
             messages = [
