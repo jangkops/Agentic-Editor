@@ -1,6 +1,6 @@
 {
   "name": "ai-editor",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "main": "electron/main.js",
   "scripts": {
     "predev": "node scripts/setup-venv.js && (lsof -ti:8765 | xargs kill -9 2>/dev/null || true)",
