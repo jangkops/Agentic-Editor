@@ -254,7 +254,20 @@ def get_embedding_provider(env: dict, gateway_client=None):
         prov = FastEmbedProvider(model_name=model)
         if prov.is_ready:
             return prov
-        # 모델/라이브러리 미가용 → TF-IDF 폴백(정직: 없는 걸 있는 척 안 함)
+        # ⚠️ 모델/라이브러리 미가용(특히 동결 DMG 에서 ONNX 런타임 로드 실패) → 약한 어휘
+        # TF-IDF 로 조용히 떨어지면 배포본 RAG 품질이 어휘검색으로 저하된다. 대신 LSA
+        # (잠재의미, sklearn 만 사용, 오프라인·동결안전, 신규 의존성 0)로 폴백해 **의미검색을
+        # 유지**한다. LSA fit 실패 시 is_ready=False → 상위 hybrid_search 차원 가드가 벡터
+        # 레그를 끄고 인덱서 어휘검색을 하한으로 남긴다(무손상 하한 보존).
+        _fallback_choice = str((env or {}).get("AE_EMBED_FALLBACK", "lsa")).strip().lower()
+        if _fallback_choice != "tfidf":
+            try:
+                _lc = int((env or {}).get("AE_LSA_COMPONENTS", "256"))
+            except (TypeError, ValueError):
+                _lc = 256
+            print("[Embedder] fastembed 미가용 → LSA(의미검색) 폴백 (어휘 TF-IDF 아님)")
+            return LsaEmbeddingProvider(n_components=_lc, gateway_client=gateway_client)
+        # AE_EMBED_FALLBACK=tfidf 로 명시한 경우에만 어휘 TF-IDF 폴백(정직: 없는 걸 있는 척 안 함)
     if choice == "lsa":
         # 잠재의미(LSA) 임베딩 — 오프라인·신규 의존성 0. 시맨틱 검색 활성.
         try:
