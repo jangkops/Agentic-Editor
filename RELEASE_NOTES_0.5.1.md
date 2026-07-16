@@ -25,6 +25,18 @@ v0.5.0(LangGraph 추론 고도화)에서 라이브 게이트웨이 e2e 검증 �
 - **수정**: 재계획 루프 신뢰성을 위해 기본값을 동기 응답하는 Sonnet 4.5 로 변경. 설계
   의도(Opus 평가자)는 설정 주입으로 그대로 사용 가능.
 
+### 3. Planner 모델 역할 배분 정합 + 타임아웃 정렬
+- **증상**: Planner 가 전용 planner 모델을 무시하고 coding 모델을 썼고(역할 배분 미반영),
+  60초 타임아웃이 게이트웨이 비동기 잡 폴링(최대 300초)보다 짧아 슬로우 응답 시 DAG
+  분해가 통째로 단일 서브태스크로 조기 폴백됐다.
+- **수정**: planner 가 전용 planner 모델을 우선 사용(미주입 시 하위 호환 폴백).
+  planner 타임아웃을 폴링 상한(300초)과 정렬해 조기 폴백 제거(정상 시 지연 없음).
+
+## 알려진 제한(향후 개선 후보)
+- reasoning 메타 호출(planner/evaluator/aggregate)은 non-streaming 경로라 워커 생성 비용
+  (스트리밍 settlement 로 집계됨)과 달리 quota 캐시에 별도 집계되지 않는다. 소규모 호출로
+  영향은 제한적이며, 정밀 원가 배분은 후속 개선 대상.
+
 ## 라이브 검증 (실제 Bedrock Gateway)
 - Planner: 3-독립작업 프롬프트 → `t1(coding)/t2(research)/t3(ops)` 로 정상 분해(병렬 fan-out).
 - Evaluator: 미충족 산출물 → `achieved=False`, `missing_domains=[coding, ops]`, 실제 사유
