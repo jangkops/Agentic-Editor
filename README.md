@@ -53,18 +53,15 @@ Mogam Works는 AWS Bedrock Gateway를 통해 90여 개의 LLM을 단일/병렬�
 
 ## Screenshots
 
-`docs/screenshots/` 폴더의 이미지를 참조합니다(파일이 없으면 표시되지 않습니다).
+애플리케이션 화면(에디터, AI 패널, 설정, 통계, 병렬 호출 등). 전체 이미지는 `docs/screenshots/`에 있습니다.
 
-| 화면 | 이미지 |
-|------|--------|
-| About / 환경 정보 | ![about](docs/screenshots/01-about.png) |
-| 설정 - 계정(AWS SSO + BedrockUser) | ![account](docs/screenshots/02-account-settings.png) |
-| 설정 - CLI / Backend 상태 | ![cli](docs/screenshots/03-cli-backend.png) |
-| 설정 - 외관 | ![appearance](docs/screenshots/04-appearance.png) |
-| 에디터 + AI 패널 + 터미널 | ![editor](docs/screenshots/05-editor.png) |
-| 통계 / 프로젝트 분석 | ![analytics](docs/screenshots/06-analytics.png) |
-| 프로젝트 코드 검색 | ![search](docs/screenshots/07-search.png) |
-| 병렬 호출(다중 모델) | ![parallel](docs/screenshots/08-parallel.png) |
+| | | |
+|---|---|---|
+| ![01](docs/screenshots/01.png) | ![02](docs/screenshots/02.png) | ![03](docs/screenshots/03.png) |
+| ![04](docs/screenshots/04.png) | ![05](docs/screenshots/05.png) | ![06](docs/screenshots/06.png) |
+| ![07](docs/screenshots/07.png) | ![08](docs/screenshots/08.png) | ![09](docs/screenshots/09.png) |
+| ![10](docs/screenshots/10.png) | ![11](docs/screenshots/11.png) | ![12](docs/screenshots/12.png) |
+| ![13](docs/screenshots/13.png) | ![14](docs/screenshots/14.png) | |
 
 ---
 
