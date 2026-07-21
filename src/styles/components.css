@@ -412,19 +412,30 @@
 /* ===== Center View Tabs ===== */
 .center-view-tabs{
   display:flex;align-items:center;background:var(--color-bg-secondary);
-  border-bottom:1px solid var(--color-border);height:34px;padding:0 8px;gap:2px;flex-shrink:0;
+  border-bottom:1px solid var(--color-border);padding:4px 8px;gap:2px;flex-shrink:0;
+  /* 센터 폭이 좁아지면 탭을 다음 줄로 접어(wrap) 항상 모두 보이게 한다(좌측 헤더와 동일 방식).
+     고정 height 대신 min-height 로 두어 여러 줄일 때 높이가 자연스럽게 늘어난다. */
+  flex-wrap:wrap;min-height:34px;
 }
+/* wrap 시 우측 정보(cv-tab-info)를 오른쪽으로 미는 flex 스페이서가 빈 줄을 만들지 않도록 숨김. */
+.center-view-tabs > span[style*="flex:1"]{display:none;}
 .cv-tab{
   background:transparent;border:none;color:var(--color-text-muted);
   font-size:11px;padding:5px 12px;cursor:pointer;border-radius:var(--radius-sm) var(--radius-sm) 0 0;
   transition:all var(--transition);white-space:nowrap;display:flex;align-items:center;gap:4px;
-  border-bottom:2px solid transparent;font-weight:500;
+  border-bottom:2px solid transparent;font-weight:500;flex-shrink:0;  /* 압축되어 글자 잘리지 않게 */
 }
 .cv-tab:hover{color:var(--color-text-primary);background:var(--color-bg-hover);}
 .cv-tab.active{color:var(--color-accent);border-bottom-color:var(--color-accent);background:var(--color-bg-primary);}
 .cv-tab-icon{font-size:12px;}
 .cv-tab-info{font-size:10px;color:var(--color-text-muted);padding-right:8px;}
-.center-view{flex:1;overflow-y:auto;padding:16px 20px;background:var(--color-bg-primary);}
+/* min-width:0 로 flex 자식이 콘텐츠 최소폭에 갇히지 않게 하여 폭이 줄면 내용도 함께 줄어든다.
+   넘치는 넓은 콘텐츠(표·긴 코드 등)는 세로뿐 아니라 가로로도 스크롤되게 해 잘리지 않게 한다. */
+.center-view{flex:1;min-width:0;overflow:auto;padding:16px 20px;background:var(--color-bg-primary);}
+/* 뷰 내부 표는 컨테이너 폭을 넘지 않도록 — 넘칠 땐 표 자체가 가로 스크롤. */
+.center-view table{max-width:100%;}
+/* 긴 텍스트/경로가 폭을 밀어내지 않도록 줄바꿈 허용. */
+.center-view .structure-name,.center-view .search-result-line .line-text{word-break:break-word;}
 
 /* ===== Stats View ===== */
 .stats-subtabs{display:flex;gap:4px;margin-bottom:16px;flex-wrap:wrap;}

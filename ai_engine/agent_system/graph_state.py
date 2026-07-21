@@ -212,6 +212,15 @@ class GraphState(TypedDict, total=False):
     # 이므로 MAX reducer 가 의미상 정확하다(요구사항 2.3).
     refine_count: Annotated[int, _take_max_int]
 
+    # ── 신규: Grounding 재검증 루프 (reasoning-perf-reliability) ──
+    # grounding(근거 검증/RAG citation) 전용 재검증 수행 횟수. evaluator 의 refine_count 와
+    # 완전히 독립된 별도 카운터다(요구사항 8.1/8.3). refine_count 와 동일하게 monotonic MAX
+    # reducer(_take_max_int)를 재사용 — Send fan-out echo/reset 면역: 워커 서브그래프가 병합
+    # 시 grounding_refine_count=0 을 emit해도 running max 를 유지하므로 카운터가 리셋되지
+    # 않는다. 0→1→2 로 단조 증가하며 cap 판정이 `>=` 이므로 MAX reducer 가 의미상 정확하다.
+    # ⚠️ 보안(요구사항 11.2/11.5): 이 채널은 정수 계수만 담으며 자격증명을 저장하지 않는다.
+    grounding_refine_count: Annotated[int, _take_max_int]
+
     # ── 신규: DAG Wave 스케줄링 (langgraph-reasoning-upgrade) ──
     # 완료된 Wave 수. 다음 dispatch 대상 Wave 인덱스로 사용. last-wins(_take_right) —
     # planner 가 새 plan 생성(refine) 시 0 으로 리셋해야 하므로 MAX reducer 를 쓸 수 없다.

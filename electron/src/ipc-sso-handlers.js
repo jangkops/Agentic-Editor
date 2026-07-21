@@ -87,23 +87,39 @@ function registerSsoHandlers(ssoManager) {
       }
 
       const files = fs.readdirSync(ssoDir).filter((f) => f.endsWith('.json'));
-      let latestExpiry = null;
+      const now = Date.now();
+      // 캐시 디렉터리에는 두 종류의 파일이 섞여 있다:
+      //  (1) SSO 액세스 토큰 캐시 — accessToken + expiresAt(세션 만료, 보통 8~12시간)
+      //  (2) 클라이언트 등록 캐시 — clientId/clientSecret + expiresAt(등록 만료, 최대 ~90일)
+      // 과거에는 모든 파일의 expiresAt 중 '최댓값'을 취해 (2)의 90일 만료가 잡혀
+      // 남은 시간이 1993h 처럼 비정상적으로 표시됐다. 실제 세션 잔여 시간은 (1)에만 있으므로
+      // accessToken 을 가진 토큰 캐시 파일만 대상으로 하고, 그중 '가장 가까운 미래 만료'를
+      // 현재 활성 세션의 만료로 사용한다(미래가 없으면 가장 최근 만료 = 이미 만료된 세션).
+      let soonestFuture = null;
+      let latestPast = null;
 
       for (const file of files) {
         try {
           const data = JSON.parse(fs.readFileSync(path.join(ssoDir, file), 'utf-8'));
-          if (data.expiresAt) {
-            const expiry = new Date(data.expiresAt);
-            if (!latestExpiry || expiry > latestExpiry) {
-              latestExpiry = expiry;
-            }
+          // 표준 AWS SSO 토큰 캐시만 인정한다:
+          //  - accessToken + expiresAt: 세션 토큰(등록 캐시는 accessToken 이 없어 제외)
+          //  - startUrl: botocore SSO 토큰 파일에만 존재. Kiro 등 비-SSO 토큰
+          //    (kiro-auth-token.json — authMethod/provider 키, startUrl 없음)을 배제한다.
+          if (!data.accessToken || !data.expiresAt || !data.startUrl) continue;
+          const expiry = new Date(data.expiresAt);
+          if (Number.isNaN(expiry.getTime())) continue;
+          if (expiry.getTime() > now) {
+            if (!soonestFuture || expiry < soonestFuture) soonestFuture = expiry;
+          } else {
+            if (!latestPast || expiry > latestPast) latestPast = expiry;
           }
         } catch (err) {
           // 개별 파일 파싱 실패는 무시
         }
       }
 
-      return latestExpiry ? latestExpiry.toISOString() : null;
+      const chosen = soonestFuture || latestPast;
+      return chosen ? chosen.toISOString() : null;
     } catch (error) {
       console.error('[sso:get-expiry] Error:', error.message);
       return null;

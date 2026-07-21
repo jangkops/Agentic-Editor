@@ -35,3 +35,10 @@ scripts/_render_out/
 /*.docx
 /*.xlsx
 /agentic-editor-architecture.png
+
+# Temp / probe / scratch artifacts (never commit)
+.ae_*
+.tmp_patch*
+_tmp*
+scripts/_*_probe.js
+**/_rfb_temp.js

@@ -29,9 +29,17 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Any, List
+from typing import Any, List, Optional
 
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+
+# Grounding_Gate 판정/플래그 재사용(재구현 금지 — 요구사항 11.5). 임계값 로직은
+# grounding_below 내부에 있으므로 여기서 복제하지 않는다.
+from ai_engine.agent_system.grounding_gate import (
+    _truthy,
+    grounding_below,
+    grounding_gate_enabled,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -49,6 +57,77 @@ def _env_float(name: str, default: float) -> float:
 ANSWER_QUALITY_TIMEOUT: float = _env_float("AE_VERIFY_AQ_TIMEOUT", 30.0)
 # _force_generate_from_text 상한(초). 이미지 생성/HTML 렌더가 포함될 수 있어 넉넉히.
 FORCE_GENERATE_TIMEOUT: float = _env_float("AE_FORCE_GENERATE_TIMEOUT", 180.0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Grounding_Gate 플래그 판독 (호출 시점 — 테스트 토글 허용, 요구사항 8.2 / 9.3)
+# ─────────────────────────────────────────────────────────────────────────────
+def _max_refine() -> int:
+    """grounding refine 상한(AE_MAX_REFINE, 기본 1). 정수 해석 실패 시 1."""
+    try:
+        return int(os.environ.get("AE_MAX_REFINE", "1"))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _grounding_reject_enabled() -> bool:
+    """reject 모드 플래그(AE_GROUNDING_REJECT, 기본 off)."""
+    return _truthy(os.environ.get("AE_GROUNDING_REJECT"))
+
+
+def _apply_grounding_gate(
+    state: Any, final_text: str, answer_quality: dict, base_out: dict
+) -> Optional[dict]:
+    """Grounding_Gate 적용(게이트 on 경로에서만 호출). 근거 미달이면 반환 dict, 통과면 None.
+
+    Precondition:  호출자가 AE_ENABLE_GROUNDING_GATE on 을 이미 확인했다.
+    Postcondition:
+      - 근거 통과(grounding_below False) → None (기존 경로 계속 진행).
+      - 근거 미달 & g_rc < AE_MAX_REFINE → base_out 에 refine 지시 HumanMessage 를
+        append 하고 grounding_refine_count 를 g_rc+1 로 설정(단조 증가). selector 가
+        'model' 로 라우팅해 재작성을 유도한다(요구사항 8).
+      - 근거 미달 & 상한 소진 → AE_GROUNDING_REJECT on 이면 final_text 를 한국어 거절
+        응답으로 대체(요구사항 9.3), off 이면 원문 본문을 보존한 채 경고 마커를 append
+        한다(요구사항 9.1/9.2 — Property 8 가용성: 원문 본문이 부분 문자열로 유지).
+    Invariant:     grounding_refine_count 는 감소하지 않는다(monotonic).
+    """
+    if not grounding_below(answer_quality):
+        return None  # 근거 통과 — 기존 경로 계속(무회귀).
+
+    g_rc = state.get("grounding_refine_count", 0)
+    try:
+        g_rc = int(g_rc)
+    except (TypeError, ValueError):
+        g_rc = 0
+
+    out = dict(base_out)
+
+    if g_rc < _max_refine():
+        # bounded refine 유도 — 근거 강화 지시를 HumanMessage 로 추가하고 카운터 +1.
+        out["messages"] = [
+            HumanMessage(
+                "[근거 강화] 제공된 근거 범위 안에서만 답을 재작성하라. "
+                "근거로 확인되지 않는 내용은 추측하지 말고, 인용 가능한 근거에 "
+                "기반한 문장만 유지하라."
+            )
+        ]
+        out["grounding_refine_count"] = g_rc + 1
+        return out
+
+    # 상한 소진 & 여전히 미달.
+    if _grounding_reject_enabled():
+        # 거절 모드 — 근거 부족 사유를 명시하는 응답으로 대체(요구사항 9.3).
+        out["final_text"] = (
+            "[근거 부족] 요청을 충분히 뒷받침할 근거를 찾지 못했습니다. "
+            "제공된 근거만으로는 신뢰할 수 있는 답변을 드리기 어렵습니다."
+        )
+    else:
+        # 경고 표기 — 원문 본문을 보존한 채 경고 마커를 덧붙인다(요구사항 9.1/9.2).
+        out["final_text"] = (
+            final_text
+            + "\n\n> ⚠️ 근거 부족: 이 응답의 일부는 제공된 근거로 충분히 확인되지 않았습니다."
+        )
+    return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -278,6 +357,16 @@ def make_verify_node(deps: Any):
         answer_quality = await _build_answer_quality(final_text, evidence, deps)
         if answer_quality:
             out["answer_quality"] = answer_quality
+
+        # (2b) Grounding_Gate — AE_ENABLE_GROUNDING_GATE on 일 때만 근거 게이트 적용.
+        #      off 경로에서는 아래 블록을 절대 실행하지 않아 반환값이 기존과 바이트 동등하다
+        #      (신규 키/메시지 append 없음 — 요구사항 10.2/10.3).
+        if grounding_gate_enabled():
+            gate_out = _apply_grounding_gate(state, final_text, answer_quality, out)
+            if gate_out is not None:
+                # 근거 미달 — refine 유도 또는 경고/거절. 강제 생성 폴백은 건너뛴다
+                #  (refine 은 model 로 회귀, 경고/거절은 final_text 확정 상태).
+                return gate_out
 
         # (3) 강제 생성 폴백 — 파일 의도 있으나 산출물 0건일 때만.
         #     final_text 를 헬퍼가 참조하므로 state 에 반영해 전달.

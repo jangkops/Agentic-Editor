@@ -37,6 +37,17 @@ html,body{height:100%;overflow:hidden;background:var(--color-bg-primary);color:v
   cursor:pointer;border-radius:var(--radius-sm);transition:all var(--transition);
 }
 .topbar-btn:hover{background:var(--color-bg-hover);color:var(--color-text-primary);border-color:var(--color-border);}
+/* 패널 토글 버튼: 펼쳐진 상태(active)면 강조, 접힌 상태면 흐리게 */
+.topbar-btn.active{color:var(--color-accent);border-color:rgba(47,129,247,0.3);background:var(--color-accent-subtle);}
+
+/* ===== Panel collapse (VS Code 스타일 좌/우 패널 접기·펴기) ===== */
+/* class 가 인라인 width 를 이기도록 !important. 펼칠 때 class 제거 → 인라인/기본 width 복원.
+   기능은 유지되며(DOM 유지) 폭만 0으로 접힌다. */
+.left-panel.collapsed,
+.right-panel.collapsed{
+  width:0 !important;min-width:0 !important;max-width:0 !important;
+  border:none !important;overflow:hidden !important;
+}
 .topbar-sep{color:var(--color-text-muted);font-size:11px;padding:0 4px;-webkit-app-region:no-drag;}
 .topbar-quota{
   -webkit-app-region:no-drag;display:flex;align-items:center;gap:8px;font-size:10px;color:var(--color-text-muted);
@@ -50,7 +61,7 @@ html,body{height:100%;overflow:hidden;background:var(--color-bg-primary);color:v
   border-right:1px solid var(--color-border);
   display:flex;flex-direction:column;overflow:hidden;flex-shrink:0;
 }
-.left-panel-header{display:flex;gap:2px;padding:8px 8px 6px;border-bottom:1px solid var(--color-border);}
+.left-panel-header{display:flex;flex-wrap:wrap;gap:2px;padding:8px 8px 6px;border-bottom:1px solid var(--color-border);}
 .lp-btn{
   background:transparent;border:1px solid transparent;color:var(--color-text-muted);
   font-size:11px;padding:4px 8px;cursor:pointer;border-radius:var(--radius-sm);white-space:nowrap;
@@ -119,9 +130,12 @@ html,body{height:100%;overflow:hidden;background:var(--color-bg-primary);color:v
 .skill-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;box-shadow:0 0 4px currentColor;}
 
 /* ===== Center Panel ===== */
-.center-panel{flex:1;display:flex;flex-direction:column;overflow:hidden;background:var(--color-bg-primary);min-width:300px;}
+/* min-width:0 로 두어 사이드 패널을 넓혀도 센터가 축소되어 우측 패널이 화면 밖으로
+   밀리지(잘리지) 않게 한다. 센터의 실질 최소 폭은 initPanelResize()의 CENTER_MIN
+   동적 클램프가 보장한다(Monaco 가용 폭 확보). */
+.center-panel{flex:1;display:flex;flex-direction:column;overflow:hidden;background:var(--color-bg-primary);min-width:0;}
 .center-view-tabs + .parallel-results,.center-view-tabs + .parallel-results + .editor-area{/* 탭 아래 배치 */}
-.editor-area{flex:1;display:flex;flex-direction:column;overflow:hidden;}
+.editor-area{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0;}
 .editor-tabs{
   display:flex;background:var(--color-bg-secondary);
   border-bottom:1px solid var(--color-border);height:34px;
@@ -137,7 +151,7 @@ html,body{height:100%;overflow:hidden;background:var(--color-bg-primary);color:v
 .editor-tab:hover{color:var(--color-text-primary);}
 .editor-tab .close{opacity:0;font-size:10px;margin-left:6px;transition:opacity var(--transition);}
 .editor-tab:hover .close{opacity:0.6;}
-.editor-content{flex:1;overflow:hidden;min-height:200px;position:relative;}
+.editor-content{flex:1;overflow:hidden;min-height:200px;min-width:0;position:relative;}
 /* Monaco 검색 강조 */
 .search-highlight-inline{background:rgba(255,200,0,0.3) !important;border-radius:2px;}
 .search-highlight-current-line{background:rgba(255,200,0,0.12) !important;}

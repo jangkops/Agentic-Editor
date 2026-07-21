@@ -177,29 +177,30 @@ AGENT_TOOLS = {
             {
                 "toolSpec": {
                     "name": "edit_image",
-                    "description": "기존 이미지를 편집합니다. inpaint(마스크 영역 교체) 또는 outpaint(캔버스 확장) 모드를 지원합니다. Titan Image v2를 1순위, Nova Canvas를 폴백으로 사용합니다. inpaint 모드는 mask_path가 필요하고, outpaint 모드는 direction과 extend_pixels가 필요합니다.",
+                    "description": "기존 이미지를 편집합니다. 지원 모드: inpaint(마스크 영역 교체), outpaint(캔버스 확장), upscale(고해상도 확대), remove-background(배경 제거), erase(객체 지우기), search-replace(대상 교체), recolor(대상 색상 변경), style-transfer(스타일 적용), control-sketch/control-structure(구조 기반 생성). Stability 이미지 편집 모델을 사용합니다. 모드별 필수 파라미터: inpaint→mask_path, outpaint→direction+extend_pixels, upscale→(선택)upscale_type, erase→mask_path, search-replace→search_prompt+prompt, recolor→select_prompt+prompt, style-transfer→style_image_path, control-*→prompt.",
                     "inputSchema": {
                         "json": {
                             "type": "object",
                             "properties": {
                                 "mode": {
                                     "type": "string",
-                                    "enum": ["inpaint", "outpaint"],
-                                    "description": "편집 모드: inpaint(마스크 영역 교체) 또는 outpaint(캔버스 확장)"
+                                    "enum": ["inpaint", "outpaint", "upscale", "remove-background",
+                                             "erase", "search-replace", "recolor", "style-transfer",
+                                             "control-sketch", "control-structure"],
+                                    "description": "편집 모드"
                                 },
                                 "image_path": {
                                     "type": "string",
-                                    "description": "원본 이미지 경로 (PNG/JPEG, 최대 5MB)"
+                                    "description": "원본 이미지 경로 (PNG/JPEG/WEBP, 최대 5MB)"
                                 },
                                 "prompt": {
                                     "type": "string",
-                                    "minLength": 1,
                                     "maxLength": 1000,
-                                    "description": "편집 프롬프트 (1~1000자)"
+                                    "description": "편집 프롬프트. inpaint/outpaint/search-replace/recolor/control-* 에서 필수, upscale/style-transfer 에서 선택, remove-background/erase 에서 불필요."
                                 },
                                 "mask_path": {
                                     "type": "string",
-                                    "description": "마스크 이미지 경로 (inpaint 모드 필수, 흰색=편집 영역, 검정=보존 영역, 원본과 동일 해상도)"
+                                    "description": "마스크 이미지 경로 (inpaint/erase 모드 필수, 흰색=편집 영역, 검정=보존 영역, 원본과 동일 해상도)"
                                 },
                                 "direction": {
                                     "type": "array",
@@ -216,9 +217,26 @@ AGENT_TOOLS = {
                                     "minimum": 1,
                                     "maximum": 1024,
                                     "description": "확장 크기 픽셀 (outpaint 모드 필수, 1~1024)"
+                                },
+                                "upscale_type": {
+                                    "type": "string",
+                                    "enum": ["fast", "creative", "conservative"],
+                                    "description": "업스케일 종류 (upscale 모드, 기본 fast). fast=4x 즉시, creative/conservative=프롬프트 반영·비동기(느림)."
+                                },
+                                "search_prompt": {
+                                    "type": "string",
+                                    "description": "교체 대상을 지정하는 설명 (search-replace 모드 필수). 예: 'the dog'"
+                                },
+                                "select_prompt": {
+                                    "type": "string",
+                                    "description": "색상 변경 대상을 지정하는 설명 (recolor 모드 필수). 예: 'the car'"
+                                },
+                                "style_image_path": {
+                                    "type": "string",
+                                    "description": "스타일 참조 이미지 경로 (style-transfer 모드 필수)"
                                 }
                             },
-                            "required": ["mode", "image_path", "prompt"]
+                            "required": ["mode", "image_path"]
                         }
                     }
                 }
@@ -579,10 +597,12 @@ STABILITY_GENERATIVE_IDS = [
 ]
 STABILITY_INPAINT_IDS = [
     "stability.stable-image-inpaint-v1:0",
-    "stability.stable-image-search-and-replace-v1:0",
+    # 실제 AWS us-west-2 ID는 'search-replace'(and 없음). 오타 'search-and-replace'는 미존재 ID.
+    "stability.stable-image-search-replace-v1:0",
 ]
 STABILITY_OUTPAINT_IDS = [
-    "stability.stable-image-outpaint-v1:0",
+    # 실제 AWS ID는 'stable-outpaint'(image- 없음). 오타 'stable-image-outpaint'는 미존재 ID.
+    "stability.stable-outpaint-v1:0",
 ]
 STABILITY_BACKGROUND_IDS = [
     "stability.stable-image-remove-background-v1:0",
@@ -591,19 +611,23 @@ STABILITY_ERASE_IDS = [
     "stability.stable-image-erase-object-v1:0",
 ]
 STABILITY_RECOLOR_IDS = [
-    "stability.stable-image-search-and-recolor-v1:0",
+    # 실제 AWS ID는 'search-recolor'(and 없음).
+    "stability.stable-image-search-recolor-v1:0",
 ]
 STABILITY_UPSCALE_IDS = [
-    "stability.stable-image-creative-upscale-v1:0",
-    "stability.stable-image-conservative-upscale-v1:0",
-    "stability.stable-image-fast-upscale-v1:0",
+    # 실제 AWS ID는 'stable-{creative,conservative,fast}-upscale'(image- 없음).
+    # 오타 'stable-image-*-upscale'는 미존재 ID → 게이트웨이 allowlist DENY 원인이었음.
+    "stability.stable-creative-upscale-v1:0",
+    "stability.stable-conservative-upscale-v1:0",
+    "stability.stable-fast-upscale-v1:0",
 ]
 STABILITY_CONTROL_IDS = [
     "stability.stable-image-control-sketch-v1:0",
     "stability.stable-image-control-structure-v1:0",
 ]
 STABILITY_STYLE_IDS = [
-    "stability.stable-image-style-transfer-v1:0",
+    # 실제 AWS ID는 'stable-style-transfer'(image- 없음). style-guide는 그대로가 정답.
+    "stability.stable-style-transfer-v1:0",
     "stability.stable-image-style-guide-v1:0",
 ]
 
@@ -632,6 +656,135 @@ IMAGE_RECOLOR_MODELS = STABILITY_RECOLOR_IDS + STABILITY_INPAINT_IDS
 IMAGE_UPSCALE_MODELS = list(STABILITY_UPSCALE_IDS)
 IMAGE_CONTROL_MODELS = list(STABILITY_CONTROL_IDS)
 IMAGE_STYLE_MODELS = list(STABILITY_STYLE_IDS)
+
+
+# ─────────────────────────────────────────────────────────────────
+# 이미지 모델 분류 — 채팅/병렬(텍스트 converse) 경로는 Stability·이미지 모델을
+# 지원하지 않는다. 사용자가 이미지 모델을 채팅/병렬 슬롯으로 선택하면 converse 가
+# ValidationException 으로 실패하고 프론트가 "일시적 오류"로 표시한다(회귀 원인).
+# 아래 분류로 이미지 모델을 감지해 생성형은 /invoke(text-to-image)로 실제 이미지를
+# 만들고, 원본 이미지가 필요한 편집형은 명확한 사용 안내를 반환한다.
+# ─────────────────────────────────────────────────────────────────
+_IMAGE_GEN_MODEL_BARE = set(STABILITY_GENERATIVE_IDS) | {
+    "amazon.nova-canvas-v1:0",
+    "amazon.titan-image-generator-v2:0",
+    "amazon.titan-image-generator-v1:0",
+}
+_IMAGE_EDIT_MODEL_BARE = (
+    set(STABILITY_INPAINT_IDS) | set(STABILITY_OUTPAINT_IDS)
+    | set(STABILITY_BACKGROUND_IDS) | set(STABILITY_ERASE_IDS)
+    | set(STABILITY_RECOLOR_IDS) | set(STABILITY_UPSCALE_IDS)
+    | set(STABILITY_CONTROL_IDS) | set(STABILITY_STYLE_IDS)
+)
+
+
+def _bare_model_id(model_id: str) -> str:
+    """지역/프로파일 prefix(us./global./eu./apac.)를 제거한 bare 모델 id."""
+    if not model_id:
+        return ""
+    for _p in ("us.", "global.", "eu.", "apac."):
+        if model_id.startswith(_p):
+            return model_id[len(_p):]
+    return model_id
+
+
+def _image_model_kind(model_id: str):
+    """이미지 모델 종류 반환: "gen" | "edit" | None.
+
+    - "gen":  text-to-image 생성형 (Ultra/SD3.5/Core/Nova Canvas/Titan)
+    - "edit": 원본 이미지 필수 (Upscale/Style/Outpaint/Inpaint/Erase/Recolor/BG/Control)
+    - None:   이미지 모델 아님 (일반 텍스트 모델)
+    """
+    b = _bare_model_id(model_id)
+    if not b:
+        return None
+    if b in _IMAGE_GEN_MODEL_BARE:
+        return "gen"
+    if b in _IMAGE_EDIT_MODEL_BARE:
+        return "edit"
+    low = b.lower()
+    if low.startswith("stability."):
+        _edit_kw = ("upscale", "inpaint", "outpaint", "erase", "search-replace",
+                    "search-recolor", "remove-background", "control-", "style-")
+        return "edit" if any(k in low for k in _edit_kw) else "gen"
+    if "titan-image" in low or "nova-canvas" in low:
+        return "gen"
+    return None
+
+
+def _build_image_gen_body(model_id: str, prompt: str, width: int = 1024,
+                          height: int = 1024, style: str = "") -> dict:
+    """text-to-image 요청 본문(모델별) — _tool_generate_image._build_body 와 정합 유지."""
+    b = _bare_model_id(model_id)
+    if b.startswith("stability."):
+        _ar = "1:1" if width == height else ("16:9" if width > height else "9:16")
+        body = {"prompt": prompt, "mode": "text-to-image",
+                "output_format": "png", "aspect_ratio": _ar}
+        if style:
+            body["style_preset"] = style
+        return body
+    if b.startswith("amazon.titan"):
+        return {
+            "textToImageParams": {"text": prompt},
+            "imageGenerationConfig": {
+                "numberOfImages": 1, "width": width, "height": height,
+                "quality": "premium",
+            },
+        }
+    return {"prompt": prompt, "width": width, "height": height}
+
+
+def _maybe_image_model_sse_response(model_id: str, prompt: str, project_path: str = "",
+                                    aws_profile: str = "", bedrock_user: str = ""):
+    """단일 채팅 모드에서 선택 모델이 '이미지 모델'이면 텍스트 converse 대신 적절히 처리.
+
+    이미지 모델은 Converse API 를 지원하지 않으므로, 사용자가 이미지 모델을 채팅 모델로
+    선택하면 converse 가 ValidationException 으로 실패해 "일시적 오류"로 표시된다(회귀 원인).
+    - 생성형(gen): generate_image 도구로 실제 이미지를 만들어 SSE 로 반환한다.
+    - 편집형(edit): 원본 이미지가 필요하므로 실패가 아니라 사용 방식을 명확히 안내한다.
+    이미지 모델이 아니면 None 을 반환(호출자는 기존 경로 진행).
+
+    반환: StreamingResponse | None. 기존 SSE 계약(text/verifiedFiles/[DONE]) 준수.
+    """
+    kind = _image_model_kind(model_id)
+    if not kind:
+        return None
+
+    async def _gen():
+        if kind == "edit":
+            _lbl = _bare_model_id(model_id).split(".")[-1]
+            _msg = (
+                f"**{_lbl}** 는 원본 이미지를 입력받아 편집/업스케일하는 **이미지 편집 전용 모델**입니다. "
+                "채팅 모델로는 사용할 수 없어 실패가 아니라 '사용 방식이 다름'입니다.\n\n"
+                "사용 방법: 편집할 원본 이미지를 첨부한 뒤 이미지 편집(업스케일/스타일 변환/"
+                "아웃페인트 등)을 요청하세요. 채팅 모델은 Claude 등 텍스트 모델을 선택하면 "
+                "시스템이 이 편집 모델을 자동으로 올바른 경로(/invoke)로 호출합니다."
+            )
+            yield f"data: {json.dumps({'text': _msg}, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
+            return
+        # gen — 실제 이미지 생성(best-of-N 품질 스코어). 선택 모델은 이미지 생성 계열이므로
+        # generate_image 도구가 최적 모델을 자동 선택해 안정적으로 산출한다.
+        try:
+            _res_str = await _tool_generate_image(
+                {"prompt": prompt or "high quality detailed image", "size": "1024x1024"},
+                project_path, aws_profile=aws_profile, bedrock_user=bedrock_user,
+            )
+            _res = json.loads(_res_str)
+        except Exception as _e:
+            _res = {"error": "image-gen-exception", "detail": str(_e)[:200]}
+        if isinstance(_res, dict) and _res.get("path"):
+            _p = _res["path"]
+            _txt = (f"![{model_id}]({_p})\n\n이미지 생성 완료 → `{_p}` "
+                    f"(모델: {_res.get('model', model_id)})")
+            yield f"data: {json.dumps({'text': _txt}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'verifiedFiles': [_p]}, ensure_ascii=False)}\n\n"
+        else:
+            _d = (_res.get('detail') or _res.get('error') or 'unknown') if isinstance(_res, dict) else 'unknown'
+            yield f"data: {json.dumps({'text': f'이미지 생성 실패: {str(_d)[:200]}'}, ensure_ascii=False)}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(_gen(), media_type="text/event-stream")
 
 
 def _select_image_models(prompt: str, hint: str = "") -> list:
@@ -6749,20 +6902,148 @@ async def _tool_generate_docx(tool_input: dict, project_path: str, aws_profile: 
         return json.dumps({"error": "docx-generation-failed", "detail": str(e)[:200]})
 
 
+_EDIT_MODES = ("inpaint", "outpaint", "upscale", "remove-background", "erase",
+               "search-replace", "recolor", "style-transfer",
+               "control-sketch", "control-structure")
+# 프롬프트가 반드시 필요한 모드. upscale/style-transfer는 선택, remove-background/erase는 불필요.
+_EDIT_PROMPT_REQUIRED = ("inpaint", "outpaint", "search-replace", "recolor",
+                         "control-sketch", "control-structure")
+
+
+async def _run_stability_edit(mode: str, tool_input: dict, img_b64: str, prompt: str,
+                              project_path: str, gw, aws_profile: str, bedrock_user: str) -> str:
+    """신규 Stability 편집 모드 실행(upscale/remove-background/erase/search-replace/recolor/
+    style-transfer/control-*). 교정된 실제 AWS ID를 사용하며, 느린 upscale(creative/conservative)은
+    invoke_model 내부 async 폴링으로 처리된다. 성공 시 .generated/ 에 저장하고 경로를 반환한다.
+    """
+    import time as _t, base64
+
+    def _read_b64(path_key: str, err: str):
+        p = tool_input.get(path_key, "")
+        if not p:
+            return None, json.dumps({"error": "invalid-parameter", "detail": err})
+        full = os.path.join(project_path, p) if (not os.path.isabs(p) and project_path) else p
+        if not os.path.isfile(full):
+            return None, json.dumps({"error": "file-not-found", "detail": f"not found: {p}"})
+        with open(full, "rb") as f:
+            return base64.b64encode(f.read()).decode("ascii"), None
+
+    # 모드별 모델 목록 + 요청 본문 구성
+    timeout = 120
+    if mode == "upscale":
+        utype = (tool_input.get("upscale_type") or "fast").lower()
+        id_map = {
+            "fast": "stability.stable-fast-upscale-v1:0",
+            "creative": "stability.stable-creative-upscale-v1:0",
+            "conservative": "stability.stable-conservative-upscale-v1:0",
+        }
+        model_id = id_map.get(utype, id_map["fast"])
+        models = [model_id]
+        body = {"image": img_b64, "output_format": "png"}
+        if utype in ("creative", "conservative"):
+            body["prompt"] = prompt or "high quality, sharp, highly detailed"
+            timeout = 300  # 비동기 핸드오프 — 폴링 여유
+    elif mode == "remove-background":
+        models = list(STABILITY_BACKGROUND_IDS)
+        body = {"image": img_b64, "output_format": "png"}
+    elif mode == "erase":
+        mask_b64, err = _read_b64("mask_path", "mask_path required for erase")
+        if err:
+            return err
+        models = list(STABILITY_ERASE_IDS)
+        body = {"image": img_b64, "mask": mask_b64, "output_format": "png"}
+    elif mode == "search-replace":
+        sp = (tool_input.get("search_prompt") or "").strip()
+        if not sp:
+            return json.dumps({"error": "invalid-parameter", "detail": "search_prompt required for search-replace"})
+        models = ["stability.stable-image-search-replace-v1:0"]
+        body = {"image": img_b64, "prompt": prompt, "search_prompt": sp, "output_format": "png"}
+    elif mode == "recolor":
+        selp = (tool_input.get("select_prompt") or "").strip()
+        if not selp:
+            return json.dumps({"error": "invalid-parameter", "detail": "select_prompt required for recolor"})
+        models = ["stability.stable-image-search-recolor-v1:0"]
+        body = {"image": img_b64, "prompt": prompt, "select_prompt": selp, "output_format": "png"}
+    elif mode == "style-transfer":
+        style_b64, err = _read_b64("style_image_path", "style_image_path required for style-transfer")
+        if err:
+            return err
+        models = ["stability.stable-style-transfer-v1:0"]
+        body = {"init_image": img_b64, "style_image": style_b64, "output_format": "png"}
+        if prompt:
+            body["prompt"] = prompt
+    elif mode in ("control-sketch", "control-structure"):
+        model_id = ("stability.stable-image-control-sketch-v1:0" if mode == "control-sketch"
+                    else "stability.stable-image-control-structure-v1:0")
+        models = [model_id]
+        body = {"image": img_b64, "prompt": prompt, "output_format": "png"}
+    else:
+        return json.dumps({"error": "invalid-mode", "detail": f"unsupported edit mode: {mode}"})
+
+    last_error = ""
+    for model_id in models:
+        try:
+            callable_id = _resolve_callable_model_id(model_id, aws_profile, bedrock_user)
+            result = await gw.invoke_model(callable_id, body, timeout=timeout)
+            if isinstance(result, dict) and "error" in result:
+                last_error = f"{model_id}: {str(result['error'])[:200]}"
+                continue
+            images = result.get("images", []) if isinstance(result, dict) else []
+            if not images:
+                last_error = f"{model_id}: no images returned"
+                continue
+            img_out = images[0] if isinstance(images[0], str) else (
+                images[0].get("base64", "") if isinstance(images[0], dict) else "")
+            if not img_out:
+                last_error = f"{model_id}: empty image data"
+                continue
+            _local_root = _resolve_local_root(project_path)
+            gen_dir = os.path.join(_local_root, ".generated")
+            os.makedirs(gen_dir, exist_ok=True)
+            ts = str(int(_t.time() * 1000))
+            filename = f"{mode}-{ts}.png"
+            output_path = os.path.join(gen_dir, filename)
+            with open(output_path, "wb") as f:
+                f.write(base64.b64decode(img_out))
+            try:
+                from PIL import Image as _PIL
+                with _PIL.open(output_path) as im:
+                    aw, ah = im.size
+            except Exception:
+                aw, ah = 0, 0
+            return json.dumps({
+                "path": f".generated/{filename}",
+                "model": model_id,
+                "width": aw,
+                "height": ah,
+                "mode": mode,
+            })
+        except Exception as e:
+            last_error = f"{model_id}: {str(e)[:200]}"
+            continue
+
+    _det = (last_error or f"all {mode} models failed")[:200]
+    _payload = {"error": "model-unavailable", "detail": _det}
+    if any(t in _det for t in ("execute-api:Invoke", "principal identity", "HTTP 403", "HTTP 404", "not on /invoke allowlist")):
+        _payload["hint"] = f"게이트웨이가 {mode} 라우트/모델을 아직 지원하지 않습니다. 관리자에게 확인을 요청하세요."
+    return json.dumps(_payload)
+
+
 async def _tool_edit_image(tool_input: dict, project_path: str, aws_profile: str = '', bedrock_user: str = '') -> str:  # [patched-credentials]
-    """Edit an image using inpaint or outpaint."""
+    """Edit an image — inpaint/outpaint/upscale/remove-background/erase/search-replace/recolor/style-transfer/control-*."""
     import time as _t, base64
     mode = tool_input.get("mode", "")
     image_path = tool_input.get("image_path", "")
     prompt = (tool_input.get("prompt") or "").strip()
 
-    if mode not in ("inpaint", "outpaint"):
-        return json.dumps({"error": "invalid-mode", "detail": "mode must be inpaint or outpaint"})
+    if mode not in _EDIT_MODES:
+        return json.dumps({"error": "invalid-mode",
+                           "detail": f"mode must be one of {', '.join(_EDIT_MODES)}"})
     if not image_path:
         return json.dumps({"error": "invalid-parameter", "detail": "image_path is required"})
-    if not prompt:
+    if mode in _EDIT_PROMPT_REQUIRED and not prompt:
         return json.dumps({"error": "invalid-parameter", "detail": "prompt is required"})
-    if len(prompt) > 512:
+    if prompt and len(prompt) > 512:
         return json.dumps({"error": "invalid-parameter", "detail": "prompt exceeds 512 chars"})
 
     # Resolve path (relative to project_path)
@@ -6810,6 +7091,12 @@ async def _tool_edit_image(tool_input: dict, project_path: str, aws_profile: str
 
     last_error = ""
 
+    # === 신규 편집 모드 — 교정된 실제 AWS Stability ID + async 폴링(invoke_model)로 동작.
+    # inpaint/outpaint 는 아래 기존 경로를 그대로 유지(무손상). ===
+    if mode not in ("inpaint", "outpaint"):
+        return await _run_stability_edit(
+            mode, tool_input, img_b64, prompt, project_path, gw, aws_profile, bedrock_user)
+
     if mode == "inpaint":
         mask_path = tool_input.get("mask_path", "")
         if not mask_path:
@@ -6844,12 +7131,12 @@ async def _tool_edit_image(tool_input: dict, project_path: str, aws_profile: str
                 if model_id.startswith("stability."):
                     # Stable Image Inpaint / Search-and-Replace API.
                     # Body: {image: base64, mask: base64, prompt: str, output_format: png}
-                    # search-and-replace는 mask 없이 prompt + search_prompt로 동작.
-                    if "search-and-replace" in model_id:
+                    # search-replace는 mask 없이 prompt + search_prompt로 동작.
+                    if "search-replace" in model_id:
                         body = {
                             "image": img_b64,
                             "prompt": prompt,
-                            "search_prompt": prompt,  # 사용자가 별도 search_prompt 안 주면 prompt 재사용
+                            "search_prompt": (tool_input.get("search_prompt") or prompt),
                             "output_format": "png",
                         }
                     else:
@@ -7982,6 +8269,12 @@ def _resolve_callable_model_id(model_id, aws_profile, bedrock_user):
             break
     if _img_raw in ("amazon.nova-canvas-v1:0", "amazon.titan-image-generator-v2:0"):
         return _img_raw
+    # Stability 이미지 모델(생성/편집/업스케일 전체)은 이 게이트웨이에서 bare id 로 호출해야
+    # 한다. 업스케일·스타일·아웃페인트 등은 INFERENCE_PROFILE 전용이라 아래 기본 분기가 us.
+    # prefix 를 붙이면 게이트웨이가 '/invoke allowlist 미스'로 거부한다. bare 로 보내면
+    # 게이트웨이가 프로파일 리매핑과 (느린 모델의) async 핸드오프를 자동 수행한다(실측 확인).
+    if _img_raw.startswith("stability."):
+        return _img_raw
     # 이미 prefix 붙어있으면 원본 ID 추출
     raw_id = model_id
     for prefix in ("us.", "eu.", "global."):
@@ -8992,6 +9285,15 @@ async def run_agent_stream(request: Request):
     aws_profile = body.get("awsProfile", os.environ.get("AWS_PROFILE", "bedrock-gw"))
     bedrock_user = body.get("bedrockUser", os.environ.get("BEDROCK_USER", ""))
     project_path = body.get("projectPath", "")
+
+    # 이미지 모델을 채팅 모델로 선택한 경우 — converse(텍스트) 대신 이미지 경로로 처리.
+    # (converse 는 이미지 모델을 지원하지 않아 ValidationException → "일시적 오류" 회귀 유발.)
+    _img_sse = _maybe_image_model_sse_response(
+        model, prompt, project_path=project_path,
+        aws_profile=aws_profile, bedrock_user=bedrock_user,
+    )
+    if _img_sse is not None:
+        return _img_sse
     open_file = body.get("openFile", "")
     open_file_content = body.get("openFileContent", "")
     template_id = body.get("templateId", "")  # 활성 PPTX 템플릿 (요구사항 5.1)
@@ -9297,6 +9599,17 @@ async def run_agent_graph_stream(request: Request):
 
     body = await request.json()
 
+    # 이미지 모델을 채팅 모델로 선택한 경우 — 그래프(converse) 대신 이미지 경로로 처리.
+    # (그래프의 GatewayChatModel=converse 는 이미지 모델을 지원하지 않아 회귀 유발.)
+    _img_sse = _maybe_image_model_sse_response(
+        body.get("model", ""), body.get("prompt", ""),
+        project_path=body.get("projectPath", ""),
+        aws_profile=body.get("awsProfile", os.environ.get("AWS_PROFILE", "bedrock-gw")),
+        bedrock_user=body.get("bedrockUser", os.environ.get("BEDROCK_USER", "")),
+    )
+    if _img_sse is not None:
+        return _img_sse
+
     # 회귀 수정: OpenAI provider 모델(openai.*)은 /openai/responses 전용 라우트가 필요하다.
     # graph-stream(GatewayChatModel=converse)에는 OpenAI 분기가 없으므로, is_openai_model 을
     # 올바르게 처리하는 검증된 run-stream 경로로 위임한다(GPT 5.x 등 호출 복구).
@@ -9311,6 +9624,13 @@ async def run_agent_graph_stream(request: Request):
         from langchain_core.messages import HumanMessage
         from ai_engine.agent_system.deps import GraphDeps
         from ai_engine.agent_system.supervisor import build_top_graph, build_parallel_top_graph
+        from ai_engine.agent_system.depth_router import (
+            adaptive_depth_enabled,
+            classify_complexity,
+            depth_router_llm_enabled,
+            pick_fast_domain,
+            build_fast_path_graph,
+        )
         from ai_engine.agent_system.checkpoint_store import JsonFileCheckpointSaver
         from ai_engine.agent_system.sse_bridge import graph_events_to_sse
         from ai_engine.agent_system.chat_model_adapter import bedrock_messages_to_lc
@@ -9371,7 +9691,23 @@ async def run_agent_graph_stream(request: Request):
         # 병렬 실행한다(단일 작업이면 워커 1개 = 순차와 동일). AE_LANGGRAPH_PARALLEL=0 으로
         # 끄면 기존 순차 멀티홉(build_top_graph)을 사용한다(무회귀 안전장치).
         _parallel_on = os.environ.get("AE_LANGGRAPH_PARALLEL", "on").strip().lower() not in ("0", "false", "off", "no")
-        compiled = build_parallel_top_graph(deps) if _parallel_on else build_top_graph(deps)
+        # ── Phase 2a: Depth_Router / Fast_Path 비침습 분기(요구사항 5.4/6.1/6.3/10.1). ──
+        # AE_ENABLE_ADAPTIVE_DEPTH off(기본) 이면 아래 else 경로로 기존 라인과 바이트 동등하다.
+        # on 이면 simple 질의만 Fast_Path(단일 도메인 서브그래프)로, 그 외/실패는 Full_Graph 로.
+        # classify_complexity 는 개별 ainvoke 하나만 wait_for 로 감싼 단일 코루틴이다(스트림 아님).
+        if adaptive_depth_enabled():
+            try:
+                depth = await classify_complexity(prompt, deps, use_llm=depth_router_llm_enabled())
+                if depth == "simple":
+                    compiled = build_fast_path_graph(deps, pick_fast_domain(prompt, deps))
+                else:
+                    compiled = build_parallel_top_graph(deps) if _parallel_on else build_top_graph(deps)
+            except Exception:
+                # 분류/조립 예외 → Full_Graph 로 폴백(요구사항 6.3 fail-safe). 그마저 실패하면
+                # 상위 try/except 가 run_agent_stream 위임으로 최종 폴백한다.
+                compiled = build_parallel_top_graph(deps) if _parallel_on else build_top_graph(deps)
+        else:
+            compiled = build_parallel_top_graph(deps) if _parallel_on else build_top_graph(deps)
 
         # ── 멀티턴 대화 맥락 주입 (멀티턴 회귀 수정) ──
         # 기존 run-stream/run-agent 와 동일하게 ConversationMemory(요약 체크포인트 + 최근 원본)
@@ -10251,6 +10587,50 @@ async def run_agent_parallel(request: Request):
             import time as _time
             _t_start = _time.time()
             print(f"[Parallel] START slot={slot_id} model={model_id} t=0.000s")
+
+            # === 이미지 모델 분기 — converse(텍스트) 경로는 이미지 모델을 지원하지 않음 ===
+            # 사용자가 Stable Image/Nova Canvas/Titan 등 이미지 모델을 병렬 슬롯으로 선택하면
+            # converse 가 ValidationException 으로 실패해 "일시적 오류"로 표시된다(회귀). 생성형은
+            # /invoke(text-to-image)로 실제 이미지를 만들어 반환하고, 원본 이미지가 필요한
+            # 편집형(Upscale/Style/Outpaint 등)은 실패가 아니라 사용 방식 안내를 반환한다.
+            _img_kind = _image_model_kind(model_id)
+            if _img_kind == "gen":
+                try:
+                    _gbody = _build_image_gen_body(sid, prompt or "high quality detailed image")
+                    _gres = await gw.invoke_model(sid, _gbody, timeout=180)
+                    if isinstance(_gres, dict) and "error" in _gres:
+                        return {"slotId": slot_id, "modelId": model_id, "status": "error",
+                                "content": f"{model_id} 이미지 생성 실패: {str(_gres['error'])[:200]}"}
+                    _imgs = (_gres or {}).get("images") or []
+                    if _imgs and isinstance(_imgs[0], dict):
+                        _imgs = [a.get("base64", "") for a in _imgs]
+                    _b64 = _imgs[0] if _imgs and isinstance(_imgs[0], str) else ""
+                    if not _b64:
+                        return {"slotId": slot_id, "modelId": model_id, "status": "error",
+                                "content": f"{model_id}: 이미지 데이터가 비어 있습니다."}
+                    import base64 as _b64m, time as _tm
+                    _root = _resolve_local_root(project_path)
+                    _gd = os.path.join(_root, ".generated")
+                    os.makedirs(_gd, exist_ok=True)
+                    _fn = f"parallel-img-{int(_tm.time() * 1000)}-{slot_id}.png"
+                    with open(os.path.join(_gd, _fn), "wb") as _f:
+                        _f.write(_b64m.b64decode(_b64))
+                    print(f"[Parallel] DONE(image) slot={slot_id} model={model_id} file={_fn}")
+                    return {"slotId": slot_id, "modelId": model_id, "status": "done",
+                            "content": f"![{model_id}](.generated/{_fn})\n\n이미지 생성 완료 → `.generated/{_fn}`"}
+                except Exception as _ie:
+                    return {"slotId": slot_id, "modelId": model_id, "status": "error",
+                            "content": f"{model_id} 이미지 생성 예외: {str(_ie)[:200]}"}
+            if _img_kind == "edit":
+                _lbl = _bare_model_id(model_id).split(".")[-1]
+                return {"slotId": slot_id, "modelId": model_id, "status": "error",
+                        "content": (
+                            f"**{_lbl}** 는 원본 이미지를 입력받아 편집/업스케일하는 **이미지 편집 전용 모델**입니다. "
+                            "텍스트 병렬 비교로는 호출할 수 없어 실패가 아니라 '사용 방식이 다름'입니다.\n\n"
+                            "사용 방법: 편집할 원본 이미지를 첨부한 뒤 에이전트 모드에서 이미지 편집"
+                            "(업스케일/스타일 변환/아웃페인트 등)을 요청하세요. 시스템이 이 모델을 자동으로 "
+                            "올바른 편집 경로(/invoke)로 호출합니다."
+                        )}
 
             # === OpenAI 모델 분기 (gateway-openai-models) ===
             # 병렬 모드는 '도구 없이 내용 비교'가 원칙이므로 OpenAI도 단발 텍스트 응답.

@@ -51,6 +51,13 @@ from ai_engine.agent_system.nodes.verify import (  # noqa: F401
     make_verify_node,
 )
 
+# Phase 2b — Grounding_Gate (Task 8.5). 조립 시점에 플래그를 1회 판독해 verify 이후
+# 배선을 결정한다(플래그 off ⇒ 기존 verify→END 바이트 동등 — Property 5 무회귀).
+from ai_engine.agent_system.grounding_gate import (
+    grounding_gate_enabled,
+    grounding_gate_selector,
+)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 타임아웃 / recursion 상수 (env override — 요구사항 6.1 / 6.4)
@@ -221,6 +228,18 @@ def build_domain_subgraph(
         # 도구가 없으면 model 은 tool_calls 를 낼 일이 없으므로 바로 verify 로.
         sg.add_edge("model", "verify")
 
-    sg.add_edge("verify", END)
+    # Phase 2b — Grounding_Gate 배선(Task 8.5). 조립 시점에 AE_ENABLE_GROUNDING_GATE 를
+    # 1회 판독한다. Fast_Path/Full_Graph 의 모든 도메인 워커가 이 빌더를 공유하므로 이
+    # 한 곳의 배선이 두 경로 모두를 덮는다(build_parallel_top_graph 불변).
+    if grounding_gate_enabled():
+        # ON: verify → {model(재생성) | END(done)} bounded refine 루프.
+        sg.add_conditional_edges(
+            "verify",
+            grounding_gate_selector,
+            {"model": "model", "done": END},
+        )
+    else:
+        # OFF: 현행과 동일(무회귀 — Property 5 바이트 동등).
+        sg.add_edge("verify", END)
 
     return sg.compile()

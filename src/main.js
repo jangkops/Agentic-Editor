@@ -438,7 +438,7 @@ async function initApp() {
           fill.style.width = pct.toFixed(0) + '%';
           fill.style.background = remaining < 30 * 60 * 1000 ? 'var(--color-error)' : remaining < 2 * 60 * 60 * 1000 ? 'var(--color-warning)' : 'var(--color-success)';
         }
-        if (pctEl) pctEl.textContent = `${remHrs}h`;
+        if (pctEl) pctEl.textContent = remHrs > 0 ? `${remHrs}h ${remM}m` : `${remMins}m`;
         const expiryTime = _ssoExpiry.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
         if (gauge) gauge.title = `앱 경과: ${eHrs > 0 ? eHrs + '시간 ' : ''}${eMins % 60}분 ${eSecs}초\nSSO 만료 예정: ${expiryTime} (${remHrs}시간 ${remM}분 남음)`;
       }
@@ -7017,14 +7017,46 @@ function initPanelResize() {
   const resizeLeft = document.getElementById('resize-left');
   const resizeRight = document.getElementById('resize-right');
 
+  // 패널 폭 한계(기존 CSS min/max 와 동일하게 유지 — 기능 불변).
+  const LEFT_MIN = 160, LEFT_MAX = 400;
+  const RIGHT_MIN = 280, RIGHT_MAX = 600;
+  // 센터(에디터)가 확보해야 하는 최소 가용 폭. 좌/우 패널을 넓혀도 이 값 아래로는
+  // 센터를 밀어내지 않아 우측 패널이 화면 밖으로 잘리지 않는다.
+  const CENTER_MIN = 260;
+
+  const relayout = () => { try { if (typeof monacoEditor !== 'undefined' && monacoEditor) monacoEditor.layout(); } catch {} };
+
+  // 드래그 중 좌측 패널의 상한: 뷰포트에서 우측 패널과 센터 최소폭을 뺀 값(정적 max와 min 중 작은 값).
+  const maxLeftNow = () =>
+    Math.max(LEFT_MIN, Math.min(LEFT_MAX, window.innerWidth - rightPanel.offsetWidth - CENTER_MIN));
+  const maxRightNow = () =>
+    Math.max(RIGHT_MIN, Math.min(RIGHT_MAX, window.innerWidth - leftPanel.offsetWidth - CENTER_MIN));
+
+  // 창 크기가 줄어들어 좌+우+센터최소가 뷰포트를 초과하면, 우측→좌측 순으로 각자의
+  // 최소 한도까지 줄여 우측 패널이 잘리지 않게 한다(사용자가 설정한 폭은 최대한 보존).
+  function clampPanels() {
+    if (!leftPanel || !rightPanel) return;
+    let lw = leftPanel.offsetWidth;
+    let rw = rightPanel.offsetWidth;
+    let over = (lw + rw + CENTER_MIN) - window.innerWidth;
+    if (over <= 0) return;
+    const rShrink = Math.min(over, rw - RIGHT_MIN);
+    if (rShrink > 0) { rw -= rShrink; over -= rShrink; rightPanel.style.width = rw + 'px'; }
+    if (over > 0) {
+      const lShrink = Math.min(over, lw - LEFT_MIN);
+      if (lShrink > 0) { leftPanel.style.width = (lw - lShrink) + 'px'; }
+    }
+    relayout();
+  }
+
   if (resizeLeft && leftPanel) {
     let startX, startW;
     resizeLeft.addEventListener('mousedown', e => {
       startX = e.clientX; startW = leftPanel.offsetWidth;
       const onMove = ev => {
-        const w = Math.max(160, Math.min(400, startW + (ev.clientX - startX)));
+        const w = Math.max(LEFT_MIN, Math.min(maxLeftNow(), startW + (ev.clientX - startX)));
         leftPanel.style.width = w + 'px';
-        if (monacoEditor) monacoEditor.layout();
+        relayout();
       };
       const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
       document.addEventListener('mousemove', onMove);
@@ -7038,9 +7070,9 @@ function initPanelResize() {
     resizeRight.addEventListener('mousedown', e => {
       startX = e.clientX; startW = rightPanel.offsetWidth;
       const onMove = ev => {
-        const w = Math.max(280, Math.min(600, startW - (ev.clientX - startX)));
+        const w = Math.max(RIGHT_MIN, Math.min(maxRightNow(), startW - (ev.clientX - startX)));
         rightPanel.style.width = w + 'px';
-        if (monacoEditor) monacoEditor.layout();
+        relayout();
       };
       const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
       document.addEventListener('mousemove', onMove);
@@ -7048,8 +7080,72 @@ function initPanelResize() {
       e.preventDefault();
     });
   }
+
+  // 창 리사이즈 시 우측 패널이 화면 밖으로 밀리는 것 방지.
+  window.addEventListener('resize', clampPanels);
+  clampPanels();
 }
 document.addEventListener('DOMContentLoaded', initPanelResize);
+
+// ===== 좌/우 패널 접기·펴기 (VS Code 스타일) =====
+// 안 쓰는 패널을 접어 에디터를 넓게 쓰고, 필요할 때 다시 편다. 상태는 localStorage 에
+// 저장돼 재실행 시 복원된다. 패널 콘텐츠는 DOM 에 그대로 남아 기능이 유지된다.
+function initPanelCollapse() {
+  const leftPanel = document.querySelector('.left-panel');
+  const rightPanel = document.querySelector('.right-panel');
+  const handleLeft = document.getElementById('resize-left');
+  const handleRight = document.getElementById('resize-right');
+  const btnLeft = document.getElementById('btn-toggle-left');
+  const btnRight = document.getElementById('btn-toggle-right');
+
+  const relayout = () => { try { if (typeof monacoEditor !== 'undefined' && monacoEditor) monacoEditor.layout(); } catch {} };
+
+  // 접힘 상태 적용: 패널 width 0(접힘) 또는 복원, 리사이즈 핸들 숨김/표시, 버튼 강조, 저장.
+  function apply(side, collapsed, persist = true) {
+    const panel = side === 'left' ? leftPanel : rightPanel;
+    const handle = side === 'left' ? handleLeft : handleRight;
+    const btn = side === 'left' ? btnLeft : btnRight;
+    if (!panel) return;
+    panel.classList.toggle('collapsed', collapsed);
+    if (handle) handle.style.display = collapsed ? 'none' : '';
+    if (btn) btn.classList.toggle('active', !collapsed);  // 펼침=강조
+    if (persist) { try { localStorage.setItem('panel_collapsed_' + side, collapsed ? '1' : '0'); } catch {} }
+    relayout();
+  }
+
+  function toggle(side) {
+    const panel = side === 'left' ? leftPanel : rightPanel;
+    if (!panel) return;
+    apply(side, !panel.classList.contains('collapsed'));
+  }
+
+  btnLeft?.addEventListener('click', () => toggle('left'));
+  btnRight?.addEventListener('click', () => toggle('right'));
+
+  // 저장된 상태 복원(기본: 둘 다 펼침).
+  let leftCollapsed = false, rightCollapsed = false;
+  try {
+    leftCollapsed = localStorage.getItem('panel_collapsed_left') === '1';
+    rightCollapsed = localStorage.getItem('panel_collapsed_right') === '1';
+  } catch {}
+  apply('left', leftCollapsed, false);
+  apply('right', rightCollapsed, false);
+
+  // 단축키: Cmd/Ctrl+B = 좌측, Cmd/Ctrl+Alt(Option)+B = 우측.
+  // e.code 사용 — Option 조합 시 문자(e.key)가 바뀌는 macOS 문제 회피.
+  document.addEventListener('keydown', e => {
+    const isMac = navigator.platform.includes('Mac');
+    const mod = isMac ? e.metaKey : e.ctrlKey;
+    if (mod && !e.shiftKey && e.code === 'KeyB') {
+      e.preventDefault();
+      toggle(e.altKey ? 'right' : 'left');
+    }
+  });
+
+  // 외부에서도 호출 가능하게 노출(선택).
+  window.toggleSidePanel = toggle;
+}
+document.addEventListener('DOMContentLoaded', initPanelCollapse);
 
 // ===== 센터 뷰 단축키 =====
 document.addEventListener('keydown', e => {

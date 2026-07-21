@@ -334,23 +334,22 @@ class GatewayClient:
 
                 if resp.status_code == 200:
                     data = resp.json()
-                    # Gateway 응답에서 이미지 데이터 추출
-                    if "images" in data:
-                        return {"images": data["images"]}
-                    # /invoke 라우트 래핑 응답: {"decision":"ALLOW","output":{...},"usage":{...},"cost_krw":...}
-                    if "output" in data and isinstance(data.get("output"), dict):
-                        out = data["output"]
-                        if "images" in out:
-                            return {"images": out["images"]}
-                        return out
-                    # 모델 응답이 body 안에 래핑된 경우
-                    resp_body = data.get("body", data)
-                    if isinstance(resp_body, str):
-                        resp_body = json.loads(resp_body)
-                    if "images" in resp_body:
-                        return {"images": resp_body["images"]}
-                    # 기타 성공 응답 — 그대로 반환
-                    return resp_body
+                    # 느린 모델(Upscale 등)은 동기 요청이어도 게이트웨이가 async 로 자동
+                    # 핸드오프해 200/202 + {decision:ACCEPTED, job_id, async, status_url} 을
+                    # 즉시 반환한다. 이 경우 job 을 폴링해 최종 이미지를 받는다(29초 하드리밋 회피).
+                    if self._is_async_accepted(data):
+                        return await self._poll_invoke_job(data)
+                    return self._extract_invoke_result(data)
+
+                # 202 ACCEPTED — async 잡 핸들 반환. 폴링으로 완료 대기.
+                if resp.status_code == 202:
+                    try:
+                        data = resp.json()
+                    except Exception:
+                        data = {}
+                    if self._is_async_accepted(data) or data.get("job_id"):
+                        return await self._poll_invoke_job(data)
+                    return {"error": f"HTTP 202 이나 job_id 없음: {resp.text[:160]}"}
 
                 # HTTP 에러 처리
                 err_text = resp.text[:200]
@@ -375,6 +374,152 @@ class GatewayClient:
                 return {"error": str(e)}
 
         return {"error": "최대 재시도 횟수 초과"}
+
+    # ─────────────────────────────────────────────────────────────────
+    # /invoke async 핸드오프 지원 — 느린 이미지 모델(Upscale 등)
+    # 게이트웨이가 29초 하드리밋을 넘는 연산을 async 잡으로 자동 전환(202 또는
+    # 200+decision:ACCEPTED)하므로, 여기서 job 을 폴링해 최종 이미지를 받는다.
+    # 호출자(_tool_edit_image 등)는 변경 불필요 — invoke_model 이 결과를 그대로 반환.
+    # ─────────────────────────────────────────────────────────────────
+    @staticmethod
+    def _is_async_accepted(data) -> bool:
+        """게이트웨이 응답이 async 잡 수락(ACCEPTED)인지 판별."""
+        if not isinstance(data, dict):
+            return False
+        if data.get("async") is True:
+            return True
+        dec = str(data.get("decision", "")).upper()
+        if dec == "ACCEPTED":
+            return True
+        # async 표식 없이 job_id + status_url 만 오는 경우도 async 로 간주.
+        return bool(data.get("job_id") and data.get("status_url"))
+
+    @staticmethod
+    def _extract_invoke_result(data) -> dict:
+        """/invoke 성공 응답에서 이미지 데이터를 추출한다(동기·잡 결과 공용).
+
+        지원 형태:
+          - {"images": [...]}
+          - {"decision":"ALLOW","output":{"images":[...] 또는 기타}}
+          - {"body": "<json>" | {...}} 안에 images
+          - 그 외에는 원본 dict 를 그대로 반환(상위에서 해석).
+        """
+        if not isinstance(data, dict):
+            return {"error": f"예상치 못한 응답 형식: {str(data)[:160]}"}
+        if "images" in data:
+            return {"images": data["images"]}
+        out = data.get("output")
+        if isinstance(out, dict):
+            if "images" in out:
+                return {"images": out["images"]}
+            return out
+        resp_body = data.get("body", data)
+        if isinstance(resp_body, str):
+            try:
+                resp_body = json.loads(resp_body)
+            except (ValueError, TypeError):
+                resp_body = {}
+        if isinstance(resp_body, dict) and "images" in resp_body:
+            return {"images": resp_body["images"]}
+        return data
+
+    async def _poll_invoke_job(self, submit_data: dict, max_wait: int = 600,
+                               interval: int = 3) -> dict:
+        """async /invoke 잡을 완료까지 폴링해 최종 이미지를 반환한다.
+
+        Args:
+            submit_data: 제출 응답 dict(job_id, status_url 포함).
+            max_wait: 최대 대기(초). Upscale 은 통상 40~120초.
+            interval: 폴링 간격(초).
+
+        Returns:
+            {"images":[...]} 성공, {"error":...} 실패/타임아웃.
+        """
+        job_id = submit_data.get("job_id") or self._extract_job_id(submit_data)
+        if not job_id:
+            return {"error": f"async 잡 id 추출 실패: {str(submit_data)[:160]}"}
+
+        # 결과 문서에서 이미지/상태를 추출하는 공용 로직.
+        def _extract(doc):
+            if not isinstance(doc, dict):
+                return None, None
+            status = str(doc.get("status", "")).upper()
+            result = self._extract_invoke_result(doc)
+            if isinstance(result, dict) and result.get("images"):
+                return result, status
+            for key in ("result", "output"):
+                sub = doc.get(key)
+                if isinstance(sub, dict):
+                    r2 = self._extract_invoke_result(sub)
+                    if isinstance(r2, dict) and r2.get("images"):
+                        return r2, status
+            return None, status
+
+        # ── 주 경로: HTTP 상태 엔드포인트 폴링(GET /invoke-jobs/{id}) ──
+        # IAM 그랜트(execute-api:Invoke on GET /invoke-jobs/*) 적용 후 이 경로가 200 으로 동작한다.
+        # 잡 라이프사이클(ACCEPTED→QUEUED→RUNNING→SUCCEEDED/FAILED)을 실시간 확인하므로,
+        # 실패 사유(error_message)를 즉시 표면화할 수 있다(S3 결과 미기록 실패를 예산 소진 없이 감지).
+        # 권한 거부(403)로 회귀하면 아래 S3 폴백으로 전환한다(무권한 배포/역할 무손상).
+        status_path = submit_data.get("status_url") or f"/invoke-jobs/{job_id}"
+        url = (
+            f"{self.gateway_url}{status_path}"
+            if status_path.startswith("/")
+            else status_path
+        )
+        elapsed = 0
+        _http_denied = False
+        while elapsed <= max_wait:
+            await asyncio.sleep(interval)
+            elapsed += interval
+            headers = self._sign("GET", url, b"")
+            try:
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(30.0, connect=10.0)
+                ) as client:
+                    r = await client.get(url, headers=headers)
+            except Exception:
+                continue
+            if r.status_code != 200:
+                low = (r.text or "").lower()
+                if r.status_code == 403 or "not authorized to perform" in low:
+                    _http_denied = True  # 권한 없음 → S3 폴백으로
+                    break
+                if self._is_expired_error(r.text):
+                    self.force_refresh_creds()
+                continue
+            try:
+                d = r.json()
+            except Exception:
+                continue
+            status = str(d.get("status", "")).upper()
+            if status in ("SUCCEEDED", "COMPLETED", "SUCCESS"):
+                result, _st = _extract(d)
+                if result:
+                    return result
+                # 상태 응답에 인라인 이미지가 없으면 S3 결과 문서에서 회수.
+                s3doc = await self._poll_job_data(job_id, max_wait=30)
+                result, _st = _extract(s3doc)
+                if result:
+                    return result
+                return {"error": "잡 성공이나 이미지 미검출"}
+            if status in ("FAILED", "ERROR", "CANCELED", "CANCELLED"):
+                detail = str(d.get("error_message") or d.get("error") or "")[:300]
+                return {"error": f"async 잡 {status}: {detail}"}
+            # QUEUED / RUNNING / ACCEPTED — 계속 폴링
+
+        # ── 폴백: HTTP 권한 거부(403) 시 S3 결과 문서 폴링 ──
+        if _http_denied:
+            s3doc = await self._poll_job_data(job_id, max_wait=max_wait)
+            if isinstance(s3doc, dict):
+                status = str(s3doc.get("status", "")).upper()
+                if status in ("FAILED", "ERROR", "CANCELED", "CANCELLED"):
+                    detail = str(s3doc.get("error_message") or s3doc.get("error") or "")[:300]
+                    return {"error": f"async 잡 {status}: {detail}"}
+                result, _st = _extract(s3doc)
+                if result:
+                    return result
+
+        return {"error": f"async 잡 시간 초과/폴링 불가 ({max_wait}초, job={job_id[:12]}...)"}
 
     async def converse_quota_only(self, model_id, messages, system_prompt=""):
         """Quota 조회 전용 — maxTokens:1로 최소 비용, ACCEPTED 시 폴링 없이 quota만 반환."""
