@@ -26,28 +26,63 @@ Mogam Works는 AWS Bedrock Gateway를 통해 90여 개의 LLM을 단일/병렬�
 
 ## Architecture
 
+전체 스택(Electron 프론트엔드 · FastAPI 백엔드 · AWS Bedrock Gateway 인프라)은 모두 **동일 운영자가 직접 구축·운영**합니다. 이 저장소는 에디터(Electron + Python 백엔드)를 담고, 게이트웨이 인프라 코드(API Gateway/Lambda/ECS 워커/IAM, Terraform, `handler.py`)는 별도의 인프라 저장소에서 관리됩니다.
+
 ```
-┌──────────────────────────────────────────────────────────┐
-│                     Electron (Frontend)                    │
-│  파일 탐색기 · Monaco 에디터 · AI 패널(단일/병렬/합의)     │
-│  통합 터미널(node-pty) · 원격 SSH · 통계/검색/Git          │
-└─────────────────────────┬──────────────────────────────────┘
-                          │ HTTP + SSE (localhost:8765)
-┌─────────────────────────▼──────────────────────────────────┐
-│                  FastAPI Backend (Python)                   │
-│  Gateway 클라이언트(SigV4) · 멀티에이전트(LangGraph)         │
-│  하이브리드 RAG(fastembed + BM25) · 대화 메모리             │
-│  미디어 생성(이미지/PPTX/PDF/DOCX/XLSX)                      │
-└─────────────────────────┬──────────────────────────────────┘
-                          │ SigV4 서명 HTTPS + Lambda Function URL(SSE)
-┌─────────────────────────▼──────────────────────────────────┐
-│               AWS Bedrock Gateway (다른 팀 관리)             │
-│  /converse · /invoke · Lambda URL(SSE 스트리밍)             │
-│  BedrockUser별 rate limit / quota / 과금                    │
-└─────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────┐
+│                        Electron (Frontend)                             │
+│                                                                        │
+│  Renderer (src/)                          Main process (electron/)      │
+│  ├─ 파일 탐색기 / Monaco 에디터           ├─ IPC 핸들러                  │
+│  ├─ AI 패널: 단일 / 병렬 / 합의           │   (fs·git·project·sso·        │
+│  ├─ 통계 · 검색 · Git Graph               │    terminal·remote)          │
+│  ├─ 통합 터미널 (xterm)                   ├─ ProcessManager             │
+│  ├─ 미디어 / 템플릿 패널                  │   (백엔드 수명주기 + PTY)    │
+│  └─ 모델 추천                             ├─ node-pty (로컬 PTY)         │
+│                                           ├─ AWS SSO Manager            │
+│                                           └─ Remote SSH 브리지          │
+│                                               (파일 / 터미널)           │
+└───────────────────────────────┬───────────────────────────────────────┘
+                                │ IPC(preload contextBridge)
+                                │ HTTP + SSE  (localhost:8765)
+┌───────────────────────────────▼───────────────────────────────────────┐
+│                       FastAPI Backend (ai_engine/)                     │
+│                                                                        │
+│  API: /api/agents/{run-stream, run-agent, run-parallel}                │
+│       /api/models · /api/quota · /api/rag/{index,status}               │
+│                                                                        │
+│  ┌─ 멀티에이전트 (LangGraph) ─────────────────────────────────────┐    │
+│  │  Coordinator → Planner(Opus) → Generator(Sonnet) → Evaluator(Opus) │
+│  │  grounding gate · depth router · checkpoint store              │    │
+│  └───────────────────────────────────────────────────────────────┘    │
+│  ┌─ Agent Tools ─┐  ┌─ RAG ──────────────┐  ┌─ Media ────────────┐     │
+│  │ read/write/   │  │ indexer · fastembed │  │ 이미지(Stability/  │     │
+│  │ list/run/     │  │ (ONNX MiniLM 384d)  │  │  Nova/Titan/Vertex)│     │
+│  │ search +      │  │ + BM25 하이브리드   │  │ PPTX/PDF/DOCX/XLSX │     │
+│  │ generate_image│  │ · verifier          │  │ 네이티브 다이어그램 │     │
+│  │ /edit_image   │  └─────────────────────┘  └────────────────────┘     │
+│  └───────────────┘  대화 메모리(요약 체크포인트)                        │
+│                                                                        │
+│  Gateway 클라이언트 (gateway_module.py):                                │
+│    SigV4 서명 · BedrockUser assume-role · 자격증명 캐시 ·               │
+│    재시도/폴백 · invoke-job 비동기 폴링                                 │
+└───────────────────────────────┬───────────────────────────────────────┘
+                                │ SigV4 서명 HTTPS (execute-api / lambda)
+┌───────────────────────────────▼───────────────────────────────────────┐
+│         AWS Bedrock Gateway  (동일 운영자 구축·운영, 별도 인프라 저장소) │
+│                                                                        │
+│  API Gateway                                                            │
+│   ├─ POST /converse            논스트리밍 Converse (비동기는 S3 job 폴링)│
+│   ├─ POST /invoke              InvokeModel (이미지 모델 등)             │
+│   ├─ POST/GET /invoke-jobs/*   비동기 잡 제출/폴링/취소                 │
+│   └─ POST /openai/responses*   OpenAI Responses 동기/비동기 라우트      │
+│  Lambda Function URL           SSE 실시간 스트리밍                       │
+│  ECS 워커 → Bedrock Runtime                                             │
+│  IAM: BedrockUser-{name} 역할 · 사용자별 rate limit / quota / 과금       │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
-게이트웨이(API Gateway/Lambda/IAM)는 별도 팀이 관리하며, 이 저장소는 에디터(Electron/Python)만 포함합니다.
+LLM/추론/문서 JSON 생성은 전부 Bedrock Gateway 경유입니다. 이미지 생성은 Bedrock 이미지 모델을 기본으로 하되, 텍스트 정확도가 필요한 경우 `AE_ENABLE_VERTEX_IMAGE=1` 옵트인 시 Vertex AI를 예외적으로 사용합니다.
 
 ---
 
