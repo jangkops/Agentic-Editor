@@ -129,6 +129,13 @@ Mogam Works는 AWS Bedrock Gateway를 통해 90여 개의 LLM을 단일/병렬�
 - Git Graph, 브랜치 드롭다운 전환, dirty 체크
 - 통계(개요, 품질/생산성, 토큰 비용, 기여자, 팀), AI 코드 리뷰(정적 분석), 의존성 분석, 실시간 모니터
 
+### Infrastructure
+- AWS SSO 인증 + BedrockUser assume-role
+- 월간 사용량/한도 게이지, SSO 세션 만료 게이지
+- 스킬 관리(영속성, GitHub MD import)
+- 대화 세션 및 병렬/합의 결과 로컬 저장
+- SSE idle timeout으로 스트림 끊김 자동 감지
+
 ---
 
 ## Tech Stack
@@ -178,6 +185,24 @@ aws sso login --profile bedrock-gw
 npm run dev
 ```
 `concurrently`로 Python 서버(uvicorn, 8765)와 Electron을 동시 실행합니다. 프론트엔드(`src/`, `electron/`) 수정은 Cmd+R 새로고침으로 반영되고, Electron 메인/Python 변경은 앱/서버 재시작이 필요합니다.
+
+### Development Notes
+- 서버는 `--reload --reload-dir ai_engine`로 실행되어 `ai_engine/*.py` 변경 시에만 리로드됩니다.
+- `src/`, `electron/` 등 프론트엔드 수정은 서버에 영향이 없습니다(Cmd+R 새로고침).
+- `NO_RELOAD=1 npm run dev`로 서버 auto-reload를 완전히 비활성화할 수 있습니다.
+
+### Keyboard Shortcuts
+`src/main.js`에 구현된 전역 단축키(실측):
+
+| 단축키 | 동작 |
+|--------|------|
+| `Cmd/Ctrl+S` | 현재 파일 저장 |
+| `Cmd/Ctrl+Shift+F` | 프로젝트 검색 |
+| `Cmd/Ctrl+Shift+G` | Git 뷰 |
+| `Cmd/Ctrl+Shift+S` | 통계 뷰 |
+| `Cmd/Ctrl+Shift+L` | 원격 로그 열기(Show Remote Log) |
+| `Cmd/Ctrl+B` | 사이드 패널 토글(Alt 조합 시 오른쪽) |
+| `Esc` | 에디터로 복귀 |
 
 ---
 
@@ -265,6 +290,16 @@ agentic-editor/
 | GET | `/api/quota` | BedrockUser별 월 사용량/한도 |
 | POST | `/api/rag/index` | 프로젝트 인덱싱 트리거 |
 | GET | `/api/rag/status` | RAG 인덱스 상태 |
+
+### SSE Event Types (run-agent)
+
+| Event | Format | Description |
+|-------|--------|-------------|
+| text delta | `{"text": "..."}` | LLM 응답 텍스트 조각 |
+| tool start | `{"tool": "read_file", "input": {...}, "status": "running"}` | 도구 실행 시작 |
+| tool done | `{"tool": "read_file", "output": "...", "status": "done"}` | 도구 실행 완료 |
+| error | `{"error": "..."}` | 에러 메시지 |
+| stream end | `[DONE]` | 스트림 종료 |
 
 ---
 
