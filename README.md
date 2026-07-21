@@ -14,7 +14,7 @@ Mogam Works는 AWS Bedrock Gateway를 통해 90여 개의 LLM을 단일/병렬�
 
 핵심 특징
 - 단일/병렬 호출로 여러 모델 답변을 동시에 비교
-- 고차원 모델(Opus)이 병렬 응답을 분석해 합의 도출, 합의 모델로 대화 이어가기
+- 사용자가 선택한 고차원 모델(예: Claude Opus 계열)이 병렬 응답을 분석해 합의 도출, 합의 모델로 대화 이어가기
 - 에이전트 모드: LLM이 파일 읽기/쓰기, 명령 실행, 검색, 이미지 생성/편집 도구를 자율 사용
 - 멀티에이전트 오케스트레이션: Coordinator → Planner → Generator → Evaluator (LangGraph)
 - 하이브리드 RAG: 신경망 임베딩(fastembed, 다국어) + BM25 키워드 검색
@@ -52,7 +52,8 @@ Mogam Works는 AWS Bedrock Gateway를 통해 90여 개의 LLM을 단일/병렬�
 │       /api/models · /api/quota · /api/rag/{index,status}               │
 │                                                                        │
 │  ┌─ 멀티에이전트 (LangGraph) ─────────────────────────────────────┐    │
-│  │  Coordinator → Planner(Opus) → Generator(Sonnet) → Evaluator(Opus) │
+│  │  Coordinator → Planner → Generator → Evaluator                 │    │
+│  │  (기본 모델 Claude Sonnet 4.5, Opus 주입 가능)                 │    │
 │  │  grounding gate · depth router · checkpoint store              │    │
 │  └───────────────────────────────────────────────────────────────┘    │
 │  ┌─ Agent Tools ─┐  ┌─ RAG ──────────────┐  ┌─ Media ────────────┐     │
@@ -132,7 +133,8 @@ LLM/추론/문서 JSON 생성은 전부 Bedrock Gateway 경유입니다. 이미�
 | `edit_image` | 기존 이미지 편집. 모드 10종: inpaint, outpaint, upscale, remove-background, erase, search-replace, recolor, style-transfer, control-sketch, control-structure |
 
 ### Multi-Agent Orchestration
-- LangGraph 기반 계층형 오케스트레이션: Coordinator → Planner(Opus) → Generator(Sonnet) → Evaluator(Opus)
+- LangGraph 기반 계층형 오케스트레이션: Coordinator → Planner → Generator → Evaluator
+- 프로덕션 기본 모델은 세 역할 모두 Claude Sonnet 4.5(스트리밍 신뢰 경로)이며, Opus는 주입 시 선택적으로 사용(스트리밍 메타호출 제약으로 기본은 Sonnet — `deps.py` 참조)
 - 워크플로당 반복 상한과 체크포인트 저장(재개 가능)
 - grounding gate, depth router 등으로 응답 신뢰도/깊이 조절
 
