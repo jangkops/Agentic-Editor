@@ -46,7 +46,7 @@ Mogam Works는 사내 30명 규모를 대상으로 만든 데스크톱 코드 �
 
 - **모든 LLM 호출은 자체 Bedrock Gateway 경유.** 앱은 AWS 자격증명을 어떤 파일에도 저장하지 않고, SSO로 받은 자격증명으로 요청을 SigV4 서명해 게이트웨이에 보냅니다. 게이트웨이가 사용자별(`BedrockUser-{이름}` IAM 역할) 허용 모델·한도·과금을 결정합니다.
 - **프로젝트 인식.** 열린 폴더를 로컬에서 인덱싱해(네트워크 없는 임베딩 + BM25) 질문과 관련된 코드 조각을 근거로 붙이고, 답변의 `파일:줄` 인용이 실제 근거와 맞는지 검증합니다.
-- **비차단 폴백.** 어떤 하위 기능이 실패해도 요청 전체가 죽지 않도록, 각 단계가 "실패를 값으로 돌려주고 다음 후보를 시도"합니다(대신 실패 신호가 묻히지 않도록 별도 대조 장치를 두는 방향으로 발전 중).
+- **비차단 폴백.** 어떤 하위 기능이 실패해도 요청 전체가 죽지 않도록, 각 단계가 "실패를 값으로 돌려주고 다음 후보를 시도"합니다. 대신 실패 신호가 묻히지 않도록, 요청이 끝날 때 `effect_ledger`가 "선언된 설정·의도"와 "실제 도구 호출"을 대조해 불일치를 `effectSummary` 이벤트로 드러냅니다.
 
 핵심 기능
 
@@ -56,7 +56,7 @@ Mogam Works는 사내 30명 규모를 대상으로 만든 데스크톱 코드 �
 | 에이전트 | 도구 12종(파일·셸·검색·이미지 생성/편집·PPTX/PDF/DOCX/XLSX·네이티브 다이어그램) + 리서치 도구 4종 |
 | 오케스트레이션 | LangGraph "그래프 속 그래프": Planner → 도메인 워커 5종 병렬 → Aggregate → Evaluator |
 | RAG | fastembed(ONNX, 다국어 MiniLM 384차원) + BM25 하이브리드, MMR 다양화, 인용·근거 검증 |
-| 딥리서치 | 웹·학술 provider 7종, 옵트인+동의 게이트, 하위 질의 분해 → 병렬 검색 → 중복 제거·재랭킹 → 인용 검증 → 심화 |
+| 딥리서치 | 웹 3종·학술 5종 provider 8종, 옵트인+동의 게이트, 하위 질의 분해 → 병렬 검색 → 중복 제거·재랭킹 → 인용 검증 → 심화 |
 | 문서 생성 | PPTX(편집 가능한 네이티브 도형 + HTML→PNG 고품질 베이크 하이브리드), PDF, DOCX, XLSX |
 | 이미지 | Bedrock 이미지 모델 병렬 best-of-N, 편집 10모드, Vertex AI 예외 경로 |
 | 원격 개발 | ssh2 기반 SFTP 파일·PTY 터미널·명령 실행, 호스트키 TOFU, 원격 엔진 자동 프로비저닝 |
@@ -101,7 +101,7 @@ Mogam Works는 사내 30명 규모를 대상으로 만든 데스크톱 코드 �
 │  Lambda Function URL: SSE 실시간 스트리밍                                           │
 │  ECS 워커 → Bedrock Runtime · S3 (비동기 잡 결과) · IAM BedrockUser-{name}           │
 └───────────────────────────────────────────────────────────────────────────────────┘
-외부(선택): Vertex AI(이미지, 키가 있을 때만) · 리서치 provider 7종(옵트인+동의) · mermaid.ink(다이어그램 PNG, 옵트아웃 가능)
+외부(선택): Vertex AI(이미지, 키가 있을 때만) · 리서치 provider 8종(옵트인+동의) · mermaid.ink(다이어그램 PNG, 옵트아웃 가능)
 ```
 
 ### 요청 한 건이 흐르는 순서 (채팅 → PPTX 생성 예)
@@ -160,7 +160,7 @@ START → planner ──Send×N (현재 Wave)──► coding | media | research
 - 도구 실행(`GatewayToolNode`): tool_calls를 **순차** 실행(부작용 경합 회피), MCP → 원격 브리지 → 로컬 `server._execute_tool` 순으로 디스패치. 미디어 도구 7종은 전역 세마포어 1개·600초로 직렬화(병렬 fan-out에서 동시 실행되면 워크스테이션이 포화되던 실측 대응).
 - 상태(`GraphState`) reducer 설계: 스칼라 채널은 last-wins(`_take_right`), 카운터(`refine_count`, `grounding_refine_count`)는 **단조 증가 MAX**, `verified_files`는 절대경로 기준 누적 dedup. 병렬 워커가 자기 substate를 그대로 되돌려주는 "echo" 때문에 last-wins 카운터가 0으로 리셋되어 무한 루프가 났던 결함을 MAX reducer로 막았고, 리스트인 `plan`은 `plan_dispatch`가 워커에 같은 값을 실어 보내 echo를 무해화합니다.
 - 모델 배분: 도메인 워커와 라우터는 사용자가 선택한 모델, Planner/Aggregate/Evaluator는 `deps.py` 기본값(Sonnet 4.5). 계획·평가 같은 "도구 강제 호출"은 `prefer_streaming`으로 스트리밍 경로를 우선 사용합니다(같은 호출 실측: 비스트리밍 35초 vs 스트리밍 7.6초).
-- SSE 브리지: `astream_events`를 `{text}`, `{tool,status}`, `agent_start/agent_done`, `verifiedFiles`, `searchStatus`, `heartbeat`(20초 무수신), `[DONE]`으로 변환. Python 3.14에서 스트림 루프 전체를 `wait_for`로 감싸면 취소 시 멈추는 현상 때문에 개별 이벤트 단위로만 타임아웃을 걸고 deadline은 수동 검사합니다(`.kiro/specs/langgraph-hierarchical-orchestrator/API_NOTES.md`).
+- SSE 브리지: `astream_events`를 `{text}`, `{tool,status}`, `agent_start/agent_done`, `verifiedFiles`, `searchStatus`, `effectSummary`(불일치 또는 외부 조회 관측 시 `[DONE]` 직전 1회), `heartbeat`(20초 무수신), `[DONE]`으로 변환. Python 3.14에서 스트림 루프 전체를 `wait_for`로 감싸면 취소 시 멈추는 현상 때문에 개별 이벤트 단위로만 타임아웃을 걸고 deadline은 수동 검사합니다(`.kiro/specs/langgraph-hierarchical-orchestrator/API_NOTES.md`).
 - 체크포인터는 저장 직전 값 안에 `AKIA|ASIA`+16자 패턴이 있으면 저장을 거부합니다(자격증명 유출 방지).
 
 **왜 이렇게 했나.** 요청별 고유 `thread_id`를 써서 체크포인터와 대화 메모리가 이중으로 맥락을 싣지 않게 했고, 그래프 구조를 바꾸는 플래그(`AE_ENABLE_DAG_PLANNER`, `AE_ENABLE_EVALUATOR`)는 조립 시 1회만 읽어 실행 중 구조가 변하지 않습니다.
@@ -191,7 +191,7 @@ START → planner ──Send×N (현재 Wave)──► coding | media | research
    bm25_norm  = BM25(q, d) / max(BM25)            # k1=1.5, b=0.75
    cos        = cosine(E(q), E(d))                 # 임베딩 차원이 맞을 때만
    score(d)   = (1 − α)·bm25_norm + α·cos          # 기본 weighted, α = 0.5
-              또는 AE_FUSION=rrf 이면 RRF(d) = Σ_r 1/(60 + rank_r(d)) 를 max 정규화
+              (선택 파이프라인 AE_RETRIEVAL_PIPELINE=1 에서 AE_FUSION=rrf 이면 RRF(d) = Σ_r 1/(60 + rank_r(d)) 를 max 정규화)
    → 파일 필터(산출물·캐시 제외) → score ≥ 임계값
    → (탐색형) MMR: argmax λ·score(d) − (1−λ)·max_{s∈선택} cos(d, s)
    → 상위 8개
@@ -200,6 +200,30 @@ START → planner ──Send×N (현재 Wave)──► coding | media | research
 6. **선택 고급 파이프라인**(`AE_RETRIEVAL_PIPELINE=1`, 게이트웨이 필요): 질의가 짧거나 모호하면 HyDE·동의어로 최대 5개 확장 → 후보 40개 → 다중 질의는 RRF로 합침 → LLM 리랭크(인덱스 배열 JSON, 누락은 원순서 보존) → 8개.
 
 **왜 이렇게 했나.** 게이트웨이 정책상 `BedrockUser`는 `/converse`만 호출할 수 있어 Titan 임베딩을 쓸 수 없었고, 그래서 임베딩을 전부 로컬 CPU에서 처리합니다. 하이브리드 가중 α=0.5는 30개 질의 골든 셋에서 MRR 0.872 → 0.919로 개선된 실측값이며, MMR의 관련성 항을 벡터 유사도가 아닌 하이브리드 점수로 바꾼 것은 정확 키워드 질의의 MRR이 급락했던 회귀의 수정입니다. 배포본에서 ONNX 로드에 실패하면 어휘 검색으로 조용히 떨어지는 대신 LSA로 의미 검색을 유지합니다(0.5.4 릴리스 노트).
+
+**임베딩과 fastembed가 무엇인지 (입문자용).** "임베딩"은 문장을 숫자 벡터로 바꾸는 일입니다. 이 프로젝트에서는 코드 청크 하나(60줄 안팎)가 **실수 384개**로 표현되고, 뜻이 비슷한 문장은 벡터 공간에서 가까운 방향을 가리킵니다. 두 벡터의 코사인 유사도(−1~1, 1이면 방향이 같음)가 "의미상 얼마나 가까운가"의 점수가 됩니다. 이 덕분에 한국어로 "파일 저장하는 함수 어디야"라고 물어도 영어 식별자 `saveFile`이 든 코드가 검색됩니다.
+
+- **fastembed**는 벡터 DB 회사 Qdrant가 공개한 **오픈소스(Apache-2.0)** Python 라이브러리입니다([github.com/qdrant/fastembed](https://github.com/qdrant/fastembed), 설치 버전 0.8.0). 무거운 PyTorch 대신 **ONNX Runtime**(학습된 모델을 프레임워크 독립 형식으로 저장한 것을 CPU에서 실행, 설치 버전 1.27)으로 미리 변환된 모델을 돌리므로 설치가 가볍고 사내 워크스테이션 CPU에서 동작합니다. 이 프로젝트는 `pip install -r ai_engine/requirements.txt`(`fastembed>=0.8.0`)로 가져옵니다.
+- **모델**은 sentence-transformers 프로젝트의 `paraphrase-multilingual-MiniLM-L12-v2`(Apache-2.0)입니다. 12층 MiniLM을 영어 문장 유사도 모델에서 다국어(한국어 포함)로 증류한 것으로 출력 384차원입니다. fastembed는 첫 사용 시 Hugging Face Hub의 Qdrant 미러 저장소 `qdrant/paraphrase-multilingual-MiniLM-L12-v2-onnx-Q`에서 양자화된 ONNX 파일(`model_optimized.onnx`, 약 0.22GB)을 내려받아 캐시합니다. 우리 코드는 캐시 위치를 `명시 인자 → AE_FASTEMBED_CACHE → 동결 실행파일 옆 fastembed_models/ → fastembed 기본 캐시` 순으로 정하고([embedder.py#L400-L445](ai_engine/rag/embedder.py#L400-L445), [#L383-L397](ai_engine/rag/embedder.py#L383-L397)), 배포 빌드는 `scripts/build-python.js`가 모델을 미리 내려받아 실행파일 옆에 번들해 사내망에서도 다운로드 없이 동작합니다([build-python.js#L68-L74](scripts/build-python.js#L68-L74)).
+- fastembed 초기화가 실패하면 **LSA**로 내려갑니다([embedder.py#L290-L370](ai_engine/rag/embedder.py#L290-L370)): scikit-learn TF-IDF(1~2gram, 어휘 4,096) 행렬을 TruncatedSVD로 256차원에 투영한 것으로, 의미 검색 품질은 낮지만 외부 파일 없이 동작합니다. 어느 쪽이든 벡터는 numpy 행렬로 저장하고 코사인 유사도로 검색합니다([embedder.py#L96-L119](ai_engine/rag/embedder.py#L96-L119), 유사도 0.1 이하는 버림).
+
+**검색 알고리즘 상세 (코드 링크).**
+
+| 단계 | 구현 | 코드 |
+|---|---|---|
+| 토큰화 | 소문자화 후 `[a-z_][a-z0-9_]*`(식별자) 또는 `[가-힣]+`(한글 어절)만 토큰으로 인정. 숫자로 시작하는 토큰과 기호는 버림 | [indexer.py#L169-L171](ai_engine/rag/indexer.py#L169-L171), [hybrid_search.py#L59-L61](ai_engine/rag/hybrid_search.py#L59-L61) |
+| 청킹 | 함수·클래스 경계 정규식으로 분할, 경계가 없으면 60줄 창·10줄 오버랩. 500KB 초과 파일 스킵, 전체 20,000청크 상한 | [indexer.py#L105-L168](ai_engine/rag/indexer.py#L105-L168) |
+| BM25 | 질의 토큰 t마다 `idf = ln((N − df + 0.5)/(df + 0.5) + 1)`, `tf' = tf·(k1+1) / (tf + k1·(1 − b + b·dl/avgdl))`, 문서 점수 = Σ idf·tf'. k1=1.5, b=0.75(표준 기본값). 후보 풀은 top_k×4 | [hybrid_search.py#L12-L57](ai_engine/rag/hybrid_search.py#L12-L57) |
+| 벡터 점수 | 질의 임베딩과 청크 임베딩의 코사인 유사도(L2 정규화 후 내적) | [embedder.py#L112-L119](ai_engine/rag/embedder.py#L112-L119) |
+| 융합 | `score = 0.5·bm25/max(bm25) + 0.5·cos`. α=0.5는 호출부가 지정하며 클래스 기본값 0.6과 다름. 질의 임베딩 차원이 캐시와 다르면 벡터 항을 끄고 BM25만 사용 | [hybrid_search.py#L113-L158](ai_engine/rag/hybrid_search.py#L113-L158), [context_builder.py#L51-L53](ai_engine/rag/context_builder.py#L51-L53) |
+| 필터·임계 | 산출물·캐시 파일 제외 → 점수 < 임계(특정 조회형 0.1, 그 외 0.05) 제거 | [hybrid_search.py#L160-L167](ai_engine/rag/hybrid_search.py#L160-L167), [context_builder.py#L223-L235](ai_engine/rag/context_builder.py#L223-L235) |
+| MMR | 탐색형 질의만: 이미 뽑은 청크와 코사인이 높은 후보에 감점해 다양성 확보. `λ·relevance − (1−λ)·max cos(선택)`, λ 0.4(탐색형)/0.7(그 외) | [hybrid_search.py#L172-L250](ai_engine/rag/hybrid_search.py#L172-L250) |
+| RRF(선택) | 여러 순위 리스트를 `Σ 1/(60 + rank)`로 합침. `AE_RETRIEVAL_PIPELINE=1` 경로에서 `AE_FUSION=rrf`일 때만 | [hybrid_search.py#L254-L290](ai_engine/rag/hybrid_search.py#L254-L290) |
+| 컨텍스트 조립 | 상위 8개를 `### 파일:L시작-끝, score:` 헤더와 코드펜스로 24,000자 예산 안에 삽입 | [context_builder.py#L171-L300](ai_engine/rag/context_builder.py#L171-L300) |
+
+**이 검색이 얼마나 믿을 만한가.**
+- 측정된 것: [scripts/rag_benchmark.py](scripts/rag_benchmark.py)가 이 저장소 코드를 대상으로 만든 **한↔영 질의 30개(10범주)** 골든 셋으로 recall@k·MRR·context_precision([eval_metrics.py#L11-L76](ai_engine/rag/eval_metrics.py#L11-L76))을 잽니다. 이 벤치에서 α=0.5가 MRR 0.872→0.919(recall 1.0 유지)로 최적이었고, MMR λ=0.7이 0.5보다 precision·MRR에서 앞섰습니다([context_builder.py#L51](ai_engine/rag/context_builder.py#L51), [hybrid_search.py#L100-L102](ai_engine/rag/hybrid_search.py#L100-L102)).
+- 한계: 골든 셋이 저자가 이 저장소 하나로 만든 30개라 다른 프로젝트·다른 언어 분포에서의 성능은 보장하지 않으며, 외부 표준 벤치마크 수치는 없습니다. 검색은 "관련 코드 후보"를 제시할 뿐 정답을 보장하지 않으므로, 답변 단계에서 3.4의 검증 층이 근거 일치 여부를 다시 확인합니다.
 
 **관련 파일.** `ai_engine/rag/{indexer,embedder,hybrid_search,context_builder,retrieval_pipeline,query_expansion,reranker}.py`, 벤치마크 `scripts/rag_benchmark.py`, 스펙 `.kiro/specs/rag-answer-quality/`.
 
@@ -213,18 +237,36 @@ START → planner ──Send×N (현재 Wave)──► coding | media | research
 
 **대화 메모리(`conversation_memory.py`).** 최근 10개 메시지를 20,000자 예산 안에서 역순 선택(메시지당 2,000자, 이미지 블록 5개)하고 Bedrock의 user/assistant 교대 규칙을 정리합니다. 12개 이상 쌓이면 Haiku 4.5로 3,000자 요약 + 핵심 사실 10개를 체크포인트로 만들어 첫 user 메시지에 주입합니다. 렌더러는 별도로 16개 메시지 또는 60,000자를 넘으면 `POST /api/conversation/handoff`로 요약을 받아 새 세션에서 이어갑니다.
 
+**판정 알고리즘 상세 (코드 링크).**
+
+| 판정 | 무엇을 어떻게 재나 | 코드 |
+|---|---|---|
+| 인용 검증 | 정규식 `([A-Za-z0-9_./-]+\.[A-Za-z0-9_]+):(\d+)(?:-(\d+))?`로 답변 속 `파일:줄` 인용을 뽑아, 이번 검색이 실제로 가져온 청크의 (파일, 줄 범위)와 겹치면 verified, 아니면 unverified | [citation.py#L15-L17](ai_engine/rag/citation.py#L15-L17), [#L72-L97](ai_engine/rag/citation.py#L72-L97) |
+| 로컬 grounding | 답변을 문장 최대 40개로 나눠 각 문장 벡터와 근거 청크 벡터들의 **최대 코사인**을 구하고 평균(0~1). LLM 호출 없음 | [verifier.py#L126-L174](ai_engine/rag/verifier.py#L126-L174) |
+| LLM 충실도 | 근거 12,000자와 답변 8,000자를 "엄격한 사실 검증자" 프롬프트로 게이트웨이 모델(기본 Sonnet 4.5)에 보내 `SCORE: 0.0~1.0`과 `FEEDBACK`을 받음. 형식이 깨지면 0.5로 간주, 10초(`AE_VERIFY_TIMEOUT_MS`) 초과·예외면 `degraded=true` | [verifier.py#L22-L47](ai_engine/rag/verifier.py#L22-L47), [answer_quality.py#L102-L160](ai_engine/rag/answer_quality.py#L102-L160) |
+| 실행 모드 | 기본 deferred: `[DONE]` 뒤 백그라운드(120초 예산)로 계산하고 클라이언트가 `GET /api/answer-quality`를 폴링. `AE_VERIFY_MODE=inline`이면 응답 끝에서 동기 대기 | [answer_quality.py#L163-L205](ai_engine/rag/answer_quality.py#L163-L205) |
+| 재생성 트리거 | 충실도가 `AE_VERIFY_THRESHOLD`(0.7) 미달이면 교정 재생성 후보. 점수 없음·degraded면 재생성하지 않음(비차단) | [answer_quality.py#L207-L215](ai_engine/rag/answer_quality.py#L207-L215) |
+| Evaluator(그래프) | 워커 산출물을 보고 `submit_evaluation{achieved, reason, missing_domains}` 도구를 강제 호출(300초). 미달이면 재계획(최대 2회). 상한 도달·게이트웨이 부재·파싱 실패·타임아웃은 모두 `achieved=True` | [supervisor.py#L1043-L1150](ai_engine/agent_system/supervisor.py#L1043-L1150), [#L587-L650](ai_engine/agent_system/supervisor.py#L587-L650) |
+| 실행 계약 요약 | 요청 끝에 선언(리서치 옵트인·조사 의도 등)과 관측(검색 호출·provider·결과 수)을 대조해 불일치를 `effectSummary`로 방출 | [effect_ledger.py#L307-L330](ai_engine/agent_system/effect_ledger.py#L307-L330), [sse_bridge.py#L276-L292](ai_engine/agent_system/sse_bridge.py#L276-L292) |
+
+**이 판정이 얼마나 믿을 만한가.**
+- **결정론적인 것**: 인용 검증과 `verifiedFiles`는 정규식·디스크 실측이라 재현 가능합니다. 단 인용 정규식은 `127.0.0.1:8765` 같은 `호스트:포트`나 `v1.2:3` 같은 버전 표기도 인용으로 오인하므로 unverified 비율이 실제보다 높게 나올 수 있습니다.
+- **근사치인 것**: grounding 점수는 함의(entailment) 판단이 아니라 임베딩 유사도의 하한 근사입니다. 근거를 그대로 옮긴 문장은 높게, 근거에서 올바르게 추론한 문장도 낮게 나올 수 있고, LSA 폴백 환경에서는 더 거칩니다.
+- **LLM 자기 판정인 것**: 충실도 점수와 Evaluator의 `achieved`는 같은 계열 모델의 1회 판단이며 교차 검증이 없습니다. 둘 다 **비차단·관대한 방향**으로 설계되어 타임아웃·파싱 실패·게이트웨이 부재 시 각각 `degraded`와 `achieved=True`로 귀결됩니다. 즉 "검증 통과"는 "정답 보장"이 아니라 "실패 신호가 없었다"에 가깝습니다. 게이트웨이 모델 호출이 실측 110~285초까지 걸리는 경우가 있어 deferred가 기본이고, 그동안 UI는 `qualityPending` 상태를 보입니다.
+- **측정되지 않은 것**: 검색 품질은 30개 골든 셋으로만 측정됐고, 판정 층(grounding·충실도·Evaluator)의 정확도를 사람 라벨과 비교한 수치는 저장소에 없습니다. 답변을 얼마나 믿을지는 사용자가 `verifiedFiles`·인용 표시·`effectSummary`를 보고 판단해야 합니다.
+
 **관련 파일.** `ai_engine/rag/{answer_quality,citation,verifier,gw_text,quality_store,conversation_memory}.py`.
 
 ### 3.5 Deep Research 엔진
 
 **한 줄 요약.** 외부 웹·학술 검색을 **사용자가 켜고(옵트인) 동의했을 때만** 수행하며, 질문을 하위 질의로 나눠 병렬 검색 → 중복 제거 → 순위 융합 → 본문 수집 → 인용 포함 리포트 → 인용 검증 → 부족하면 심화 조사의 루프를 돕니다.
 
-**무엇을 썼나.** `httpx`(패키지 안에서 유일한 네트워크 출구는 `backend.py` 한 파일), provider 어댑터 7종, RRF와 권위도 계산은 순수 함수. LLM은 Planner(하위 질의 분해)와 Generator(리포트 작성) 두 곳에서만, 모두 게이트웨이 경유.
+**무엇을 썼나.** `httpx`(패키지 안에서 유일한 네트워크 출구는 `backend.py` 한 파일), provider 어댑터 8종, RRF와 권위도 계산은 순수 함수. LLM은 Planner(하위 질의 분해)와 Generator(리포트 작성) 두 곳에서만, 모두 게이트웨이 경유.
 
 | 축 | provider | 키 |
 |---|---|---|
 | 웹 | Tavily(키리스 모드 `X-Tavily-Access-Mode: keyless`), Exa, Brave | Exa·Brave만 키 필수 |
-| 학술 | Semantic Scholar(키 선택), OpenAlex, arXiv(Atom), PubMed(ESearch→EFetch) | 전부 키리스 동작 |
+| 학술 | Semantic Scholar(키 선택), OpenAlex, arXiv(Atom), PubMed(ESearch→EFetch), Europe PMC(생의학 문헌, 키리스) | 전부 키 없이 동작. **기본 활성은 OpenAlex·Europe PMC 둘**(Semantic Scholar는 키 없이 429가 잦아 기본에서 제외, 설정으로 켤 수 있음) |
 
 키는 환경변수(`TAVILY_API_KEY`, `EXA_API_KEY`, `BRAVE_API_KEY`, `SEMANTIC_SCHOLAR_API_KEY`)로만 읽고 파일에 저장하지 않습니다. Electron 쪽은 키를 OS 키체인(`safeStorage`)으로 암호화해 `userData/settings/research-credentials.json`에 암호문만 두고, 실행 시 `POST /api/research/credentials`로 사이드카 프로세스 환경에만 주입합니다. 렌더러는 키가 "있다/없다"만 봅니다.
 
@@ -247,6 +289,8 @@ START → planner ──Send×N (현재 Wave)──► coding | media | research
 10. `userData/research/{session}/report.{json,md}` 원자적 저장.
 
 경량 도구 `web_search`/`search_papers`/`fetch_content`는 딥리서치 없이 단발 검색을 제공하며, 여러 provider 결과를 RRF로 융합하고 `recency_days`가 있으면 최신성 필터를 적용합니다. 검색 시작·종료는 `searchStatus` SSE로 채팅 옆 인디케이터에 "어느 provider에 어떤 질의 요약을 보냈는지"만 표시합니다(개별 URL·키는 표시하지 않음).
+
+셸 도구 `run_command`는 이 게이트 **밖**에 있습니다. 모델이 `curl` 등으로 외부에 직접 나가면 서버는 명령을 막지 않고 신호·대상 호스트·게이트 상태만 감사 로그로 남깁니다(명령 원문은 기록하지 않음, [server.py#L10196-L10225](ai_engine/server.py#L10196-L10225)). 셸을 막으면 npm·git·pip이 함께 죽기 때문에 차단 대신 가시성을 택했습니다.
 
 **관련 파일.** `ai_engine/research/{backend,providers,normalize,dedup,rank,deep_research,models,config,security,eval_harness}.py`, `agent_system/subgraphs/research.py`, `src/components/{research-settings,search-indicator,research-panel}.js`, `electron/core/research-credentials.js`, 스펙 `.kiro/specs/deep-research-engine/`.
 
@@ -392,16 +436,19 @@ NO_RELOAD=1 npm run dev # 서버 auto-reload 끄기
 | | `AE_MAX_TOKENS` | 64000 | maxTokens 상한 |
 | 오케스트레이터 | `AE_LANGGRAPH` / `AE_LANGGRAPH_PARALLEL` | on / on | LangGraph 경로 / 병렬 그래프 |
 | | `AE_ENABLE_DAG_PLANNER` / `AE_ENABLE_EVALUATOR` | on / on | DAG 계획 / 평가 노드 |
-| | `AE_MAX_REFINE` / `AE_MAX_PARALLEL_TASKS` / `AE_MAX_ROUTE_HOPS` | 2 / 4 / 4 | 재계획 상한 / 동시 작업 / 순차 홉 |
+| | `AE_MAX_REFINE` | 2 (재계획) / 1 (grounding refine) | **같은 이름을 두 곳이 다른 기본값으로 읽음**: Evaluator 재계획 상한(`supervisor.py`)과 grounding refine 상한(`nodes/verify.py`). 한쪽을 바꾸면 다른 쪽도 바뀜 |
+| | `AE_MAX_PARALLEL_TASKS` / `AE_MAX_ROUTE_HOPS` | 4 / 4 | 동시 작업 / 순차 홉 |
 | | `AE_GRAPH_TOTAL_TIMEOUT` / `AE_MODEL_NODE_TIMEOUT` / `AE_MEDIA_TOOL_TIMEOUT` | 1800 / 300 / 600초 | |
 | | `AE_ENABLE_ADAPTIVE_DEPTH` / `AE_ENABLE_GROUNDING_GATE` / `AE_MCP_ENABLED` | off | 단순 질의 fast path / 근거 게이트 / MCP 도구 |
 | RAG | `AE_EMBED_PROVIDER` / `AE_EMBED_MODEL` | fastembed / MiniLM-L12-v2 | 임베딩 |
 | | `AE_EMBED_FALLBACK` / `AE_LSA_COMPONENTS` | lsa / 256 | 폴백 |
-| | `AE_RAG_MAX_CHUNKS` / `AE_TOP_K` / `AE_FUSION` | 20000 / 8 / weighted | 색인 상한 / 반환 수 / 융합 방식(rrf 선택) |
+| | `AE_RAG_MAX_CHUNKS` | 20000 | 색인 청크 상한 |
+| | `AE_FUSION` | weighted | `AE_RETRIEVAL_PIPELINE=1` 경로에서만 읽힘(rrf 선택). 기본 경로는 항상 weighted |
+| | `AE_TOP_K` | (무효) | 코드가 기본 경로·파이프라인 경로 모두 8로 고정해 현재 효력 없음 |
 | | `AE_RETRIEVAL_PIPELINE` / `AE_QUERY_EXPAND` / `AE_RERANK` | off | 고급 파이프라인 |
 | | `AE_ANSWER_QUALITY` / `AE_VERIFY` / `AE_VERIFY_MODE` | on / on / deferred | 응답 검증 |
 | 리서치 | `AE_ENABLE_WEB_RESEARCH` / `AE_RESEARCH_CONSENT` | off / off | 옵트인 / 동의 (둘 다 필요) |
-| | `AE_RESEARCH_WEB_PROVIDERS` / `AE_RESEARCH_ACADEMIC_PROVIDERS` | tavily,exa,brave / semantic_scholar,openalex | |
+| | `AE_RESEARCH_WEB_PROVIDERS` / `AE_RESEARCH_ACADEMIC_PROVIDERS` | tavily,exa,brave / openalex,europepmc | 학술 기본은 키 없이 안정 응답하는 둘. semantic_scholar·arxiv·pubmed는 값에 넣으면 사용 |
 | | `AE_RESEARCH_MAX_SUBQUERIES` / `AE_MAX_DEEPENING` | 8 / 3 | |
 | | `TAVILY_API_KEY` `EXA_API_KEY` `BRAVE_API_KEY` `SEMANTIC_SCHOLAR_API_KEY` | — | 앱이 런타임에 주입 |
 | 문서·이미지 | `AE_HYBRID_RENDER` | on ("0"만 off) | PPTX 하이브리드 편집 경로 |
@@ -454,6 +501,7 @@ NO_RELOAD=1 npm run dev # 서버 auto-reload 끄기
 | 도구 | `{"tool": "read_file", "status": "running|done", "durationMs": n}` | run-agent, graph-stream(MCP 도구) |
 | 서브그래프 | `{"type": "agent_start", "taskId": "media"}` → 작업 후 `{"type": "agent_done"}` | graph-stream |
 | 산출물 | `{"verifiedFiles": [{"path","absPath","tool"}]}` | 디스크 실측 후 |
+| 실행 계약 요약 | `{"effectSummary": {...}}` — 선언 vs 관측 불일치 목록과 외부 조회 통계 | graph-stream, `[DONE]` 직전 최대 1회, 불일치가 있거나 외부 조회 활동이 관측됐을 때만 |
 | 검색 상태 | `{"searchStatus": {"phase": "start|end", "kind": "web|academic|…", "providers": [이름만], "query_summary": "...", "status"?: "ok|error"}}` | graph-stream(리서치 도구) |
 | 응답 검증 | `{"answerQuality": {...}}` / `{"qualityPending": id}` | run-stream, run-agent |
 | 라우팅 | `{"model_routing": {...}}` | run-agent, run-orchestrated |
@@ -510,8 +558,9 @@ agentic-editor/
   source ai_engine/.venv/bin/activate
   pytest scripts/ -q          # scripts/conftest.py가 Vertex·외부 호출을 끕니다(헤르메틱)
   pytest tests/unit -q        # ai_engine 단위 테스트
-  npm run test:e2e            # Playwright(tests/e2e)
+  npm run test:e2e            # Playwright(tests/e2e) — 아래 주의 참고
   ```
+  주의: `tests/e2e/test_editor.py`·`test_startup.py`는 코드가 아닌 산문 플레이스홀더라 `pytest tests/e2e/`를 통째로 돌리면 수집 단계에서 SyntaxError로 중단됩니다. 파일 단위(`pytest tests/e2e/test_research_settings_ui.py`)로 실행하거나 두 파일을 `--ignore`하세요. `scripts/test_test_hygiene_no_module_global_clobber.py`는 테스트가 import 시점에 다른 모듈의 전역을 덮어쓰는지 AST로 검사하는 위생 가드입니다.
 - **산출물 감사**: `scripts/audit_pptx_native_density.py`, `audit_pptx_textbox_overlap.py` 등이 생성된 PPTX의 밀도·겹침·경계를 기계 판정합니다. `scripts/eval_research_quality.py`는 골든 셋 대비 리서치 품질 회귀를 검사합니다.
 - **스펙 기반 개발(`.kiro/specs/`)**: 기능마다 `requirements.md`(EARS 형식) → `design.md`(Correctness Properties 포함) → `tasks.md`(체크박스, `*`는 선택 테스트) 순서로 진행합니다. 버그 수정 스펙은 `bugfix.md`와 3단 테스트(`*_bug_condition`: 수정 전 실패해야 함 → `*_fix_pbt`: 수정 후 통과 → `*_preservation_pbt`: 기존 동작 보존)를 씁니다.
 - CI(`.github/workflows/release.yml`)는 태그 `v*` 푸시 시 macOS/Windows 매트릭스에서 필수 모듈 import 게이트 → PyInstaller 동결 → electron-builder 빌드를 수행합니다(테스트 실행 스텝은 아직 없음, 11장).
@@ -541,7 +590,8 @@ DMG와 `scripts/install-mac.command`를 같은 폴더에 두고 스크립트를 
 - **원격 SSH**: 파일·터미널·명령 실행은 동작하지만, 원격 `ai_engine`으로의 로컬 포트 포워딩은 현재 빌드에서 동작하지 않아 **AI 엔진은 항상 로컬에서 실행**됩니다. 자동 재연결은 미구현이며 끊김 시 로컬로 폴백합니다.
 - **effort(추론 강도) 컨트롤**: 카탈로그에 effort 계약이 선언된 모델에서만 표시됩니다. 현재 운영자 카탈로그에는 선언이 없어 UI가 나타나지 않습니다.
 - **기본 채팅 경로(graph-stream)**: `thinking`·`answerQuality` SSE는 아직 `run-stream`/`run-agent`에서만 방출됩니다.
-- **Python 버전**: 개발·검증은 3.14에서 이루어졌습니다. `server.py`의 `Optional` 타입 import 누락 때문에 3.12/3.13에서는 기동에 실패하며 수정 예정입니다(3.14는 지연 평가로 통과).
+- **Python 버전**: 개발·검증은 3.14에서 이루어졌습니다. 3.12/3.13에서 import를 막던 `typing.Optional` 누락은 고쳤지만, 3.11~3.13에서의 실제 기동은 아직 검증하지 않았습니다.
+- **테스트 잔재**: `tests/e2e/test_editor.py`·`test_startup.py`는 산문 플레이스홀더라 `pytest tests/e2e/` 전체 실행이 수집 단계에서 실패하고, `tests/unit/utils.test.js`는 Jest 형식이 아니라(`process.exit` 직접 호출) suite 하나가 항상 실패로 집계됩니다. 정리 예정입니다.
 - **테스트 자동화**: `npm test`는 `tests/unit` JS만 실행하고, `scripts/test_*.py`는 수동 실행 자산입니다. 릴리스 CI에는 테스트 스텝이 없습니다.
 - **모델**: Claude Opus 계열은 게이트웨이 스트리밍 경로에서 지원되지 않아 계획·평가 노드에는 Sonnet 4.5를 사용합니다.
 - **오프라인**: Monaco 에디터는 CDN에서 로드되므로 오프라인에서는 에디터가 뜨지 않습니다.
@@ -555,6 +605,7 @@ DMG와 `scripts/install-mac.command`를 같은 폴더에 두고 스크립트를 
 - **게이트웨이 전용**: LLM 호출은 `GatewayClient`만 경유. 직접 SDK(boto3 bedrock-runtime, anthropic, openai) 사용 금지. 예외는 이미지 생성의 Vertex AI 한 곳.
 - **자격증명 비저장**: AWS 자격증명은 어떤 파일에도 쓰지 않고 런타임 주입·assume-role만. 리서치 키는 OS 키체인 암호문만 저장. 체크포인트 저장 전 키 패턴 검사.
 - **비차단 폴백**: 하위 실패는 값으로 표현하고 다음 후보로 넘어간다. 대신 요청 종료 시 "선언(설정·의도) vs 관측(실제 도구 호출)"을 대조해 조용한 무동작을 표면화한다(`effect_ledger.py`).
+- **외부 egress 가시성**: 리서치 도구는 옵트인·동의 게이트를 지키지만 셸 도구는 그 게이트 밖에 있다. 그래서 `run_command`가 외부 네트워크 신호를 보이면 차단하는 대신 신호·대상 호스트·게이트 상태만 로그에 남긴다(명령 원문 미기록). 셸을 막으면 npm·git·pip이 죽기 때문이다.
 - **손실-0 · 바이트 보존**: 생성된 이미지는 어떤 분기에서도 폐기하지 않고, 새 렌더 기능은 no-op 기본값으로만 추가해 기존 산출물이 바이트 단위로 동일하게 유지되도록 한다.
 - **콘텐츠 텍스트는 이미지로 굽지 않는다**: 편집 가능성 우선. 외부 URL은 HTML 슬라이드에 절대 넣지 않는다.
 - **실측 근거를 남긴다**: 타임아웃·동시성·모델 선택 같은 수치는 재현한 사고나 벤치마크와 함께 주석에 기록한다("동시 캡처 20개 이상에서 프레임 드롭, macOS Sonoma+M2 실측" 등).
