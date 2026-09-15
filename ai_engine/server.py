@@ -8707,6 +8707,28 @@ async def extract_zip_attachment(request: Request):
         return JSONResponse({"error": str(e)[:200]}, status_code=500)
 
 
+# 메인 프로세스가 /api/reset-cache 로 주입한 카탈로그 조회용(base SSO) 자격증명. 렌더러는 더 이상
+# /api/models 에 비밀을 보내지 않으므로 여기서 profile 별로 보관해 list_foundation_models 에 쓴다.
+# (BedrockUser assume-role 자격증명은 카탈로그 조회 권한이 없을 수 있어 base 자격증명을 따로 둔다.)
+_CATALOG_CREDS: dict = {}
+
+
+def _resolve_catalog_credentials(body, profile: str):
+    """POST body 의 명시 자격증명 > 메인이 주입한 카탈로그 자격증명 > None(boto3 프로파일 폴백).
+
+    순수 함수: (profile, creds_override) 를 돌려준다. body 가 profile 을 지정하면 그것을 우선한다.
+    """
+    creds_override = None
+    if isinstance(body, dict):
+        if body.get("profile"):
+            profile = str(body.get("profile"))
+        if body.get("accessKeyId"):
+            creds_override = body
+    if creds_override is None:
+        creds_override = _CATALOG_CREDS.get(profile)
+    return profile, creds_override
+
+
 @app.post("/api/reset-cache")
 async def reset_cache(request: Request):
     """Gateway 클라이언트 캐시 초기화 + 선택적 자격증명 주입."""
@@ -8728,6 +8750,13 @@ async def reset_cache(request: Request):
         if creds and creds.get("AWS_ACCESS_KEY_ID"):
             profile = body.get("profile", "bedrock-gw")
             user = body.get("bedrockUser", "")
+            # 카탈로그 조회(/api/models)용 base SSO 자격증명 — assume-role 성공 여부와 무관하게 보관.
+            _CATALOG_CREDS[profile] = {
+                "accessKeyId": creds["AWS_ACCESS_KEY_ID"],
+                "secretAccessKey": creds["AWS_SECRET_ACCESS_KEY"],
+                "sessionToken": creds.get("AWS_SESSION_TOKEN", ""),
+                "region": creds.get("AWS_DEFAULT_REGION", "us-west-2"),
+            }
             # 새 GatewayClient 생성 후 자격증명 주입
             from ai_engine.gateway_module import GatewayClient
             gw = GatewayClient(
@@ -9189,11 +9218,11 @@ async def list_models(request: Request):
     if request.method == "POST":
         try:
             body = await request.json()
-            if body.get("accessKeyId"):
-                creds_override = body
-                profile = body.get("profile", profile)
         except Exception:
-            pass
+            body = None
+        profile, creds_override = _resolve_catalog_credentials(body, profile)
+    else:
+        _, creds_override = _resolve_catalog_credentials(None, profile)
     
     try:
         import boto3

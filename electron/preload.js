@@ -68,7 +68,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // SSO
   listProfiles: () => ipcRenderer.invoke('sso:list-profiles'),
   ssoLogin: (profile) => ipcRenderer.invoke('sso:login', profile),
-  getCredentials: (profile) => ipcRenderer.invoke('sso:get-credentials', profile),
+  getCredentials: (profile, opts) => ipcRenderer.invoke('sso:get-credentials', profile, opts),
   getBedrockUsername: (profile) => ipcRenderer.invoke('sso:get-bedrock-username', profile),
   verifyBedrockUsername: (profile, name) => ipcRenderer.invoke('sso:verify-bedrock-username', profile, name),
   getSSOExpiry: (profile) => ipcRenderer.invoke('sso:get-expiry', profile),

@@ -126,6 +126,7 @@ Mogam Works는 사내 데스크톱 코드 에디터입니다. Monaco 에디터�
 
 **어떻게 동작하나.**
 - 인증: SSO 자격증명 → (`bedrockUser`가 있으면) `arn:aws:iam::{account}:role/BedrockUser-{이름}`을 assume → 5분 캐시. API Gateway 요청은 서비스 `execute-api`, Lambda Function URL 요청은 서비스 `lambda`로 SigV4 서명.
+- 자격증명 경로: SSO 자격증명은 **메인 프로세스**가 `sso:get-credentials` 처리 중 사이드카 `/api/reset-cache`로 직접 주입하고([ipc-sso-handlers.js](electron/src/ipc-sso-handlers.js)), 렌더러에는 `{ok, injected, profile, region}`만 돌려줍니다. 렌더러 소스에 자격증명 필드가 없다는 사실은 `tests/unit/renderer-no-secrets.test.js`가 강제합니다. 같은 자격증명·같은 사이드카에는 1분 안에 다시 주입하지 않고, 로그인·토큰 만료·프로파일 전환 시에는 `force`로 다시 주입합니다. `/api/models`는 이때 함께 보관된 SSO 자격증명으로 카탈로그를 조회하므로 렌더러가 비밀을 보낼 필요가 없습니다.
 - 라우트 4종:
 
   | 라우트 | 용도 | 핵심 규칙 |
@@ -218,7 +219,7 @@ START → planner ──Send×N (현재 Wave)──► coding | media | research
 | 융합 | `score = 0.5·bm25/max(bm25) + 0.5·cos`. α=0.5는 호출부가 지정하며 클래스 기본값 0.6과 다름. 질의 임베딩 차원이 캐시와 다르면 벡터 항을 끄고 BM25만 사용 | [hybrid_search.py#L113-L158](ai_engine/rag/hybrid_search.py#L113-L158), [context_builder.py#L51-L53](ai_engine/rag/context_builder.py#L51-L53) |
 | 필터·임계 | 산출물·캐시 파일 제외 → 점수 < 임계(특정 조회형 0.1, 그 외 0.05) 제거 | [hybrid_search.py#L160-L167](ai_engine/rag/hybrid_search.py#L160-L167), [context_builder.py#L223-L235](ai_engine/rag/context_builder.py#L223-L235) |
 | MMR | 탐색형 질의만: 이미 뽑은 청크와 코사인이 높은 후보에 감점해 다양성 확보. `λ·relevance − (1−λ)·max cos(선택)`, λ 0.4(탐색형)/0.7(그 외) | [hybrid_search.py#L172-L250](ai_engine/rag/hybrid_search.py#L172-L250) |
-| RRF(선택) | 여러 순위 리스트를 `Σ 1/(60 + rank)`로 합침. `AE_RETRIEVAL_PIPELINE=1` 경로에서 `AE_FUSION=rrf`일 때만 | [hybrid_search.py#L254-L290](ai_engine/rag/hybrid_search.py#L254-L290) |
+| RRF(선택) | 여러 순위 리스트를 `Σ 1/(60 + rank)`로 합침. `AE_RETRIEVAL_PIPELINE=1` 경로에서 `AE_FUSION=rrf`일 때만 | [hybrid_search.py#L254-L287](ai_engine/rag/hybrid_search.py#L254-L287) |
 | 컨텍스트 조립 | 상위 8개를 `### 파일:L시작-끝, score:` 헤더와 코드펜스로 24,000자 예산 안에 삽입 | [context_builder.py#L171-L300](ai_engine/rag/context_builder.py#L171-L300) |
 
 **이 검색이 얼마나 믿을 만한가.**
@@ -290,7 +291,7 @@ START → planner ──Send×N (현재 Wave)──► coding | media | research
 
 경량 도구 `web_search`/`search_papers`/`fetch_content`는 딥리서치 없이 단발 검색을 제공하며, 여러 provider 결과를 RRF로 융합하고 `recency_days`가 있으면 최신성 필터를 적용합니다. 검색 시작·종료는 `searchStatus` SSE로 채팅 옆 인디케이터에 "어느 provider에 어떤 질의 요약을 보냈는지"만 표시합니다(개별 URL·키는 표시하지 않음).
 
-셸 도구 `run_command`는 이 게이트 **밖**에 있습니다. 모델이 `curl` 등으로 외부에 직접 나가면 서버는 명령을 막지 않고 신호·대상 호스트·게이트 상태만 감사 로그로 남깁니다(명령 원문은 기록하지 않음, [server.py#L10196-L10225](ai_engine/server.py#L10196-L10225)). 셸을 막으면 npm·git·pip이 함께 죽기 때문에 차단 대신 가시성을 택했습니다.
+셸 도구 `run_command`는 이 게이트 **밖**에 있습니다. 모델이 `curl` 등으로 외부에 직접 나가면 서버는 명령을 막지 않고 신호·대상 호스트·게이트 상태만 감사 로그로 남깁니다(명령 원문은 기록하지 않음, [server.py#L10225-L10254](ai_engine/server.py#L10225-L10254)). 셸을 막으면 npm·git·pip이 함께 죽기 때문에 차단 대신 가시성을 택했습니다.
 
 **관련 파일.** `ai_engine/research/{backend,providers,normalize,dedup,rank,deep_research,models,config,security,eval_harness}.py`, `agent_system/subgraphs/research.py`, `src/components/{research-settings,search-indicator,research-panel}.js`, `electron/core/research-credentials.js`, 스펙 `.kiro/specs/deep-research-engine/`.
 
@@ -360,6 +361,8 @@ START → planner ──Send×N (현재 Wave)──► coding | media | research
 - **preload**: `contextBridge.exposeInMainWorld('electronAPI', …)` 92키만 노출, `ipcRenderer` 자체는 노출하지 않습니다. 메인 창은 `contextIsolation: true`, `nodeIntegration: false`.
 - **렌더러**(`src/`): 모듈 시스템 없는 classic script. `main.js`가 상태·채팅·SSE 소비·에디터·터미널을 담당하고, `center-views.js`(구조·의존성·통계·검색·Git·리뷰 뷰), `model-recommender.js`(작업 유형 21종 패턴 → 모델 추천), `effort-control.js`, `components/`(Web Components: 템플릿·파일 미리보기·리서치·검색 인디케이터·뷰어)로 나뉩니다. 디자인 토큰은 `src/styles/variables.css`.
 - **데이터 저장**(`userData/`, macOS는 `~/Library/Application Support/Mogam Works`): `settings/settings.json`(프로파일 이름·리서치 플래그 등, 자격증명 없음), `settings/chat-sessions.json`, `history/<date>.json`, `usage/usage.json`, `checkpoints/`, `capability/`, `settings/research-credentials.json`(암호문), `generated/`(산출물·LangGraph 체크포인트·리서치 리포트·템플릿).
+- **로컬 파일 접근 가드**([path-guard.js](electron/src/path-guard.js)): `fs:*` IPC 19채널의 로컬 분기는 사용자가 대화상자로 연 폴더·파일과 앱 데이터(userData, 임시 디렉터리, `~/.agentic-editor`, `AE_GENERATED_ROOT`) 안의 경로만 허용합니다. 허용 목록은 메인 프로세스 메모리에만 있으며(앱은 마지막 폴더를 자동 복원하지 않고 항상 대화상자로 열기 때문에 충분), 렌더러가 늘릴 수 있는 IPC는 없습니다. 심볼릭 링크는 실경로로 풀어 폴더 밖을 가리키면 거부하며, 원격(SFTP) 경로는 브리지가 먼저 처리해 가드를 거치지 않습니다. `AE_FS_GUARD=0`으로 끌 수 있습니다(비상용). 경로를 받는 다른 채널인 `slides:render-html-to-png`(PNG 출력 경로)과 `project:analyze`·`project:dependencies`(분석 대상 폴더)도 같은 가드를 거칩니다.
+- **CSP**: `script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net`. `'unsafe-eval'`은 2026-09-15에 제거했습니다(렌더러·xterm·Monaco 본체에 `eval`이 없고, Monaco AMD 로더는 eval 가능 여부를 탐지해 `<script>` 로딩으로 폴백). `connect-src`는 로컬 사이드카(`localhost`, 원격 터널용 `127.0.0.1`)와 CDN·GitHub만 허용합니다.
 - **HTML→PNG 렌더 창**: `sandbox: true`, `data:` URL만 로드, 외부 URL 정규식 차단, 동시 4개.
 
 ---
@@ -462,6 +465,7 @@ NO_RELOAD=1 npm run dev # 서버 auto-reload 끄기
 | | `AE_DISABLE_MERMAID` | — | mermaid.ink 경로 차단 |
 | 경로 | `AE_GENERATED_ROOT` | Electron이 `userData/generated` 주입 | 산출물·체크포인트·템플릿 루트 |
 | | `AE_SETTINGS_PATH` / `AE_USERDATA_PATH` / `AE_CHECKPOINT_DIR` | — | 오버라이드 |
+| 보안 | `AE_FS_GUARD` | 1 | 로컬 fs IPC 경로 가드. `0`이면 해제(비상용) |
 | 개발 | `NO_RELOAD` | — | uvicorn auto-reload 끄기 |
 
 ---
@@ -473,7 +477,7 @@ NO_RELOAD=1 npm run dev # 서버 auto-reload 끄기
 | Method | Path | 설명 |
 |---|---|---|
 | GET/HEAD | `/health` | 헬스 체크 |
-| GET/POST | `/api/models` | 모델 카탈로그(텍스트·이미지·비디오·임베딩·리랭크) + capability 병합. POST 바디로 SSO 자격증명 주입 |
+| GET/POST | `/api/models` | 모델 카탈로그(텍스트·이미지·비디오·임베딩·리랭크) + capability 병합. POST 바디는 `{profile, bedrockUser}`이며 카탈로그 조회에는 `/api/reset-cache`로 주입된 SSO 자격증명을 사용 |
 | POST | `/api/reset-cache` | 게이트웨이 클라이언트 캐시 초기화 + 자격증명 재주입 |
 | POST | `/api/agents/classify-intent` | 의도 분류(haiku→sonnet 후보 체인) |
 | POST | `/api/agents/graph-stream` | **기본 채팅 경로** — LangGraph SSE |
@@ -561,7 +565,7 @@ agentic-editor/
   pytest tests/unit -q        # ai_engine 단위 테스트
   npm run test:e2e            # Playwright(tests/e2e, 4개)
   ```
-  `scripts/test_test_hygiene_no_module_global_clobber.py`는 테스트가 import 시점에 다른 모듈의 전역을 덮어쓰는지 AST로 검사하는 위생 가드입니다. 셸 인용 회귀 테스트는 `tests/unit/remote/bridge-search-quoting.test.js`(원격 브리지)와 `scripts/test_execute_tool_search_files_quoting.py`(로컬 도구)에, git IPC의 argv 실행은 `tests/unit/ipc-git-handlers.test.js`에, 포트포워딩 헬스 게이트는 `tests/unit/remote/forwarder-mount.test.js`에, SSRF 가드는 `scripts/test_research_ssrf_guard.py`에 있습니다.
+  `scripts/test_test_hygiene_no_module_global_clobber.py`는 테스트가 import 시점에 다른 모듈의 전역을 덮어쓰는지 AST로 검사하는 위생 가드입니다. 셸 인용 회귀 테스트는 `tests/unit/remote/bridge-search-quoting.test.js`(원격 브리지)와 `scripts/test_execute_tool_search_files_quoting.py`(로컬 도구)에, git IPC의 argv 실행은 `tests/unit/ipc-git-handlers.test.js`에, 포트포워딩 헬스 게이트는 `tests/unit/remote/forwarder-mount.test.js`에, SSRF 가드는 `scripts/test_research_ssrf_guard.py`에, 파일 접근 가드는 `tests/unit/path-guard.test.js`·`tests/unit/ipc-fs-handlers-guard.test.js`에, 자격증명 비노출은 `tests/unit/ipc-sso-credentials.test.js`·`tests/unit/renderer-no-secrets.test.js`·`scripts/test_api_models_catalog_creds.py`에 있습니다.
 - **산출물 감사**: `scripts/audit_pptx_native_density.py`, `audit_pptx_textbox_overlap.py` 등이 생성된 PPTX의 밀도·겹침·경계를 기계 판정합니다. `scripts/eval_research_quality.py`는 골든 셋 대비 리서치 품질 회귀를 검사합니다.
 - **스펙 기반 개발(`.kiro/specs/`)**: 기능마다 `requirements.md`(EARS 형식) → `design.md`(Correctness Properties 포함) → `tasks.md`(체크박스, `*`는 선택 테스트) 순서로 진행합니다. 버그 수정 스펙은 `bugfix.md`와 3단 테스트(`*_bug_condition`: 수정 전 실패해야 함 → `*_fix_pbt`: 수정 후 통과 → `*_preservation_pbt`: 기존 동작 보존)를 씁니다.
 - CI(`.github/workflows/release.yml`)는 태그 `v*` 푸시 시 macOS/Windows 매트릭스에서 필수 모듈 import 게이트 → PyInstaller 동결 → electron-builder 빌드를 수행합니다(테스트 실행 스텝은 아직 없음, 11장).
@@ -603,7 +607,7 @@ DMG와 `scripts/install-mac.command`를 같은 폴더에 두고 스크립트를 
 코드 주석과 스펙에 반복해서 선언된 원칙입니다.
 
 - **게이트웨이 전용**: LLM 호출은 `GatewayClient`만 경유. 직접 SDK(boto3 bedrock-runtime, anthropic, openai) 사용 금지. 예외는 이미지 생성의 Vertex AI 한 곳.
-- **자격증명 비저장**: AWS 자격증명은 어떤 파일에도 쓰지 않고 런타임 주입·assume-role만. 리서치 키는 OS 키체인 암호문만 저장. 체크포인트 저장 전 키 패턴 검사.
+- **자격증명 비저장·비노출**: AWS 자격증명은 어떤 파일에도 쓰지 않고 런타임 주입·assume-role만. 렌더러는 비밀 값을 받지 않는다(메인 프로세스가 사이드카에 직접 주입). 리서치 키는 OS 키체인 암호문만 저장. 체크포인트 저장 전 키 패턴 검사.
 - **비차단 폴백**: 하위 실패는 값으로 표현하고 다음 후보로 넘어간다. 대신 요청 종료 시 "선언(설정·의도) vs 관측(실제 도구 호출)"을 대조해 조용한 무동작을 표면화한다(`effect_ledger.py`).
 - **외부 egress 가시성**: 리서치 도구는 옵트인·동의 게이트를 지키지만 셸 도구는 그 게이트 밖에 있다. 그래서 `run_command`가 외부 네트워크 신호를 보이면 차단하는 대신 신호·대상 호스트·게이트 상태만 로그에 남긴다(명령 원문 미기록). 셸을 막으면 npm·git·pip이 죽기 때문이다. 셸에 넘기는 모델 입력(검색어·경로·패턴)은 `shlex.quote`/`shellQuote`로 인용하고, git IPC는 argv 배열로 실행해(로컬은 셸 미경유) 메타문자가 명령으로 해석되지 않게 한다. 리서치 본문 수집(`fetch_url_raw`)은 사설·루프백·메타데이터 주소와 내부 호스트명을 요청 전에 차단하고 리다이렉트도 hop마다 재검사한다(SSRF 방어).
 - **손실-0 · 바이트 보존**: 생성된 이미지는 어떤 분기에서도 폐기하지 않고, 새 렌더 기능은 no-op 기본값으로만 추가해 기존 산출물이 바이트 단위로 동일하게 유지되도록 한다.

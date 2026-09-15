@@ -7,6 +7,7 @@
 const { ipcMain, dialog } = require('electron');
 const fs = require('fs');
 const path = require('path');
+const guard = require('./path-guard');
 
 // Lazy-require so fs handlers work even if remote module has issues.
 function _getRouter() {
@@ -33,7 +34,9 @@ function registerFsHandlers(mainWindow) {
     const result = await dialog.showOpenDialog(mainWindow, {
       properties: ['openDirectory'],
     });
-    return result.canceled ? null : result.filePaths[0];
+    if (result.canceled || !result.filePaths[0]) return null;
+    guard.allowRoot(result.filePaths[0]);   // 사용자가 연 폴더만 로컬 fs IPC 의 허용 루트가 된다
+    return result.filePaths[0];
   });
 
   /**
@@ -49,7 +52,9 @@ function registerFsHandlers(mainWindow) {
     const properties = ['openFile'];
     const filters = (opts && Array.isArray(opts.filters)) ? opts.filters : [];
     const result = await dialog.showOpenDialog(mainWindow, { properties, filters });
-    return result.canceled ? null : result.filePaths[0];
+    if (result.canceled || !result.filePaths[0]) return null;
+    guard.allowFile(result.filePaths[0]);
+    return result.filePaths[0];
   });
 
   /**
@@ -65,6 +70,7 @@ function registerFsHandlers(mainWindow) {
         console.log('[fs:read-file] using remote bridge for:', filePath);
         return await bridge.read(filePath, 'utf8');
       }
+      guard.assertAllowed(filePath, 'read');
       return fs.readFileSync(filePath, 'utf-8');
     } catch (error) {
       console.error(`[fs:read-file] Failed to read ${filePath}:`, error.message);
@@ -83,6 +89,7 @@ function registerFsHandlers(mainWindow) {
     try {
       const bridge = _remoteBridge();
       if (bridge) { await bridge.write(filePath, content); return true; }
+      guard.assertAllowed(filePath, 'write');
       fs.mkdirSync(path.dirname(filePath), { recursive: true });
       fs.writeFileSync(filePath, content, 'utf-8');
       return true;
@@ -104,6 +111,8 @@ function registerFsHandlers(mainWindow) {
     try {
       const bridge = _remoteBridge();
       if (bridge) { await bridge.rename(oldPath, newPath); return true; }
+      guard.assertAllowed(oldPath, 'rename');
+      guard.assertAllowed(newPath, 'rename');
       fs.renameSync(oldPath, newPath);
       return true;
     } catch (error) {
@@ -129,6 +138,7 @@ function registerFsHandlers(mainWindow) {
         // Bridge older API doesn't expose unlink — fall back to local unlink
         // for files that exist locally (most .generated/ files do).
       }
+      guard.assertAllowed(filePath, 'delete');
       if (fs.existsSync(filePath)) {
         fs.unlinkSync(filePath);
       }
@@ -150,6 +160,7 @@ function registerFsHandlers(mainWindow) {
     try {
       const bridge = _remoteBridge();
       if (bridge) { await bridge.mkdir(dirPath, { recursive: true }); return true; }
+      guard.assertAllowed(dirPath, 'mkdir');
       fs.mkdirSync(dirPath, { recursive: true });
       return true;
     } catch (error) {
@@ -171,6 +182,7 @@ function registerFsHandlers(mainWindow) {
         const list = await bridge.list(dirPath);
         return list.map(e => ({ name: e.name, path: e.path, isDirectory: !!e.isDirectory }));
       }
+      guard.assertAllowed(dirPath, 'list');
       const entries = fs.readdirSync(dirPath, { withFileTypes: true });
       return entries.map((entry) => ({
         name: entry.name,
@@ -200,6 +212,7 @@ function registerFsHandlers(mainWindow) {
    */
   ipcMain.handle('fs:watch-directory', async (_, dirPath) => {
     try {
+      guard.assertAllowed(dirPath, 'watch');
       if (_watchers.has(dirPath)) return { ok: true, alreadyWatching: true };
       if (!fs.existsSync(dirPath)) {
         try { fs.mkdirSync(dirPath, { recursive: true }); } catch {}
@@ -245,6 +258,7 @@ function registerFsHandlers(mainWindow) {
       // 사용자가 다운로드를 눌러도 빈 파일이 복사되거나 ENOENT로 실패한다.
       // 다이얼로그 띄우기 전에 분명한 에러 반환해 사용자가 원인을 알게 한다.
       if (options.sourcePath && !options.remote) {
+        guard.assertAllowed(options.sourcePath, 'read');
         try {
           const st = fs.statSync(options.sourcePath);
           if (!st.isFile()) {
@@ -265,6 +279,7 @@ function registerFsHandlers(mainWindow) {
         filters: options.filters || [],
       });
       if (result.canceled || !result.filePath) return { ok: false, canceled: true };
+      guard.allowFile(result.filePath);   // 사용자가 저장 위치로 고른 파일
       if (options.sourcePath) {
         // Copy from source to chosen path
         if (options.remote) {
@@ -296,6 +311,7 @@ function registerFsHandlers(mainWindow) {
         const buf = await bridge.read(filePath, 'binary');
         return Buffer.isBuffer(buf) ? buf.toString('base64') : Buffer.from(buf).toString('base64');
       }
+      guard.assertAllowed(filePath, 'read');
       return fs.readFileSync(filePath).toString('base64');
     } catch (err) {
       console.error(`[fs:read-file-base64] failed:`, err.message);
@@ -319,6 +335,7 @@ function registerFsHandlers(mainWindow) {
           mtime: e.mtime ? new Date(e.mtime * 1000).toISOString() : null,
         }));
       }
+      guard.assertAllowed(dirPath, 'list');
       if (!fs.existsSync(dirPath)) return [];
       const names = fs.readdirSync(dirPath);
       return names.map(n => {
@@ -353,6 +370,7 @@ function registerFsHandlers(mainWindow) {
    */
   ipcMain.handle('fs:list-files-with-stats-local', async (_, dirPath) => {
     try {
+      guard.assertAllowed(dirPath, 'list');
       if (!fs.existsSync(dirPath)) return [];
       const names = fs.readdirSync(dirPath);
       return names.map(n => {
@@ -383,6 +401,7 @@ function registerFsHandlers(mainWindow) {
    */
   ipcMain.handle('fs:read-file-base64-local', async (_, filePath) => {
     try {
+      guard.assertAllowed(filePath, 'read');
       if (!fs.existsSync(filePath)) return null;
       return fs.readFileSync(filePath).toString('base64');
     } catch (err) {
@@ -404,6 +423,7 @@ function registerFsHandlers(mainWindow) {
    */
   ipcMain.handle('fs:delete-file-local', async (_, filePath) => {
     try {
+      guard.assertAllowed(filePath, 'delete');
       if (fs.existsSync(filePath)) {
         fs.unlinkSync(filePath);
       }
@@ -420,6 +440,7 @@ function registerFsHandlers(mainWindow) {
   ipcMain.handle('fs:show-item-in-folder', async (_, filePath) => {
     try {
       const { shell } = require('electron');
+      guard.assertAllowed(filePath, 'reveal');
       shell.showItemInFolder(filePath);
       return { ok: true };
     } catch (err) {
@@ -433,6 +454,7 @@ function registerFsHandlers(mainWindow) {
   ipcMain.handle('fs:open-path', async (_, targetPath) => {
     try {
       const { shell } = require('electron');
+      guard.assertAllowed(targetPath, 'open');
       await shell.openPath(targetPath);
       return { ok: true };
     } catch (err) {

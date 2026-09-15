@@ -34,6 +34,7 @@
 const { ipcMain, BrowserWindow } = require('electron');
 const fs = require('fs');
 const path = require('path');
+const guard = require('./path-guard');
 
 // ---- concurrency limiter (max 4 parallel renders) ----------------------
 const MAX_CONCURRENT = 4;
@@ -115,6 +116,10 @@ async function renderHtmlToPng(opts) {
   }
   if (!path.isAbsolute(outputPath)) {
     return { ok: false, error: 'outputPath must be absolute' };
+  }
+  // 렌더러가 고른 출력 경로도 fs IPC 와 같은 가드를 거친다(열린 폴더·앱 데이터 밖으로 PNG 를 쓰지 않는다).
+  if (!guard.isAllowed(outputPath)) {
+    return { ok: false, error: 'outputPath outside the opened folders' };
   }
 
   // Pre-flight: refuse external resource references — data: URL would block

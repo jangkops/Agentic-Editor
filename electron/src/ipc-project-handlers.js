@@ -15,6 +15,7 @@ const { ipcMain } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const sessionRouter = require('./remote/session-router');
+const guard = require('./path-guard');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 공유 상수 (local / remote 양쪽에서 동일한 분류 규칙 사용)
@@ -252,6 +253,7 @@ function registerProjectHandlers() {
       if (!dirPath || !fs.existsSync(dirPath)) {
         return null;
       }
+      guard.assertAllowed(dirPath, 'analyze');
 
       // 초기화
       const stats = {
@@ -410,6 +412,7 @@ function registerProjectHandlers() {
 
     try {
       if (!dirPath) return null;
+      guard.assertAllowed(dirPath, 'analyze');
 
       const pkgPath = path.join(dirPath, 'package.json');
       const reqPath = path.join(dirPath, 'requirements.txt');

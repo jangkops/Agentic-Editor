@@ -7,12 +7,49 @@ const { ipcMain } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
+
+/** 사이드카 베이스 URL — 원격 세션이 포트포워딩 중이면 그 터널, 아니면 로컬. */
+function _resolveApiBase() {
+  try {
+    const router = require('./remote/session-router');
+    if (router && typeof router.apiBase === 'function') return router.apiBase();
+  } catch (_e) { /* router unavailable -> local */ }
+  return 'http://localhost:8765';
+}
+
+/**
+ * 기본 주입기: 자격증명을 사이드카 `/api/reset-cache` 로 보낸다(메인 -> 사이드카 직접).
+ * 예전에는 렌더러가 자격증명을 받아 같은 요청을 보냈다. 이제 렌더러는 비밀 값을 보지 않는다.
+ * @returns {Promise<boolean>} 사이드카가 2xx 로 받았는지
+ */
+async function _defaultInjector({ base, profile, bedrockUser, credentials }) {
+  try {
+    const res = await fetch(`${base}/api/reset-cache`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile, bedrockUser: bedrockUser || '', credentials }),
+      signal: AbortSignal.timeout(8000),
+    });
+    return !!(res && res.ok);
+  } catch (e) {
+    console.warn('[sso:get-credentials] sidecar injection failed:', e && e.message);
+    return false;
+  }
+}
+
+const INJECT_TTL_MS = 60 * 1000;   // 시작 직후 연속 호출만 묶는다. 사이드카가 재기동돼 주입이 사라져도 1분 안에 다시 보낸다
 
 /**
  * SSO IPC 핸들러 등록
  * @param {AwsSsoManager} ssoManager - SSO 관리자 인스턴스
+ * @param {{injectCredentials?: Function, resolveApiBase?: Function}} [options] - 테스트용 주입점
  */
-function registerSsoHandlers(ssoManager) {
+function registerSsoHandlers(ssoManager, options) {
+  const opts = options || {};
+  const injector = typeof opts.injectCredentials === 'function' ? opts.injectCredentials : _defaultInjector;
+  const resolveApiBase = typeof opts.resolveApiBase === 'function' ? opts.resolveApiBase : _resolveApiBase;
+  const injectState = { key: null, at: 0 };
   /**
    * SSO 프로필 목록
    */
@@ -38,11 +75,31 @@ function registerSsoHandlers(ssoManager) {
   });
 
   /**
-   * SSO 자격증명 가져오기
+   * SSO 자격증명 가져오기 -> **사이드카에 직접 주입**하고, 렌더러에는 비밀 값 없는 상태만 돌려준다.
+   * 반환: `{ok, injected, profile, region}` | null(자격증명 없음/만료).
+   * `callOpts.bedrockUser` 는 assume-role 대상, `callOpts.force` 는 dedupe 무시(로그인·토큰 만료 시).
+   * 같은 자격증명·같은 사이드카에 대한 반복 호출(모델 목록 새로고침 등)은 TTL 안에서 재주입하지 않는다.
+   * `/api/reset-cache` 는 게이트웨이 클라이언트·쿼터 캐시를 함께 비우기 때문이다.
    */
-  ipcMain.handle('sso:get-credentials', async (_, profile) => {
+  ipcMain.handle('sso:get-credentials', async (_, profile, callOpts) => {
     try {
-      return await ssoManager.getCredentials(profile);
+      const creds = await ssoManager.getCredentials(profile);
+      if (!creds || !creds.AWS_ACCESS_KEY_ID) return null;
+      const o = callOpts && typeof callOpts === 'object' ? callOpts : {};
+      const bedrockUser = typeof o.bedrockUser === 'string' ? o.bedrockUser : '';
+      const base = resolveApiBase();
+      const key = crypto.createHash('sha256')
+        .update([base, profile, bedrockUser, creds.AWS_ACCESS_KEY_ID, creds.AWS_SESSION_TOKEN || ''].join(' '))
+        .digest('hex');
+      let injected;
+      const fresh = injectState.key === key && (Date.now() - injectState.at) < INJECT_TTL_MS;
+      if (o.force || !fresh) {
+        injected = await injector({ base, profile, bedrockUser, credentials: creds });
+        if (injected) { injectState.key = key; injectState.at = Date.now(); }
+      } else {
+        injected = true;
+      }
+      return { ok: true, injected: !!injected, profile, region: creds.AWS_DEFAULT_REGION || 'us-west-2' };
     } catch (error) {
       console.error(`[sso:get-credentials] Error for ${profile}:`, error.message);
       return null;

@@ -10,15 +10,18 @@
  *
  *   - sso:list-profiles        → listProfiles()        → string[]
  *   - sso:login                → login()               → {success:true,profile} | {success:false,error}
- *   - sso:get-credentials      → getCredentials()      → 4-key env-var 객체 | null
+ *   - sso:get-credentials      → getCredentials()      → 4-key env-var 객체 | null (IPC 는 비밀 없는 상태로 변환, 아래 참고)
  *   - sso:get-bedrock-username → getBedrockUsername()  → string
  *
  * 무변경(read-only) 확인:
  *   본 태스크는 electron/src/ipc-sso-handlers.js 와 src/main.js 를 수정하지 않는다.
  *   ipc-sso-handlers.js의 핸들러는 위 메서드 반환값을 가공 없이 그대로 반환(list-profiles/
- *   login/get-credentials/get-bedrock-username)하거나 예외 시 안전값([]/false/null)으로
- *   폴백한다. 따라서 메서드 반환 형태가 보존되면 IPC 계약도 보존된다. 이 파일은 그 형태
- *   보존을 mock 기반·파일 IO 없이 회귀 검증한다.
+ *   login/get-bedrock-username)하거나 예외 시 안전값([]/false/null)으로 폴백한다.
+ *   따라서 메서드 반환 형태가 보존되면 IPC 계약도 보존된다. 이 파일은 그 형태 보존을
+ *   mock 기반·파일 IO 없이 회귀 검증한다.
+ *   (2026-09-15) sso:get-credentials 는 예외 — 메인이 자격증명을 사이드카에 직접 주입하고
+ *   렌더러에는 {ok, injected, profile, region} 만 돌려준다(tests/unit/ipc-sso-credentials.test.js).
+ *   여기서는 매니저 메서드 getCredentials 의 4-key 형태 보존만 검증한다.
  */
 
 const mockCtl = {

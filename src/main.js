@@ -334,8 +334,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   // 기존 자격증명 유효성 검증
   if (window.electronAPI?.getCredentials) {
     try {
-      const creds = await window.electronAPI.getCredentials(state.settings.awsProfile);
-      if (!creds || !creds.AWS_ACCESS_KEY_ID) {
+      const creds = await window.electronAPI.getCredentials(state.settings.awsProfile, { bedrockUser: state.settings.bedrockUser || '' });
+      if (!creds || !creds.ok) {
         // 자격증명 만료 — 재로그인 필요
         showSSODialog(true);
         return;
@@ -400,16 +400,10 @@ async function initApp() {
   // 자격증명을 백엔드에 주입 (quota 조회 등에서 사용)
   try {
     if (window.electronAPI?.getCredentials && state.settings?.awsProfile) {
-      const creds = await window.electronAPI.getCredentials(state.settings.awsProfile);
-      if (creds && creds.AWS_ACCESS_KEY_ID) {
-        await fetch(`${apiBase()}/api/reset-cache`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            profile: state.settings.awsProfile,
-            bedrockUser: state.settings.bedrockUser || '',
-            credentials: creds,
-          }),
-        });
+      // 자격증명은 메인 프로세스가 사이드카 /api/reset-cache 에 직접 주입한다(렌더러는 비밀 값을 받지 않는다).
+      const creds = await window.electronAPI.getCredentials(state.settings.awsProfile, { bedrockUser: state.settings.bedrockUser || '' });
+      if (creds && !creds.injected) {
+        console.warn('[init] 사이드카 자격증명 주입 실패 — 모델 로드 시 다시 시도');
       }
     }
   } catch {}
@@ -702,8 +696,8 @@ async function showSSODialog(isInitial) {
       // Step 2: 자격증명 검증
       st.textContent = '자격증명 검증 중...';
       if (window.electronAPI?.getCredentials) {
-        const creds = await window.electronAPI.getCredentials(profile);
-        if (!creds || !creds.AWS_ACCESS_KEY_ID) {
+        const creds = await window.electronAPI.getCredentials(profile, { bedrockUser: state.settings?.bedrockUser || '' });
+        if (!creds || !creds.ok) {
           st.className = 'status-text error';
           st.textContent = `자격증명 검증 실패 — ${profile} assume role/SSO 세션이 유효하지 않습니다.\n다른 프로파일을 선택하세요.`;
           resetBtn(); return;
@@ -734,26 +728,14 @@ async function showSSODialog(isInitial) {
       state.authenticated = true;
       // 백엔드 캐시 초기화 + 자격증명 주입
       try {
-        const freshCreds = await window.electronAPI?.getCredentials(profile);
-        await fetch(`${apiBase()}/api/reset-cache`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ profile, bedrockUser: state.settings?.bedrockUser || '', credentials: freshCreds || null }),
-        });
+        await window.electronAPI?.getCredentials(profile, { bedrockUser: state.settings?.bedrockUser || '', force: true });
       } catch {}
       st.className = 'status-text'; st.textContent = '모델 목록 로딩 중...';
       
-      // Electron에서 새 자격증명 가져오기
+      // 자격증명은 메인 프로세스가 사이드카에 이미 주입했다. 렌더러는 주입 성공 여부만 안다.
       let freshCreds = null;
       if (window.electronAPI?.getCredentials) {
-        freshCreds = await window.electronAPI.getCredentials(profile);
-        if (freshCreds && freshCreds.AWS_ACCESS_KEY_ID) {
-          state._cachedCreds = {
-            accessKeyId: freshCreds.AWS_ACCESS_KEY_ID,
-            secretAccessKey: freshCreds.AWS_SECRET_ACCESS_KEY,
-            sessionToken: freshCreds.AWS_SESSION_TOKEN || '',
-            region: freshCreds.AWS_DEFAULT_REGION || 'us-west-2',
-          };
-        }
+        freshCreds = await window.electronAPI.getCredentials(profile, { bedrockUser: state.settings?.bedrockUser || '' });
       }
       
       // 모델 로드 — 자격증명을 직접 전달
@@ -762,18 +744,12 @@ async function showSSODialog(isInitial) {
         await new Promise(r => setTimeout(r, 1500));
         try {
           let mr;
-          if (freshCreds && freshCreds.AWS_ACCESS_KEY_ID) {
-            // 자격증명을 POST body로 직접 전달 (boto3 캐시 우회)
+          if (freshCreds && freshCreds.ok) {
+            // 사이드카는 메인이 /api/reset-cache 로 주입한 카탈로그 자격증명을 쓴다. body 에 비밀 없음.
             mr = await fetch(`${apiBase()}/api/models`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                profile: profile,
-                accessKeyId: freshCreds.AWS_ACCESS_KEY_ID,
-                secretAccessKey: freshCreds.AWS_SECRET_ACCESS_KEY,
-                sessionToken: freshCreds.AWS_SESSION_TOKEN || '',
-                region: freshCreds.AWS_DEFAULT_REGION || 'us-west-2',
-              })
+              body: JSON.stringify({ profile: profile, bedrockUser: state.settings?.bedrockUser || '' })
             });
           } else {
             mr = await fetch(`${apiBase()}/api/models?profile=${encodeURIComponent(profile)}`);
@@ -1128,17 +1104,12 @@ async function loadModelsFromServer(retryCount) {
     // Electron에서 자격증명 가져와서 직접 전달
     let mr;
     if (window.electronAPI?.getCredentials) {
-      const creds = await window.electronAPI.getCredentials(profile);
-      if (creds && creds.AWS_ACCESS_KEY_ID) {
+      const creds = await window.electronAPI.getCredentials(profile, { bedrockUser: state.settings?.bedrockUser || '' });
+      if (creds && creds.ok) {
         mr = await fetch(`${apiBase()}/api/models`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            profile, accessKeyId: creds.AWS_ACCESS_KEY_ID,
-            secretAccessKey: creds.AWS_SECRET_ACCESS_KEY,
-            sessionToken: creds.AWS_SESSION_TOKEN || '',
-            region: creds.AWS_DEFAULT_REGION || 'us-west-2',
-          })
+          body: JSON.stringify({ profile, bedrockUser: state.settings?.bedrockUser || '' })
         });
       }
     }
@@ -1235,17 +1206,12 @@ async function _fetchFilteredModelCatalog() {
   const profile = state.settings?.awsProfile || 'default';
   let mr;
   if (window.electronAPI?.getCredentials) {
-    const creds = await window.electronAPI.getCredentials(profile);
-    if (creds && creds.AWS_ACCESS_KEY_ID) {
+    const creds = await window.electronAPI.getCredentials(profile, { bedrockUser: state.settings?.bedrockUser || '' });
+    if (creds && creds.ok) {
       mr = await fetch(`${apiBase()}/api/models`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          profile, accessKeyId: creds.AWS_ACCESS_KEY_ID,
-          secretAccessKey: creds.AWS_SECRET_ACCESS_KEY,
-          sessionToken: creds.AWS_SESSION_TOKEN || '',
-          region: creds.AWS_DEFAULT_REGION || 'us-west-2',
-        })
+        body: JSON.stringify({ profile, bedrockUser: state.settings?.bedrockUser || '' })
       });
     }
   }
@@ -3392,12 +3358,8 @@ async function runSimpleChat(prompt, opts = {}) {
             if (p.error.includes('expired') || p.error.includes('security token')) {
               addLiveLog('system', '토큰 만료 감지 — 자격증명 갱신 중...');
               try {
-                const creds = await window.electronAPI?.getCredentials(state.settings?.awsProfile || '');
-                if (creds) {
-                  await fetch(`${apiBase()}/api/reset-cache`, {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ profile: state.settings?.awsProfile, bedrockUser: state.settings?.bedrockUser, credentials: creds }),
-                  });
+                const creds = await window.electronAPI?.getCredentials(state.settings?.awsProfile || '', { bedrockUser: state.settings?.bedrockUser || '', force: true });
+                if (creds && creds.injected) {
                   addLiveLog('system', '자격증명 갱신 완료 — 다시 질문해주세요');
                   msg.content = '자격증명이 갱신되었습니다. 다시 질문해 주세요.';
                   continue;
@@ -3520,12 +3482,8 @@ async function runAgentWorkflow(prompt) {
             // 토큰 만료
             if (p.error.includes('expired') || p.error.includes('security token')) {
               try {
-                const creds = await window.electronAPI?.getCredentials(state.settings?.awsProfile || '');
-                if (creds) {
-                  await fetch(`${apiBase()}/api/reset-cache`, {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ profile: state.settings?.awsProfile, bedrockUser: state.settings?.bedrockUser, credentials: creds }),
-                  });
+                const creds = await window.electronAPI?.getCredentials(state.settings?.awsProfile || '', { bedrockUser: state.settings?.bedrockUser || '', force: true });
+                if (creds && creds.injected) {
                   addLiveLog('system', '자격증명 갱신 완료');
                   msg.content = '자격증명이 갱신되었습니다. 다시 질문해 주세요.';
                   continue;
@@ -7233,13 +7191,7 @@ function renderSettingsTab(o, profiles) {
         state.settings.awsProfile = p;
         await window.electronAPI?.saveSettings?.(state.settings);
         // 자격증명 가져와서 백엔드에 주입
-        const newCreds = await window.electronAPI?.getCredentials(p);
-        try {
-          await fetch(`${apiBase()}/api/reset-cache`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ profile: p, bedrockUser: state.settings?.bedrockUser || '', credentials: newCreds || null }),
-          });
-        } catch {}
+        try { await window.electronAPI?.getCredentials(p, { bedrockUser: state.settings?.bedrockUser || '', force: true }); } catch {}
         state.authenticated = true;
         st.className='status-text success'; st.textContent=`✓ ${p} 로그인 완료`;
         checkBackend();
