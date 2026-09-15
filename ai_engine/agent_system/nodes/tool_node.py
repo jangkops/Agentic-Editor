@@ -33,6 +33,7 @@ import json
 import os
 from typing import Any, List, Optional
 
+from langchain_core.callbacks import adispatch_custom_event
 from langchain_core.messages import ToolMessage
 
 # 원격 SSH 브리지가 처리할 수 있는 도구 집합. server.py `_REMOTE_TOOLS`와 동일하게 유지.
@@ -58,6 +59,103 @@ _MEDIA_TOOLS = frozenset(
         "generate_native_diagram",
     }
 )
+
+# ── 검색 진행 이벤트 (deep-research-engine 요구사항 18 / design.md "9-1) 방출") ──
+# 검색 도구군에 한해 실행 경계에서 검색 진행 이벤트(`search_status`)를 방출한다.
+# start 정확히 1회 → end 정확히 1회(P14)를 try/finally 로 코드에서 강제한다. 비검색 도구는
+# 방출 대상이 아니므로 기존 동작이 그대로 보존된다(무회귀).
+_SEARCH_TOOLS = frozenset({"web_search", "search_papers", "deep_research"})
+
+# 도구명 → 검색 종류(kind) 매핑(요구사항 18.2). Search_Indicator 라벨 근거:
+# web=웹 검색 / academic=논문 검색 / deep=딥리서치.
+_SEARCH_KIND = {
+    "web_search": "web",
+    "search_papers": "academic",
+    "deep_research": "deep",
+}
+
+
+def _search_outcome_from_result(result: Any) -> dict:
+    """검색 도구 결과에서 **실제 산출**을 추출한다(순수·예외 없음).
+
+    왜 필요한가: ``status`` 는 실행 성공(예외/타임아웃 없음)만 뜻한다. 리서치 도구는
+    실패를 예외가 아니라 구조화 dict 로 돌려주므로(비차단 철학), "제공자 키가 없어
+    0건"인 경우도 ``status="ok"`` 로 방출됐다. 그래서 검색 인디케이터는 "완료"로 보이고
+    사용자는 왜 근거가 없는지 알 수 없었다(실측 사고).
+
+    Args:
+        result: 도구 반환값. 리서치 도구는 JSON 문자열(``server._execute_tool`` 가
+                ``json.dumps`` 한 결과)이며, dict 가 직접 올 수도 있다.
+
+    Returns:
+        ``{}`` 또는 다음 키의 부분집합:
+          - ``count``           결과 건수(int)
+          - ``error``           도구 수준 오류 코드(str)
+          - ``provider_errors`` ``[{"provider","error"}]`` 제공자별 실패 사유
+        파싱 불가·형식 불일치는 빈 dict 를 반환해 페이로드를 과거 형태로 유지한다.
+        자격증명은 어떤 키에도 담지 않는다(P9 — 원본 dict 에도 존재하지 않음).
+    """
+    try:
+        data = result
+        if isinstance(data, (bytes, bytearray)):
+            data = data.decode("utf-8", "ignore")
+        if isinstance(data, str):
+            s = data.strip()
+            if not s.startswith("{"):
+                return {}          # 도구 오류 문자열 등 — 추출할 산출이 없다
+            data = json.loads(s)
+        if not isinstance(data, dict):
+            return {}
+
+        out: dict = {}
+        count = data.get("count")
+        if isinstance(count, bool):
+            count = None           # bool 은 int 하위형이라 명시적으로 배제
+        if isinstance(count, int):
+            out["count"] = count
+        elif isinstance(data.get("results"), list):
+            out["count"] = len(data["results"])
+
+        code = data.get("error")
+        if isinstance(code, str) and code:
+            out["error"] = code
+
+        perrs = data.get("provider_errors")
+        if isinstance(perrs, list):
+            cleaned = [
+                {"provider": str(e.get("provider", "")), "error": str(e.get("error", ""))}
+                for e in perrs
+                if isinstance(e, dict) and e.get("error")
+            ]
+            if cleaned:
+                out["provider_errors"] = cleaned
+        return out
+    except Exception:  # noqa: BLE001 — 관측 정보 추출 실패는 비차단(P8)
+        return {}
+
+
+def _search_query_summary(args: Any, max_len: int) -> str:
+    """검색 도구 인자에서 질의문을 추출해 ``max_len`` 자로 절단(요구사항 18.2/18.7).
+
+    design "RESEARCH_TOOLS"의 질의 키는 ``query``(문자열)이며, 방어적으로 ``queries``
+    (리스트)도 허용한다. 추출 실패 시 빈 문자열을 반환한다(비차단). 자격증명은 도구
+    인자에 포함되지 않으므로 요약에도 포함되지 않는다(P9).
+    """
+    q = ""
+    if isinstance(args, dict):
+        cand = args.get("query")
+        if isinstance(cand, str) and cand:
+            q = cand
+        elif isinstance(args.get("queries"), list):
+            q = " ".join(
+                str(x) for x in args["queries"] if isinstance(x, (str, int, float))
+            )
+    q = q.strip()
+    try:
+        n = int(max_len)
+    except (TypeError, ValueError):
+        n = 80
+    return q[: n if n > 0 else 0]
 
 
 def _default_timeout() -> float:
@@ -173,7 +271,12 @@ class GatewayToolNode:
     # ── 개별 실행 헬퍼 (동기 server 함수를 감쌈; asyncio.to_thread에서 호출) ──
 
     def _run_local(self, name: str, args: dict, state) -> str:
-        """로컬 통합 디스패처 `_execute_tool` 호출(동기)."""
+        """로컬 통합 디스패처 `_execute_tool` 호출(동기).
+
+        ``deps``(GraphDeps: gateway/model_*/checkpointer/store)를 함께 전달해, 리서치
+        도구(특히 deep_research)가 Bedrock Gateway 기반 Planner/Generator 를 실제로 사용
+        하게 한다(Task 18.1 게이트웨이 배선). 다른 도구는 deps 를 무시하므로 무회귀다.
+        """
         import ai_engine.server as _srv  # 지연 import (순환 참조 방지)
 
         return _srv._execute_tool(
@@ -183,6 +286,7 @@ class GatewayToolNode:
             aws_profile=state.get("aws_profile", "") or "",
             bedrock_user=state.get("bedrock_user", "") or "",
             template_id=state.get("template_id", "") or "",
+            deps=self.deps,
         )
 
     def _run_bridge(self, name: str, args: dict) -> str:
@@ -218,6 +322,59 @@ class GatewayToolNode:
             except OSError:
                 continue
         return out
+
+    async def _emit_search_status(
+        self,
+        phase: str,
+        name: str,
+        args: dict,
+        status: Optional[str] = None,
+        result: Any = None,
+    ) -> None:
+        """검색 도구 실행 경계에서 ``search_status`` 커스텀 이벤트를 방출(P14/P9/P8).
+
+        - ``adispatch_custom_event("search_status", payload)`` 는 astream_events(v2)에서
+          ``on_custom_event(name="search_status")`` 로 표면화되어 sse_bridge(task 20.2)가
+          ``{searchStatus: payload}`` 로 중계한다(design "9-1)/9-3)").
+        - payload: ``phase``/``kind``/``providers``(이름만)/``query_summary`` (+ ``end`` 에서
+          ``status``). **자격증명 미포함(P9)** — providers 는 config 의 제공자 "이름" 목록,
+          query_summary 는 절단된 질의문이다.
+        - 방출 전체를 ``try/except`` 로 감싸 실패해도 도구 실행·답변 생성을 막지 않는다
+          (비차단 — 요구사항 18.5, P8).
+        """
+        try:
+            kind = _SEARCH_KIND.get(name, "web")
+            # 제공자 "이름"만 취한다(자격증명 절대 미포함 — P9). config 는 env 에서 이름만 로드.
+            from ai_engine.research.config import DeepResearchConfig
+
+            cfg = DeepResearchConfig.from_env()
+            if kind == "academic":
+                providers = list(cfg.academic_providers)
+            elif kind == "deep":
+                # 딥리서치는 웹+논문 제공자를 모두 사용한다(design "축 B").
+                providers = list(cfg.web_providers) + list(cfg.academic_providers)
+            else:  # web
+                providers = list(cfg.web_providers)
+
+            payload = {
+                "phase": phase,
+                "kind": kind,
+                "providers": providers,
+                "query_summary": _search_query_summary(args, cfg.query_summary_max),
+            }
+            if phase == "end":
+                # 성공/실패 구분(요구사항 18.3). start 에는 status 를 싣지 않는다.
+                # ⚠️ status 는 **실행** 결과(예외/타임아웃 없음)만 뜻한다. 도구가 정상
+                # 반환했지만 "키가 없어 0건" 같은 조용한 실패는 status="ok" 로 나온다.
+                # 그래서 도구 결과에서 실제 산출(count / 제공자 오류)을 추출해 함께 싣는다.
+                # 이 정보로 검색 인디케이터가 "완료" 대신 사유를 보여줄 수 있고,
+                # effect_ledger 가 "선언 vs 실제" 불일치를 판정할 수 있다.
+                payload["status"] = status or "ok"
+                payload.update(_search_outcome_from_result(result))
+
+            await adispatch_custom_event("search_status", payload)
+        except Exception:  # noqa: BLE001 — 방출 실패는 비차단(요구사항 18.5, P8)
+            pass
 
     async def __call__(self, state) -> dict:
         # ⚠️ 순차 실행(의도적 트레이드오프): 공식 LangGraph ToolNode 는 tool_calls 를 병렬
@@ -265,30 +422,48 @@ class GatewayToolNode:
                 continue
 
             use_bridge = is_remote_session and bridge_remote and name in _BRIDGE_TOOLS
+            # 검색 도구군(_SEARCH_TOOLS)에 한해 실행 경계에서 검색 진행 이벤트를 방출한다.
+            # start 는 실행 직전 1회, end 는 아래 finally 에서 1회 → "시작 1회 → 종료 1회"(P14).
+            # 비검색 도구는 is_search=False 로 방출을 건너뛰어 기존 동작이 그대로 보존된다.
+            is_search = name in _SEARCH_TOOLS
+            search_status = "ok"
+            if is_search:
+                await self._emit_search_status("start", name, args)
             # 미디어 생성 도구는 긴 상한 적용(이미지 생성 + 렌더 + 조립).
             try:
-                if use_bridge:
-                    raw = await asyncio.wait_for(
-                        asyncio.to_thread(self._run_bridge, name, args),
-                        timeout=eff_timeout,
-                    )
-                elif is_media:
-                    # 미디어 생성은 전역 세마포어로 직렬화(부하 폭주 방지). 세마포어 대기는
-                    # 타임아웃에 포함하지 않고, 실제 실행만 wait_for 로 감싼다.
-                    async with _get_media_semaphore():
+                try:
+                    if use_bridge:
+                        raw = await asyncio.wait_for(
+                            asyncio.to_thread(self._run_bridge, name, args),
+                            timeout=eff_timeout,
+                        )
+                    elif is_media:
+                        # 미디어 생성은 전역 세마포어로 직렬화(부하 폭주 방지). 세마포어 대기는
+                        # 타임아웃에 포함하지 않고, 실제 실행만 wait_for 로 감싼다.
+                        async with _get_media_semaphore():
+                            raw = await asyncio.wait_for(
+                                asyncio.to_thread(self._run_local, name, args, state),
+                                timeout=eff_timeout,
+                            )
+                    else:
                         raw = await asyncio.wait_for(
                             asyncio.to_thread(self._run_local, name, args, state),
                             timeout=eff_timeout,
                         )
-                else:
-                    raw = await asyncio.wait_for(
-                        asyncio.to_thread(self._run_local, name, args, state),
-                        timeout=eff_timeout,
+                except asyncio.TimeoutError:
+                    raw = f"[도구 시간 초과: {name} ({eff_timeout}s)]"
+                    search_status = "error"
+                except Exception as e:  # noqa: BLE001 — 도구 실패는 비차단, ToolMessage로 전달
+                    raw = f"[도구 실행 오류: {name} — {str(e)[:300]}]"
+                    search_status = "error"
+            finally:
+                # 성공/타임아웃/예외 무관하게 end 를 정확히 1회 방출(P14). 검색 도구에만 해당하며,
+                # 방출 자체는 비차단이라 실패해도 도구 결과 처리를 막지 않는다.
+                if is_search:
+                    # raw(도구 결과)를 함께 넘겨 실제 산출(count/제공자 오류)을 싣는다.
+                    await self._emit_search_status(
+                        "end", name, args, status=search_status, result=raw
                     )
-            except asyncio.TimeoutError:
-                raw = f"[도구 시간 초과: {name} ({eff_timeout}s)]"
-            except Exception as e:  # noqa: BLE001 — 도구 실패는 비차단, ToolMessage로 전달
-                raw = f"[도구 실행 오류: {name} — {str(e)[:300]}]"
 
             # verified_files 디스크 실측 (요구사항 3.7)
             new_files.extend(self._verify_files(name, args, raw, state))

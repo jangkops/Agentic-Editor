@@ -258,11 +258,38 @@ def _extract_label_from_text(text: Any) -> Optional[str]:
     return best
 
 
+# 외부 조사 의도 신호. 하나라도 걸리면 research(도구 보유)로 폴백한다.
+#
+# ⚠️ 실측 사고: 폴백이 무조건 chat 으로 떨어져, planner LLM 이 실패·타임아웃하면
+# 외부 조사 요청도 도구 없는 chat 워커로 갔다. chat 은 tools=None 이라 검색이
+# 물리적으로 불가능하므로, 조사 의도가 보이면 chat 대신 research 로 보낸다.
+# (research 는 읽기/검색 전용 도구만 가져 부작용이 없어 오분류 비용이 낮다.)
+_RESEARCH_HINTS = (
+    "검색", "찾아", "찾아줘", "찾아서", "조사", "알아봐", "알아보", "리서치",
+    "출처", "근거", "인용", "레퍼런스", "참고문헌",
+    "논문", "학술", "문헌", "저널", "임상", "가이드라인",
+    "최신", "동향", "트렌드", "사례",
+    "doi", "pubmed", "arxiv", "url", "링크",
+    "search", "paper", "citation", "reference", "latest",
+)
+
+
+def _looks_like_research(prompt: str) -> bool:
+    """외부 조사 의도가 보이면 True(순수·소문자 부분일치)."""
+    p = (prompt or "").lower()
+    return any(kw in p for kw in _RESEARCH_HINTS)
+
+
 def _heuristic_route(state: GraphState) -> str:
     """LLM 분류 실패 시 휴리스틱 폴백 라벨(비차단).
 
     server.py 의 `_infer_file_intent_from_prompt`(파일 생성 의도 → media) 및
-    `_is_code_related`(코드 관련 → coding)를 재사용한다. 어느 것도 아니면 chat.
+    `_is_code_related`(코드 관련 → coding)를 재사용한다. 외부 조사 신호가 있으면
+    research, 어느 것도 아니면 chat.
+
+    순서 주의: 조사 판정을 코드 판정보다 **앞**에 둔다. `_is_code_related` 의 키워드
+    목록에 "api"/"테스트"/"현재" 같은 흔한 낱말이 있어 조사 요청이 coding 으로 먼저
+    잡히면 web_search 가 없는 워커로 가기 때문이다.
     """
     prompt = state.get("prompt") or ""
 
@@ -276,7 +303,11 @@ def _heuristic_route(state: GraphState) -> str:
     except Exception:
         pass
 
-    # 2) 코드 관련 → coding
+    # 2) 외부 조사 의도 → research (도구 없는 chat 으로 떨어지는 것을 막는다)
+    if _looks_like_research(prompt):
+        return "research"
+
+    # 3) 코드 관련 → coding
     try:
         from ai_engine.server import _is_code_related
 
@@ -285,7 +316,7 @@ def _heuristic_route(state: GraphState) -> str:
     except Exception:
         pass
 
-    # 3) 기본 대화
+    # 4) 기본 대화
     return "chat"
 
 
@@ -631,6 +662,24 @@ def parse_evaluation(ai_message: Any, valid_domains: tuple) -> dict:
 # 워커 1개(사실상 순차와 동일). recursion_limit 는 planner→workers→aggregate 로 얕다.
 MAX_PARALLEL_TASKS: int = _env_int("AE_MAX_PARALLEL_TASKS", 4)
 
+# 도메인 라벨의 의미. planner LLM 이 라벨만 보고 고르지 않도록 스키마·시스템 프롬프트
+# 양쪽에 같은 설명을 싣는다.
+#
+# ⚠️ 실측 사고: 이 설명이 없을 때 "GLP-1 간독성 최신 보고를 찾아서 DOI와 함께 제시해줘"
+# 같은 **명백한 외부 조사 요청이 chat 으로 라우팅**됐다. chat 서브그래프는 tools=None
+# 이라 도구 노드 자체가 생성되지 않으므로(`_common.build_domain_subgraph`),
+# web_search/search_papers 호출이 물리적으로 불가능하고 모델은 "조사하겠습니다"라는
+# 예고만 남기고 종료했다. `_make_route_tool`(미사용 경로)에는 설명이 있었으나 실제
+# 사용되는 planner 스키마에는 없어서 생긴 비대칭이다.
+_DOMAIN_GUIDE = (
+    "coding: 코드 이해/수정/리팩터/디버그·로컬 파일 검색·명령 실행. "
+    "media: pptx/pdf/이미지/docx/xlsx/슬라이드/다이어그램 생성. "
+    "research: 웹 검색·논문/학술 검색·외부 자료 조사·출처(URL/DOI) 수집·딥리서치. "
+    "로컬 프로젝트 파일에 없는 외부 지식이나 최신 정보를 찾아야 하면 반드시 research 다. "
+    "ops: 셸 명령/git/원격 SSH 운영 작업. "
+    "chat: 외부 조사도 파일 작업도 필요 없는 일반 대화·개념 설명."
+)
+
 _PLAN_TOOL: dict = {
     "name": "select_plan",
     "description": (
@@ -639,7 +688,8 @@ _PLAN_TOOL: dict = {
         "선행 완료가 필요한 서브태스크 id 목록(depends_on)을 가진다. 서로 독립적인 작업은 "
         "depends_on 을 비워 동시 실행되게 하고, 뒤 작업이 앞 작업 결과에 의존하면 앞 작업의 "
         "id 를 depends_on 에 넣는다(예: 코드 분석 결과로 PPT 생성). 요청이 단일 작업이면 "
-        "subtasks 를 1개만 만든다."
+        "subtasks 를 1개만 만든다.\n"
+        "도메인 선택 기준 — " + _DOMAIN_GUIDE
     ),
     "inputSchema": {
         "json": {
@@ -673,7 +723,10 @@ _PLANNER_SYSTEM_PROMPT = (
     "호출한다. 각 서브태스크에는 고유 id(t1, t2 …), 도메인, 구체적 작업(subtask), 그리고 "
     "선행 서브태스크 id 목록(depends_on)을 부여한다. 서로 독립적인 작업은 depends_on 을 "
     "비워 병렬 실행되게 하고, 앞 작업 결과에 의존하는 작업은 그 앞 작업 id 를 depends_on 에 "
-    "넣는다. 단일 작업이면 subtasks 를 1개로 둔다. 도메인은 coding/media/research/ops/chat 중 선택."
+    "넣는다. 단일 작업이면 subtasks 를 1개로 둔다.\n"
+    "도메인은 coding/media/research/ops/chat 중 선택한다. " + _DOMAIN_GUIDE + "\n"
+    "판단이 애매하면 chat 보다 도구가 있는 도메인을 고른다 — chat 은 도구가 없어 "
+    "검색·파일 작업을 수행할 수 없다."
 )
 
 

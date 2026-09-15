@@ -1,6 +1,7 @@
 """Gateway client — httpx + botocore SigV4 + BedrockUser assume role."""
 import os
 import json
+import time
 import asyncio
 from typing import AsyncIterator, Optional
 
@@ -15,6 +16,154 @@ from botocore.awsrequest import AWSRequest
 # OpenAI Responses 라우트 통합 — 예외 타입 (순수 add)
 # 기존 Bedrock 경로에는 영향 없음. OpenAI 경로 전용.
 # ─────────────────────────────────────────────────────────────────
+#: converse 1건의 **연결 시도** 예산 기본값(초).
+#: 과거 converse 는 3회 재시도 × (urlopen 300s + 잡 폴링 300s) = 최악 1800초(30분)였다.
+#: 재시도 사이에 누적 상한이 없어 예산이 매 시도마다 새로 시작한 탓이다.
+#: ⚠️ 이 예산은 **HTTP 연결 시도(urlopen)와 그 재시도에만** 적용된다 —
+#:    비동기 잡 대기는 포함하지 않는다. 잡은 서버측에서 돌고 결과가 S3 에 떨어지므로
+#:    1시간 이상 걸릴 수 있고, 그 대기는 `_job_max_wait()`(AE_JOB_MAX_WAIT)가 관장한다.
+#:    env 이름 `AE_CONVERSE_TOTAL_BUDGET` 은 하위 호환으로 유지한다.
+_CONVERSE_TOTAL_BUDGET_DEFAULT = 600
+#: 단일 HTTP 시도의 read 타임아웃 상한(기존 값) — 이제 남은 예산으로 clamp 된다.
+_CONVERSE_ATTEMPT_TIMEOUT_CAP = 300
+#: clamp 하한 — 예산이 거의 없어도 최소 이만큼은 준다(0초 타임아웃 즉시 실패 방지).
+_CONVERSE_ATTEMPT_TIMEOUT_FLOOR = 5
+
+#: 비동기 잡 대기 상한 기본값(초) — 2시간.
+#: 1시간 이상의 긴 출력은 단일 HTTP 연결로 불가능하고 비동기 잡 폴링만이 경로다.
+#: `AE_JOB_MAX_WAIT` 로 조정한다.
+_JOB_MAX_WAIT_DEFAULT = 7200
+#: 적응형 폴링 간격 — 경과 시간 단계 경계(초)와 각 단계의 간격(초).
+#: 고정 1초 간격은 2시간이면 S3 GET 7200회다. 단계적으로 늘려 호출 수를 줄인다.
+_JOB_POLL_FAST_UNTIL = 30       # 처음 30초
+_JOB_POLL_MEDIUM_UNTIL = 300    # ~5분
+_JOB_POLL_SLOW_UNTIL = 1200     # ~20분
+_JOB_POLL_INTERVAL_FAST = 1
+_JOB_POLL_INTERVAL_MEDIUM = 2
+_JOB_POLL_INTERVAL_SLOW = 5
+_JOB_POLL_INTERVAL_SLOWEST = 10
+
+#: converse 비스트리밍 경로의 max_tokens 하향(step-down) 재시도 상한.
+#: SSE(`stream_sse_realtime`)의 `max_retries = 2` 와 동일하며, 만료·prefix 재시도
+#: 예산(3회)과는 **별도 카운터**로 관리한다.
+_MAX_TOKENS_STEPDOWN_RETRIES = 2
+#: step-down 하한 — 이보다 작게는 줄이지 않는다(SSE 와 동일).
+_MAX_TOKENS_STEPDOWN_FLOOR = 1024
+
+#: 실시간 SSE 타임아웃 — httpx.Timeout 호출과 에러 문구가 **같은 상수**를 참조한다.
+#: (과거 문구는 "120초 무응답"으로 실제 read 타임아웃 300초와 어긋나 조사 오판을 유발했다.)
+#: total 은 `AE_SSE_TOTAL_TIMEOUT` 로 조정 가능(`_sse_total_timeout()`), read/connect 는 고정.
+_SSE_TOTAL_TIMEOUT = 3600.0
+_SSE_CONNECT_TIMEOUT = 30.0
+_SSE_READ_TIMEOUT = 300.0
+
+#: 스트리밍 단발(`_converse_stream_live_once`) 타임아웃.
+#: 과거 total 300초가 prefer_streaming 경로(supervisor/deep_research/depth_router)의
+#: 5분 벽이었다 — SSE total 과 같은 값으로 올린다.
+#: `AE_STREAM_LIVE_TOTAL_TIMEOUT` 우선, 없으면 `AE_SSE_TOTAL_TIMEOUT`/기본값.
+_STREAM_LIVE_TOTAL_TIMEOUT = _SSE_TOTAL_TIMEOUT
+_STREAM_LIVE_CONNECT_TIMEOUT = _SSE_CONNECT_TIMEOUT
+
+
+def _converse_total_budget() -> float:
+    """converse 1건의 연결 시도 예산(초) — 잡 대기는 포함하지 않는다.
+
+    `AE_CONVERSE_TOTAL_BUDGET` 환경변수로 조정하며, 미설정·비정상값·0 이하면
+    `_CONVERSE_TOTAL_BUDGET_DEFAULT`(600초)를 쓴다.
+    """
+    raw = os.environ.get("AE_CONVERSE_TOTAL_BUDGET", "")
+    if not raw:
+        return float(_CONVERSE_TOTAL_BUDGET_DEFAULT)
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return float(_CONVERSE_TOTAL_BUDGET_DEFAULT)
+    return val if val > 0 else float(_CONVERSE_TOTAL_BUDGET_DEFAULT)
+
+
+def _env_positive_float(name: str, default: float) -> float:
+    """`name` 환경변수를 양수 float 으로 읽고, 미설정·비정상값·0 이하면 `default`.
+
+    `_converse_total_budget` 과 동일한 폴백 규칙을 공유한다.
+    """
+    raw = os.environ.get(name, "")
+    if not raw:
+        return float(default)
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return float(default)
+    return val if val > 0 else float(default)
+
+
+def _job_max_wait() -> int:
+    """비동기 잡 대기 상한(초).
+
+    `AE_JOB_MAX_WAIT` 로 조정하며, 미설정·비정상값·0 이하면
+    `_JOB_MAX_WAIT_DEFAULT`(7200초 = 2시간)를 쓴다.
+
+    이 값은 `_converse_total_budget()`(연결 시도 예산)과 **무관**하다 —
+    잡은 서버측에서 돌고 결과가 S3 에 떨어지므로 1시간 이상 기다려야 한다.
+    """
+    return int(_env_positive_float("AE_JOB_MAX_WAIT", _JOB_MAX_WAIT_DEFAULT))
+
+
+def _job_poll_interval(elapsed: float) -> int:
+    """경과 시간에 따른 적응형 잡 폴링 간격(초).
+
+    처음 30초는 1초, 그 다음 2초, 5분 이후 5초, 20분 이후 10초.
+    짧은 대기(수 초)에서는 기존 1초 간격 동작이 그대로 유지된다.
+    """
+    if elapsed < _JOB_POLL_FAST_UNTIL:
+        return _JOB_POLL_INTERVAL_FAST
+    if elapsed < _JOB_POLL_MEDIUM_UNTIL:
+        return _JOB_POLL_INTERVAL_MEDIUM
+    if elapsed < _JOB_POLL_SLOW_UNTIL:
+        return _JOB_POLL_INTERVAL_SLOW
+    return _JOB_POLL_INTERVAL_SLOWEST
+
+
+def _sse_total_timeout() -> float:
+    """실시간 SSE 스트림의 total 타임아웃(초) — `AE_SSE_TOTAL_TIMEOUT` 로 조정."""
+    return _env_positive_float("AE_SSE_TOTAL_TIMEOUT", _SSE_TOTAL_TIMEOUT)
+
+
+def _stream_live_total_timeout() -> float:
+    """스트리밍 단발 호출의 total 타임아웃(초).
+
+    `AE_STREAM_LIVE_TOTAL_TIMEOUT` 이 있으면 그 값, 없으면 SSE total 과 같은 값.
+    """
+    raw = os.environ.get("AE_STREAM_LIVE_TOTAL_TIMEOUT", "")
+    if raw:
+        return _env_positive_float("AE_STREAM_LIVE_TOTAL_TIMEOUT", _sse_total_timeout())
+    return _sse_total_timeout()
+
+
+def _payload_max_tokens(payload):
+    """payload 의 `inferenceConfig.maxTokens` 를 읽는다(없으면 None).
+
+    step-down 재시도가 시작값을 **중복 계산하지 않고** payload 에서 읽도록 하는 seam.
+    """
+    if not isinstance(payload, dict):
+        return None
+    inf = payload.get("inferenceConfig")
+    if not isinstance(inf, dict):
+        return None
+    val = inf.get("maxTokens")
+    return val if isinstance(val, int) else None
+
+
+def _set_payload_max_tokens(payload, value) -> bool:
+    """payload 의 `inferenceConfig.maxTokens` 만 덮어쓴다(다른 body 필드 불변)."""
+    if not isinstance(payload, dict):
+        return False
+    inf = payload.get("inferenceConfig")
+    if not isinstance(inf, dict):
+        return False
+    inf["maxTokens"] = value
+    return True
+
+
 class QuotaExceededError(Exception):
     """403 권한·쿼터 거부 — 기존 403 처리 흐름(ApprovalRequestDialog)과 연결."""
     pass
@@ -110,22 +259,36 @@ _MODEL_MAX_TOKENS_MAP = {
     "nova-canvas":       1024,
 }
 
-# Absolute fallback when no pattern matches — Bedrock minimum guarantee
+# Conservative floor — kept for malformed input (empty model id) and for callers
+# that still reference the Bedrock minimum guarantee.
 _DEFAULT_MAX_TOKENS = 4096
+
+#: 맵에 매칭되지 않는 **미지 모델**의 낙관적 상한.
+#: `AE_MAX_TOKENS` 기본값(64000)과 같은 값이며, 사실상 "env cap 을 그대로 쓴다"는 뜻이다.
+#: 근거 없는 모델별 추측값을 `_MODEL_MAX_TOKENS_MAP` 에 추가하는 대신 이 상한을 쓴다
+#: (예: anthropic.claude-opus-5 / claude-sonnet-5 / gpt 계열은 어느 키에도 걸리지 않는다).
+#: ⚠️ 낙관적 상한이므로 실제 한계를 넘길 수 있다 — `converse`(비스트리밍)와
+#:    `stream_sse_realtime`(스트리밍) 양쪽의 max_tokens step-down 재시도가 안전망이다.
+_UNKNOWN_MODEL_MAX_TOKENS = 64000
 
 
 def _resolve_model_max_tokens(model_id: str) -> int:
     """Return the safe max_tokens limit for a model id.
 
     Matches by case-insensitive substring against `_MODEL_MAX_TOKENS_MAP`.
-    Falls back to `_DEFAULT_MAX_TOKENS` (4096) if no pattern matches —
-    this guarantees we never send a value above any known Bedrock limit.
+    When no pattern matches, returns `_UNKNOWN_MODEL_MAX_TOKENS` (64000) —
+    an optimistic ceiling so that new/unknown models are not silently capped
+    at the old 4096 floor. Over-shooting is corrected at runtime by the
+    max_tokens step-down retry in `converse` / `stream_sse_realtime`.
+    An empty model id still falls back to `_DEFAULT_MAX_TOKENS` (malformed call).
 
     Examples:
-        us.deepseek.r1-v1:0           → 32768
-        us.anthropic.claude-opus-4-7  → 64000
-        amazon.nova-pro-v1:0          → 5120
-        unknown-model-id              → 4096
+        us.deepseek.r1-v1:0             → 32767
+        us.anthropic.claude-opus-4-7    → 64000
+        amazon.nova-pro-v1:0            → 5120
+        anthropic.claude-opus-5         → 64000  (미지 모델 → 낙관적 상한)
+        unknown-model-id                → 64000  (미지 모델 → 낙관적 상한)
+        ""                              → 4096
     """
     if not model_id:
         return _DEFAULT_MAX_TOKENS
@@ -139,7 +302,8 @@ def _resolve_model_max_tokens(model_id: str) -> int:
     for key in sorted(_MODEL_MAX_TOKENS_MAP.keys(), key=lambda k: -len(k)):
         if key in mid:
             return _MODEL_MAX_TOKENS_MAP[key]
-    return _DEFAULT_MAX_TOKENS
+    # 매칭 실패 = 미지 모델. 4096 으로 누르지 않고 낙관적 상한을 쓴다.
+    return _UNKNOWN_MODEL_MAX_TOKENS
 
 
 def _is_max_tokens_error(msg: str) -> bool:
@@ -184,6 +348,13 @@ def _is_prefix_form_error(msg: str) -> bool:
     게이트웨이 /converse 실측(2026-07)에서 확인된 형태:
     - CRIS 필수 모델에 bare ID 사용 → "not in allowed"
     - ON_DEMAND 모델에 us./global. prefix 사용 → "model identifier is invalid" (ValidationException)
+    게이트웨이 ConverseStream 실측(2026-08)에서 확인된 형태:
+    - INFERENCE_PROFILE 전용 모델에 bare ID 사용 → ValidationException.
+      "Invocation of model ID ... with on-demand throughput isn't supported.
+       Retry your request with the ID or ARN of an inference profile ..."
+      control-plane이 `inferenceTypesSupported=["INFERENCE_PROFILE"]`로 보고하는
+      모델이며, 이 신호는 정확히 "bare ID → CRIS(us./global.) 필요"를 뜻한다.
+      벤더 메시지 전문 대신 안정적인 부분 문자열만 본다.
     양방향 prefix 폴백의 트리거로 사용한다.
     """
     if not msg:
@@ -201,7 +372,17 @@ def _is_prefix_form_error(msg: str) -> bool:
         return True
     if "resourcenotfound" in low and "model" in low:
         return True
+    if "on-demand throughput" in low:
+        return True
+    if "inference profile" in low:
+        return True
     return False
+
+
+#: SSE 이벤트 중 **모델 출력을 담지 않는** 프레임 타입(실측 관측 기준).
+#: 이 프레임만 방출된 상태는 "출력 미방출"로 보고 prefix 폴백 1회를 허용한다.
+#: 출력이 이미 소비자에게 전달된 뒤에는 어떤 경우에도 재시도하지 않는다.
+_SSE_NON_OUTPUT_EVENT_TYPES = ("stream_start", "error")
 
 
 def _strip_region_prefix(model_id: str) -> str:
@@ -215,6 +396,54 @@ def _strip_region_prefix(model_id: str) -> str:
 def _has_region_prefix(model_id: str) -> bool:
     """us./eu./global. prefix가 붙어 있으면 True."""
     return model_id.startswith("us.") or model_id.startswith("eu.") or model_id.startswith("global.")
+
+
+#: S3 오류 코드 — "결과가 아직 안 올라옴"(폴링을 계속하면 해소될 수 있음).
+_S3_TRANSIENT_MISS_CODES = frozenset({"NoSuchKey", "NotFound", "404"})
+#: S3 오류 코드 — 기다려도 해소되지 않음(권한·자격증명·버킷 문제 → 즉시 종료).
+_S3_FATAL_CODES = frozenset({
+    "AccessDenied",
+    "InvalidAccessKeyId",
+    "SignatureDoesNotMatch",
+    "ExpiredToken",
+    "ExpiredTokenException",
+    "NoSuchBucket",
+    "AllAccessDisabled",
+})
+#: HTTP 상태 기반 판정 — 403은 즉시 종료, 404는 정상적인 miss.
+_S3_FATAL_HTTP_STATUS = frozenset({403})
+_S3_TRANSIENT_HTTP_STATUS = frozenset({404})
+
+
+def _is_transient_s3_miss(exc) -> bool:
+    """잡 폴링 중 발생한 S3 예외가 "아직 결과 없음"인지 판정한다.
+
+    ``True``  → 정상적인 miss(또는 판정 불가) → 폴링을 계속한다.
+    ``False`` → 권한·자격증명·버킷 오류처럼 기다려도 해소되지 않음 → 즉시 종료한다.
+
+    botocore ``ClientError`` 의 ``response["Error"]["Code"]`` 와
+    ``response["ResponseMetadata"]["HTTPStatusCode"]`` 를 본다.
+    판정 불가(네트워크 순간 오류, ``response`` 없는 예외 등)는 **``True``** 로 본다 —
+    기존 ``except Exception: continue`` 동작을 그대로 보존해 무회귀를 보장한다.
+    """
+    response = getattr(exc, "response", None)
+    if not isinstance(response, dict):
+        return True
+    error = response.get("Error")
+    code = str((error or {}).get("Code") or "") if isinstance(error, dict) else ""
+    meta = response.get("ResponseMetadata")
+    raw_status = meta.get("HTTPStatusCode") if isinstance(meta, dict) else None
+    try:
+        status = int(raw_status) if raw_status is not None else None
+    except (TypeError, ValueError):
+        status = None
+    # 종료 사유를 먼저 본다 — 403 AccessDenied 가 404 로 위장하는 경우까지 잡는다.
+    if code in _S3_FATAL_CODES or status in _S3_FATAL_HTTP_STATUS:
+        return False
+    if code in _S3_TRANSIENT_MISS_CODES or status in _S3_TRANSIENT_HTTP_STATUS:
+        return True
+    # 그 밖은 판정 불가 → 기존 동작(폴링 계속) 유지.
+    return True
 
 
 class GatewayClient:
@@ -568,14 +797,34 @@ class GatewayClient:
         # 양방향 prefix 폴백은 정확히 1회만 수행 (무한루프 방지)
         _prefix_fallback_used = False
 
-        for attempt in range(3):
+        # max_tokens 하향(step-down) 재시도 — **별도 카운터**로 만료·prefix 재시도
+        # 예산(3회)을 잠식하지 않는다. 시작값은 payload 가 이미 계산한 값을 읽는다
+        # (중복 계산 금지 — _build_payload 의 min(env_cap, model_limit) 결과).
+        _stepdown_used = 0
+        current_max = _payload_max_tokens(payload)
+
+        # 연결 시도 예산 — urlopen 시도와 그 재시도에만 적용된다(잡 대기는 제외).
+        # 이 deadline 이 없던 과거엔 시도마다 예산이 새로 시작해 최악 1800초(30분)였다.
+        deadline = time.monotonic() + _converse_total_budget()
+
+        attempt = 0
+        while attempt < 3:
+            # 예산이 이미 끝났으면 새 시도를 시작하지 않는다(첫 시도는 항상 보장).
+            if (attempt > 0 or _stepdown_used) and time.monotonic() >= deadline:
+                print(f"[GW] 연결 시도 예산 소진 — 재시도 중단 (시도 {attempt+1}/3 미시작)")
+                break
             headers = self._sign("POST", url, body_bytes)
-            def _call(h=headers, b=body_bytes):
+            # 남은 예산으로 clamp — 300은 기존 값이며 이제 상한으로만 남는다.
+            attempt_timeout = max(
+                _CONVERSE_ATTEMPT_TIMEOUT_FLOOR,
+                min(_CONVERSE_ATTEMPT_TIMEOUT_CAP, int(deadline - time.monotonic())),
+            )
+            def _call(h=headers, b=body_bytes, t=attempt_timeout):
                 req = urllib.request.Request(url, data=b, method="POST")
                 for k, v in h.items():
                     req.add_header(k, v)
                 try:
-                    resp = urllib.request.urlopen(req, timeout=300)
+                    resp = urllib.request.urlopen(req, timeout=t)
                     return json.loads(resp.read().decode())
                 except urllib.error.HTTPError as e:
                     return {"decision": "ERROR", "error": f"HTTP {e.code}: {e.read().decode()[:200]}"}
@@ -590,8 +839,12 @@ class GatewayClient:
                     print(f"[GW] 토큰 만료 감지 (시도 {attempt+1}/3) — 자격증명 갱신 후 재시도")
                     self.force_refresh_creds()
                     payload = self._build_payload(model_id, messages, system_prompt)
+                    # 이미 하향한 max_tokens 는 재구성 후에도 유지한다(다시 초과 실패 방지).
+                    if current_max is not None:
+                        _set_payload_max_tokens(payload, current_max)
                     body_bytes = json.dumps(payload).encode()
                     await asyncio.sleep(0.5)
+                    attempt += 1
                     continue
 
             # prefix 형태 불일치로 거부 → 반대 형태로 1회 폴백 (양방향)
@@ -610,6 +863,26 @@ class GatewayClient:
                     payload["modelId"] = new_id
                     body_bytes = json.dumps(payload).encode()
                     _prefix_fallback_used = True  # 정확히 1회만
+                    attempt += 1
+                    continue
+
+            # max_tokens 초과 → 하향 후 재시도 (SSE 와 동일한 판정·계산 재사용).
+            # 미지 모델에 낙관적 상한을 싣는 정책의 안전망이다 — 하드 실패시키지 않는다.
+            if err_or_deny and current_max is not None \
+                    and _stepdown_used < _MAX_TOKENS_STEPDOWN_RETRIES \
+                    and _is_max_tokens_error(deny_reason):
+                extracted = _extract_model_token_limit(deny_reason)
+                if extracted and extracted - 1 < current_max:
+                    # 에러는 "lower than X" 라고 함 → X-1 사용
+                    new_max = max(_MAX_TOKENS_STEPDOWN_FLOOR, extracted - 1)
+                else:
+                    new_max = max(_MAX_TOKENS_STEPDOWN_FLOOR, int(current_max * 0.5))
+                if new_max < current_max and _set_payload_max_tokens(payload, new_max):
+                    print(f"[GW] max_tokens 한계 초과 — {current_max} → {new_max}로 재시도 "
+                          f"(step-down {_stepdown_used+1}/{_MAX_TOKENS_STEPDOWN_RETRIES})")
+                    current_max = new_max
+                    body_bytes = json.dumps(payload).encode()
+                    _stepdown_used += 1  # 만료·prefix 예산(attempt)은 소모하지 않는다
                     continue
 
             if result.get("decision") == "ACCEPTED":
@@ -619,7 +892,9 @@ class GatewayClient:
                 #    toolChoice 강제 호출이 tool_calls 를 못 받아 폴백되던 결함이 있었다.
                 job_id = result.get("job_id", "")
                 if job_id:
-                    data = await self._poll_job_data(job_id, max_wait=300)
+                    # 잡 대기는 연결 시도 예산과 무관하다 — 서버측에서 도는 잡은
+                    # 1시간 이상 걸릴 수 있으므로 _job_max_wait()(기본 7200초)를 쓴다.
+                    data = await self._poll_job_data(job_id, max_wait=_job_max_wait())
                     if isinstance(data, dict):
                         out_msg = (data.get("output") or {}).get("message")
                         if isinstance(out_msg, dict) and out_msg.get("content"):
@@ -645,6 +920,7 @@ class GatewayClient:
                     return {"decision": "ERROR", "error": f"비동기 작업 시간 초과 (job: {job_id[:12]}...)"}
                 if attempt < 2:
                     await asyncio.sleep(2)
+                    attempt += 1
                     continue
             return result
         return result
@@ -703,11 +979,16 @@ class GatewayClient:
 
             error_event = None
             had_data = False
+            _output_seen = False   # 모델 출력 프레임을 방출했는지
+            _prefix_retry = False  # in-band prefix 폴백 재시도가 예약됐는지
             try:
                 async with httpx.AsyncClient(
                     # SSE 스트림 — Lambda 응답 시간 제한 없음 (1시간), connect 30초, read 5분
-                    # 모델이 5분 이상 토큰 생성 안 하면 끊김으로 판단
-                    timeout=httpx.Timeout(3600.0, connect=30.0, read=300.0)
+                    # 모델이 read 타임아웃 이상 토큰 생성 안 하면 끊김으로 판단.
+                    # 아래 ReadTimeout 에러 문구가 같은 상수를 참조한다(값 어긋남 방지).
+                    timeout=httpx.Timeout(_sse_total_timeout(),
+                                          connect=_SSE_CONNECT_TIMEOUT,
+                                          read=_SSE_READ_TIMEOUT)
                 ) as client:
                     async with client.stream("POST", url, content=body_bytes, headers=signed_headers) as resp:
                         if resp.status_code != 200:
@@ -747,6 +1028,25 @@ class GatewayClient:
                                                 attempt += 1
                                                 # 안쪽 chunk 루프 탈출 → while 루프 재시작
                                                 break
+                                        # prefix 형태 거부가 in-band error 이벤트(HTTP 200)로
+                                        # 오는 실측 형태 — 아래 비-200 폴백 블록은 이 경우를
+                                        # 볼 수 없으므로 여기서 반대 형태로 1회만 재시도한다.
+                                        # 한도는 동일 route 1회(_prefix_fallback_used) 그대로.
+                                        if (not _output_seen) and (not _prefix_fallback_used) \
+                                                and _is_prefix_form_error(msg):
+                                            if _has_region_prefix(model_id):
+                                                _flip_id = _strip_region_prefix(model_id)
+                                            else:
+                                                _flip_id = f"us.{model_id}"
+                                            if _flip_id != model_id:
+                                                print(f"[GW SSE] prefix 형태 거부(in-band) '{model_id}' → '{_flip_id}' 로 재시도")
+                                                model_id = _flip_id
+                                                _prefix_fallback_used = True
+                                                _prefix_retry = True
+                                                # 오류를 방출하지 않고 while 루프 재시작
+                                                break
+                                    if evt.get("type") not in _SSE_NON_OUTPUT_EVENT_TYPES:
+                                        _output_seen = True
                                     had_data = True
                                     yield evt
                                 else:
@@ -755,7 +1055,8 @@ class GatewayClient:
                                 # break 발생 — chunk 루프 끝
                                 break
             except httpx.ReadTimeout:
-                error_event = {"type": "error", "message": "Lambda 응답 타임아웃 (120초 무응답)"}
+                error_event = {"type": "error",
+                               "message": f"Lambda 응답 타임아웃 ({int(_SSE_READ_TIMEOUT)}초 무응답)"}
             except httpx.ConnectTimeout:
                 error_event = {"type": "error", "message": "Lambda 연결 타임아웃"}
             except httpx.RemoteProtocolError as e:
@@ -763,6 +1064,9 @@ class GatewayClient:
             except Exception as e:
                 error_event = {"type": "error", "error": str(e)}
 
+            # in-band prefix 폴백 예약 → 교정된 model_id로 같은 while 루프에서 재시도
+            if _prefix_retry:
+                continue
             # prefix 형태 불일치로 거부 → 반대 형태로 1회 폴백 (양방향, 데이터 미방출 시에만)
             if error_event is not None and not had_data and not _prefix_fallback_used:
                 _emsg = str(error_event.get("message") or error_event.get("error") or "")
@@ -798,7 +1102,11 @@ class GatewayClient:
         headers = dict(aws_req.headers)
 
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=30.0)) as client:
+            # total 300초는 prefer_streaming 경로의 5분 벽이었다 — SSE total 과 같은 값으로.
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(_stream_live_total_timeout(),
+                                      connect=_STREAM_LIVE_CONNECT_TIMEOUT)
+            ) as client:
                 resp = await client.post(url, content=body_bytes, headers=headers)
                 raw = resp.text
         except Exception as e:
@@ -931,6 +1239,12 @@ class GatewayClient:
     async def _poll_job_data(self, job_id, max_wait=300):
         """비동기 잡 결과(S3)를 **구조화 dict 그대로** 폴링해 반환한다.
 
+        ``max_wait`` 는 **총 대기 초**다(기본값 300 유지 — 호출자가 긴 값을 넘긴다.
+        converse 는 `_job_max_wait()`, 기본 7200초를 넘긴다).
+        폴링 간격은 `_job_poll_interval` 의 적응형 단계를 따른다 —
+        처음 30초 1초, 그 다음 2초, 5분 이후 5초, 20분 이후 10초.
+        짧은 ``max_wait``(예: 4)에서는 1초 간격 4회로 기존 동작과 동일하다.
+
         반환: 파싱된 전체 응답 엔벨로프 dict(예: ``{"output": {"message": {...}}}``) 또는
               시간 초과 시 None.
 
@@ -945,12 +1259,22 @@ class GatewayClient:
             account = "107650139384"
         bucket = f"bedrock-gw-dev-payload-{account}"
         key = f"results/{job_id}.json"
-        for i in range(max_wait):  # 1초 간격으로 폴링
-            await asyncio.sleep(1)
+        elapsed = 0.0
+        while elapsed < max_wait:
+            # 적응형 간격 — 남은 대기 시간을 넘기지 않는다(max_wait = 총 대기 초).
+            interval = min(_job_poll_interval(elapsed), max_wait - elapsed)
+            await asyncio.sleep(interval)
+            elapsed += interval
             try:
                 obj = s3.get_object(Bucket=bucket, Key=key)
                 return json.loads(obj["Body"].read().decode())
-            except Exception:
+            except Exception as exc:
+                # 권한·자격증명·버킷 오류는 기다려도 해소되지 않는다 — 5분을 다 태우지 말고
+                # 실제 원인을 남기고 즉시 종료한다("아직 결과 없음"과 구분).
+                if not _is_transient_s3_miss(exc):
+                    print(f"[GW] 잡 폴링 중단 — S3 오류가 재시도로 해소되지 않음: "
+                          f"{type(exc).__name__}: {str(exc)[:200]}")
+                    return None
                 continue
         return None
 
@@ -1195,18 +1519,30 @@ class GatewayClient:
         body_bytes = json.dumps(body).encode()
         return await self._openai_post_with_retry(url, body_bytes, timeout, label="responses-tools")
 
+    def _apply_jobs_model_id(self, body, model_id):
+        """비동기 잡 라우트의 model ID 부착 seam(오버라이드 지점).
+
+        비동기 잡 라우트는 게이트웨이 레벨에서 'modelId'를 요구한다(라이브 확인:
+        누락 시 400 'modelId is required'). 동기 라우트와 달리 게이트웨이가 이
+        필드를 소비/제거 후 백엔드를 호출하므로 잡 경로에서만 부착한다.
+
+        기본 구현은 기존 인라인 동작과 **바이트 동일**하다 — 입력 body를 변형하지
+        않고 top-level 'modelId'를 부착한 새 dict를 반환한다(키 순서도 동일).
+        하위 클래스는 verified Route_Contract에 따라 부착 위치·필요 여부를
+        오버라이드할 수 있다.
+        """
+        return {**body, "modelId": model_id}
+
     async def openai_responses_job_submit(self, model_id, messages, system_prompt="", timeout=30):
         """POST {gateway_url}/openai/responses-jobs 제출 → job_id 반환.
 
         제출 응답에서 job_id를 방어적으로 추출(후보 키 job_id/jobId/id/job/task_id).
         동일한 403/422/500/토큰만료 처리 규칙 적용.
+        model ID 부착은 `_apply_jobs_model_id` seam에 위임한다.
         """
         url = f"{self.gateway_url}/openai/responses-jobs"
         body = self._build_openai_payload(model_id, messages, system_prompt)
-        # 비동기 잡 라우트는 게이트웨이 레벨에서 'modelId'를 요구한다(라이브 확인:
-        # 누락 시 400 'modelId is required'). 동기 라우트와 달리 게이트웨이가 이
-        # 필드를 소비/제거 후 백엔드를 호출하므로 여기서만 부착한다.
-        body = {**body, "modelId": model_id}
+        body = self._apply_jobs_model_id(body, model_id)
         body_bytes = json.dumps(body).encode()
         try:
             raw = await self._openai_post_with_retry(url, body_bytes, timeout, label="responses-jobs")

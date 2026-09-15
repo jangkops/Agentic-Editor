@@ -128,9 +128,16 @@ def build_coding_subgraph(deps: Any):
     Postcondition: sg.compile() 결과(CompiledStateGraph)를 반환한다. checkpointer 는
                    주입하지 않는다(부모 그래프가 주입 — API_NOTES 항목 6).
     """
+    # 읽기 전용 외부 조회 도구 3종(web_search/search_papers/fetch_content)을 병합한다.
+    # 근거: planner LLM 이 외부 조사 요청을 coding 으로 라우팅하는 일이 실측으로 확인됐고,
+    # 그 워커에 조회 도구가 없으면 모델이 run_command + curl 로 우회해 옵트인·동의 게이트를
+    # 무력화한다. 게이트를 통과하는 도구를 제공해 그 우회 동기를 없앤다(부작용 없는 읽기
+    # 전용이며 게이트 off 면 빈 결과를 비차단 반환 — RESEARCH_LOOKUP_TOOLS 주석 참조).
+    from ai_engine.agent_system.subgraphs.research import RESEARCH_LOOKUP_TOOLS
+
     return build_domain_subgraph(
         deps,
-        tools=CODING_TOOLS,
+        tools=CODING_TOOLS + RESEARCH_LOOKUP_TOOLS,
         model_id=deps.model_coding,
         domain="coding",
     )

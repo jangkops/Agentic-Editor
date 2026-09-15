@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<!--
+  Feature: deep-research-engine — Task 20.6 검색 인디케이터 UI Playwright 테스트 하네스
+  Requirements: 18.1, 18.3, 18.7
+
+  <search-indicator> Web Component (src/components/search-indicator.js)를 Electron 앱
+  전체(SSO/파이썬 백엔드/SSE)를 띄우지 않고 격리 검증하기 위한 정적 HTML 하네스다.
+  headless Chromium(Playwright)이 file:// 로 로드한다. (Task 17.3 하네스 패턴 계승)
+
+  - variables.css 를 로드해 실제 디자인 토큰(예: --color-accent/--color-success/--color-error)
+    아래에서 렌더/검증한다.
+  - 컴포넌트가 방출하는 CustomEvent(indicator-active / indicator-dismissed)를 document 에서
+    수신해 window.__indicatorEvents 에 기록한다(해제 결정성·최종 status 검증용).
+    이벤트는 bubbles:true, composed:true 로 방출되므로 document 리스너로 포착된다.
+  - 테스트가 백엔드 SSE 대신 컴포넌트의 공개 API onSearchStatus(payload)를 직접 구동할 수
+    있도록 window.__driveSearchStatus(payload) 를 노출한다(design 9-2 payload 스키마).
+  - 상대 경로(../../../)는 이 파일(tests/e2e/fixtures/)에서 저장소 루트의 src/ 를 가리킨다.
+-->
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>search-indicator harness</title>
+  <link rel="stylesheet" href="../../../src/styles/variables.css">
+  <style>
+    html, body { margin: 0; padding: 24px; background: var(--color-bg-primary, #1e1e1e); }
+    #host { max-width: 560px; }
+  </style>
+  <script>
+    // 컴포넌트가 정의되기 전에 리스너를 걸어 둔다(이벤트는 이후 상호작용에서 방출된다).
+    window.__indicatorEvents = [];
+    document.addEventListener('indicator-active', function (e) {
+      window.__indicatorEvents.push({ type: 'active', detail: e.detail });
+    });
+    document.addEventListener('indicator-dismissed', function (e) {
+      window.__indicatorEvents.push({ type: 'dismissed', detail: e.detail });
+    });
+  </script>
+</head>
+<body>
+  <div id="host">
+    <search-indicator></search-indicator>
+  </div>
+  <!-- 컴포넌트 정의 스크립트: 위의 <search-indicator> 인스턴스를 업그레이드한다. -->
+  <script src="../../../src/components/search-indicator.js"></script>
+  <script>
+    // 테스트가 searchStatus payload 를 컴포넌트에 주입하는 진입점.
+    // (실제 배선에서는 center-views.js 가 SSE searchStatus → el.onSearchStatus 로 연결한다 — Task 20.4)
+    window.__driveSearchStatus = function (payload) {
+      var el = document.querySelector('search-indicator');
+      if (el && typeof el.onSearchStatus === 'function') {
+        el.onSearchStatus(payload);
+        return true;
+      }
+      return false;
+    };
+  </script>
+</body>
+</html>

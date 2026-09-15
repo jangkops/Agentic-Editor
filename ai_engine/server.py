@@ -1,5 +1,6 @@
 """FastAPI server — AI Editor backend."""
 import os
+import sys
 import json
 import uuid
 import asyncio
@@ -7,6 +8,7 @@ import subprocess
 import re
 from collections import deque
 from datetime import datetime
+from typing import Optional  # py3.12/3.13: render_info 어노테이션(Optional[dict])이 def 시점에 평가됨
 
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -7347,8 +7349,13 @@ async def _tool_edit_image(tool_input: dict, project_path: str, aws_profile: str
 
 
 
-def _execute_tool(tool_name: str, tool_input: dict, project_path: str = "", aws_profile: str = "", bedrock_user: str = "", template_id: str = "") -> str:
+def _execute_tool(tool_name: str, tool_input: dict, project_path: str = "", aws_profile: str = "", bedrock_user: str = "", template_id: str = "", deps=None) -> str:
     """도구를 실행하고 결과를 문자열로 반환.
+
+    deps(GraphDeps: gateway/model_*/checkpointer/store)는 GatewayToolNode 가 전달하며,
+    외부 리서치 도구(특히 deep_research)가 Bedrock Gateway 기반 Planner/Generator 를 실제로
+    사용하도록 실행기로 배선한다(Task 18.1). deps=None(기존 호출부/비그래프 경로)이면 리서치
+    파이프라인은 결정적 폴백으로 비차단 동작한다(무회귀). 리서치 외 도구는 deps 를 쓰지 않는다.
 
     template_id가 주어지고 tool_name이 generate_pptx면, 활성 템플릿을 해석해
     tool_input에 templatePath/templateId/styleProfile을 주입한다 (pptx-template-styling
@@ -7477,6 +7484,12 @@ def _execute_tool(tool_name: str, tool_input: dict, project_path: str = "", aws_
         elif tool_name == "run_command":
             cmd = tool_input["command"]
             cwd = tool_input.get("cwd", project_path or os.getcwd())
+            # 외부 egress 감사(비차단) — 셸은 리서치 옵트인·동의 게이트를 우회한다.
+            # 실측: 리서치 도구가 없는 워커로 라우팅된 모델이 `curl` 로 직접 외부 API 를
+            # 호출해 결과를 얻었다. 게이트를 통과하는 정식 경로(web_search 등)와 달리
+            # 캐시·레이트리밋·인용 검증을 건너뛰고, 사용자가 리서치를 꺼도 막히지 않는다.
+            # 셸 자체를 막으면 npm/git/pip 이 죽으므로 차단하지 않고 **기록**한다.
+            _audit_shell_egress(cmd)
             result = subprocess.run(
                 cmd, shell=True, capture_output=True, text=True,
                 timeout=30, cwd=cwd,
@@ -7498,6 +7511,26 @@ def _execute_tool(tool_name: str, tool_input: dict, project_path: str = "", aws_
             cmd = f"grep -rn {include} --color=never '{query}' '{path}' 2>/dev/null | head -50"
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
             return result.stdout or "검색 결과 없음"
+
+        elif tool_name in ("web_search", "search_papers", "fetch_content", "deep_research"):
+            # 외부 리서치 도구 (조회 3종: Task 10.2 / 딥리서치: Task 14.1 — 요구사항 17.2/17.3/17.4).
+            # name 은 RESEARCH_TOOLS 스키마·RESEARCH_TOOL_EXECUTORS 키와 동일 문자열로
+            # 일치한다(요구사항 17.4). _REMOTE_TOOLS 와 무관해 항상 로컬(백엔드)에서
+            # 실행된다. web_search/search_papers/fetch_content 실행기는 backend(단일 egress)
+            # +normalize+rank 로, deep_research 실행기는 축 B 파이프라인 동기 seam
+            # (run_deep_research_sync)으로 조립한 dict 를 반환하며, 옵트인/동의 off·실패·
+            # 타임아웃은 예외 없이 구조화 dict 로 표현된다(비차단 — P8/P15). 여기서 JSON
+            # 문자열 1개로 직렬화해 호출당 정확히 하나의 결과를 반환한다(GatewayToolNode 가
+            # ainvoke 로 ToolMessage 1개 생성 — 17.3). deep_research 결과 dict 는 리포트 파일
+            # 경로를 `path` 로 실어, GatewayToolNode 가 디스크 실측 후 verified_files 에
+            # 포함한다(요구사항 17.5).
+            from ai_engine.agent_system.subgraphs.research import RESEARCH_TOOL_EXECUTORS
+            _executor = RESEARCH_TOOL_EXECUTORS[tool_name]
+            # deps(GraphDeps)를 균일 전달 — deep_research 실행기가 gateway 기반 Planner/
+            # Generator 를 사용하도록 배선한다(Task 18.1). 경량 조회 도구(web/academic/fetch)는
+            # deps 를 받되 결정적 조립을 유지한다(무회귀). deps=None 이면 결정적 폴백(비차단).
+            _res = _executor(tool_input if isinstance(tool_input, dict) else {}, deps=deps)
+            return json.dumps(_res, ensure_ascii=False)
 
         else:
             return f"알 수 없는 도구: {tool_name}"
@@ -7809,17 +7842,20 @@ async def route_openai_chat(gw, model_id, messages, system_prompt="", timeout=12
     try:
         from ai_engine import openai_adapter as _ad
         from ai_engine.gateway_module import SyncTimeout as _SyncTimeout
+        from ai_engine.gateway_module import _job_max_wait
     except ImportError:
         import openai_adapter as _ad
         from gateway_module import SyncTimeout as _SyncTimeout
+        from gateway_module import _job_max_wait
     try:
         raw = await gw.openai_responses_sync(
             model_id, messages, system_prompt=system_prompt, timeout=timeout)
     except _SyncTimeout:
         print(f"[OpenAIRoute] 동기 타임아웃 → 비동기 잡 폴백: {model_id}")
+        # 긴 출력(>1시간)은 잡 폴링만이 경로다 — 300초로 자르지 않는다.
         raw = await gw.openai_responses_job_submit_and_poll(
             model_id, messages, system_prompt=system_prompt,
-            poll_interval=5, max_wait=300)
+            poll_interval=5, max_wait=_job_max_wait())
     return _ad.to_converse(raw)
 
 
@@ -8844,6 +8880,304 @@ def _filter_uninvokable(catalog: dict) -> dict:
     return filtered
 
 
+def _merge_managed_segment(catalog: dict) -> tuple:
+    """Managed_Segment(Active_Model)를 카탈로그에 병합한다 — 비침습 seam.
+
+    gateway-models-effort-support 작업 5.3. Baseline_Catalog_Segment(control-plane
+    결과 + 기존 denylist·uninvokable 필터 + provider 분류)는 건드리지 않고,
+    Activation_Gate를 통과한 Active_Model만 뒤에 덧붙인다.
+
+    Args:
+        catalog: `_filter_uninvokable`까지 끝난 기존 카탈로그(`{provider: [{id,name}]}`).
+
+    Returns:
+        `(catalog, capabilities)`.
+        - Managed_Segment가 비면 `(입력 catalog 동일 객체, None)` — 응답 바이트가
+          기준선과 동일하게 유지된다(요구사항 12.1, 12.2).
+        - 병합 중 어떤 예외가 발생해도 원인을 200자로 절단해 로그한 뒤
+          `(입력 catalog 동일 객체, None)`을 반환한다(graceful 폴백 — 요구사항 1.13).
+
+    ctx는 최소로 둔다. 저장된 Capability_Map은 Validation_Runner가 Current_Revision·
+    Catalog_Fingerprint·환경 identity를 모두 검사한 뒤에만 `VERIFIED`로 기록하므로,
+    읽기 시점 게이트는 구조 무결성(Malformed·fingerprint 재계산·Complete_Record·
+    Eligible_Contract·Current_Evidence·비-Seed)만 다시 확인한다. 여기서 Bedrock
+    control-plane 카탈로그를 `catalogModelIds`로 넘기지 않는 이유는 그것이
+    Gateway_Catalog가 아니어서 Managed_Segment의 현재성 근거가 될 수 없기 때문이다.
+    """
+    try:
+        from ai_engine.capability import activation_gate as _ag
+        from ai_engine.capability import capability_map as _cm
+
+        _managed = _ag.active_models(_cm.load(), {})
+        if not _managed:
+            return catalog, None  # 비면 catalog·payload 모두 baseline 그대로
+        return _cm.merge_active_into_catalog(catalog, _managed), _cm.to_ui_payload(_managed)
+    except Exception as _e:
+        print(f"[Capability] Managed_Segment 병합 생략: {str(_e)[:200]}")
+        return catalog, None
+
+
+# ─────────────────────────────────────────────────────────────────
+# capability 요청 경로 seam (gateway-models-effort-support, 작업 15.1)
+#
+# `_merge_managed_segment`와 같은 관행을 따른다 — 전체를 try/except로 감싸고,
+# Managed_Segment entry가 아니거나 capability 경로가 실패하면 **기존 `gw`를 그대로**
+# 쓰도록 `(None, None)`을 돌려준다. 따라서 Capability_Map이 비어 있는 기준선
+# 상태에서는 채팅·에이전트 스트리밍 경로가 이 기능 도입 이전과 완전히 동일하다.
+#
+# 요청 body의 `effort`가 없으면 selection이 `None`으로 전달되어 생성 body가
+# Baseline_Request_Body와 바이트 동일하다(요구사항 7.15~7.17, 12.3).
+#
+# `is_openai_model`·`route_openai_chat`·`_resolve_callable_model_id`의
+# Baseline_Catalog_Segment 동작은 이 절에서 읽기만 하며 변경하지 않는다.
+# ─────────────────────────────────────────────────────────────────
+
+#: 요청 목적(Route_Contract `purposes`와 대조되는 값).
+CAPABILITY_PURPOSE_CHAT = "chat"
+CAPABILITY_PURPOSE_STREAM = "stream"
+
+#: Request_Router 차단 이유 → Failure_Category 매핑(그 외는 route 계약 불일치).
+_CAPABILITY_BLOCK_CATEGORIES = {"ROUTE_ALLOWLIST_NOT_ALLOWED": "allowlist"}
+
+
+def _capability_no_plan(reason: str = "") -> dict:
+    """Managed_Segment가 아닐 때의 계획 — 호출자는 기존 `gw`를 그대로 쓴다."""
+    return {
+        "managed": False,
+        "transmit": False,
+        "blocked": False,
+        "entry": None,
+        "binding": None,
+        "selection": None,
+        "routeKey": None,
+        "reason": reason,
+        "notification": None,
+        "recovery": None,
+    }
+
+
+def capability_route_for_transport(model_id: str):
+    """기존 라우팅 분기가 실제로 사용할 Known_Route key(판정 불가면 None).
+
+    `is_openai_model`이 참이면 동기 OpenAI Responses route, 아니면 기존 SSE
+    스트리밍 route다. 이 매핑은 기존 분기를 **읽기만** 하며 바꾸지 않는다. route를
+    명시해 두면 다른 route의 Effort_Contract가 이 요청에 실릴 수 없다.
+    """
+    try:
+        from ai_engine.capability import contracts as _ct
+
+        if is_openai_model(model_id):
+            return str(_ct.Known_Route.OPENAI_RESPONSES)
+        return str(_ct.Known_Route.SSE_STREAM)
+    except Exception as _e:
+        print(f"[Capability] route 판정 생략: {str(_e)[:200]}")
+        return None
+
+
+def _capability_effort_selection(entry, binding, effort):
+    """요청 body의 effort를 Effort_Settings selection으로 변환한다(불일치면 None).
+
+    프론트는 `{modelId, route, capabilityFingerprint, value}`를 보낸다(작업 14.2).
+    `valueType`은 프론트가 만들지 않고 **Effort_Contract에서만** 읽으며, tuple 3요소·
+    verified domain·계약 결속은 기존 `effort_settings.drop_reasons`가 판정한다
+    (허용값 판정 로직을 여기에 복제하지 않는다).
+
+    Returns:
+        `{modelId, route, capabilityFingerprint, value, valueType}` 또는 ``None``.
+    """
+    if not isinstance(effort, dict) or not effort:
+        return None  # effort 미제공 → 기존 흐름과 바이트 동일
+    from ai_engine.capability import contracts as _ct
+    from ai_engine.capability import effort_settings as _es
+    from ai_engine.capability import request_builder as _rb
+
+    _status, _contract = _rb.effort_view(binding)
+    if not isinstance(_contract, dict):
+        return None  # 계약이 없으면 허용값을 모른다 → 주입하지 않는다
+
+    _setting = {
+        "modelId": effort.get("modelId"),
+        "route": effort.get("route") or effort.get("routeKey"),
+        "capabilityFingerprint": effort.get("capabilityFingerprint"),
+        "value": effort.get("value"),
+        "valueType": _contract.get("valueType"),
+        "updatedAt": _ct.utc_now_iso(),
+    }
+    _ctx = {
+        "selection": _es.tuple_key(
+            binding.get("modelId"), binding.get("routeKey"), binding.get("capabilityFingerprint")
+        ),
+        "capabilityEntries": [entry],
+    }
+    _reasons = _es.drop_reasons(_setting, _ctx)
+    if _reasons:
+        print(f"[Capability] effort 선택 제거: {','.join(_reasons)[:200]}")
+        return None
+    return _es.to_selection(_setting)
+
+
+def capability_plan_for(
+    model,
+    purpose=CAPABILITY_PURPOSE_CHAT,
+    effort=None,
+    route=None,
+    invocation_model_id=None,
+) -> dict:
+    """Managed_Segment 요청 계획을 만든다(비관리 모델·실패는 기존 경로 유지).
+
+    Args:
+        model: 사용자가 선택한 Exact_Model_ID.
+        purpose: 요청 목적(Route_Contract `purposes`와 대조).
+        effort: 요청 body의 `effort`(없으면 ``None``).
+        route: 사용할 Known_Route key. ``None``이면 `Fallback_Order` 첫 Eligible_Contract.
+        invocation_model_id: 실제 전송에 쓰는 ID(prefix 교정 결과).
+
+    Returns:
+        `{managed, transmit, blocked, entry, binding, selection, routeKey, reason,
+        notification, recovery}`.
+        - `managed`가 거짓 → 기존 `gw`를 그대로 쓴다(기준선 동일).
+        - `blocked`가 참 → 선택 route가 `SUPPORTED`가 아니거나 Eligible_Contract가
+          없다. **Gateway 전송을 생성하지 않고** Failure_Handler 경로로 종료한다
+          (요구사항 8.20, 8.22).
+    """
+    if not isinstance(model, str) or not model:
+        return _capability_no_plan()
+    try:
+        from ai_engine.capability import activation_gate as _ag
+        from ai_engine.capability import capability_map as _cm
+        from ai_engine.capability import failure_handler as _fh
+        from ai_engine.capability import request_builder as _rb
+
+        _active = _ag.active_models(_cm.load(), {})
+        # 조회는 Exact_Model_ID 우선, 없으면 **기록된** Invocation_Model_ID 정확 일치로
+        # 폴백한다(`capability_map.find_entry_by_model_id`). 채팅 seam은 bare `model`을,
+        # 에이전트 seam은 `_resolve_callable_model_id`가 해석한 ID를 들고 오는데 두
+        # 자리가 같은 entry에 도달해야 한다(Requirement 2.17).
+        _entry = _cm.find_entry_by_model_id(_active, model)
+        if _entry is None:
+            return _capability_no_plan()  # Managed_Segment 아님 → 기존 경로 그대로
+
+        _tp = _rb.transmission_plan(_entry, purpose, {}, route_key=route)
+        _plan = _capability_no_plan(_tp["reason"])
+        _plan["managed"] = True
+        _plan["entry"] = _entry
+
+        if not _tp["transmit"]:
+            _category = _CAPABILITY_BLOCK_CATEGORIES.get(
+                _tp["reason"], _fh.ROUTE_CAPABILITY_MISMATCH
+            )
+            _ctx = {
+                "modelId": model,
+                "route": _tp["requestedRoute"],
+                "purpose": purpose,
+                "category": _category,
+                "retryCount": 0,
+                "fallback": _fh.NO_FALLBACK,
+            }
+            _plan["blocked"] = True
+            _plan["recovery"] = _fh.plan_recovery(_entry, _category, _ctx)
+            _plan["notification"] = _fh.notification(_ctx)
+            print(
+                f"[Capability] Gateway 전송 0건 — model={model}, "
+                f"route={_tp['requestedRoute'] or '-'}, reason={_tp['reason']}"
+            )
+            return _plan
+
+        _plan["transmit"] = True
+        _plan["routeKey"] = _tp["routeKey"]
+        _plan["binding"] = _rb.bind_contract(
+            _entry, _tp["contract"], invocation_model_id=invocation_model_id
+        )
+        _plan["selection"] = _capability_effort_selection(_entry, _plan["binding"], effort)
+        return _plan
+    except Exception as _e:
+        # capability 경로 실패 → 기존 `gw`로 폴백(기준선 동작 유지).
+        print(f"[Capability] 요청 경로 seam 생략: {str(_e)[:200]}")
+        return _capability_no_plan()
+
+
+def capability_client_for(gw, model, purpose=CAPABILITY_PURPOSE_CHAT, effort=None, plan=None):
+    """요청 단위 capability client를 만든다 — 비관리 모델이면 `(None, None)`.
+
+    Managed_Segment entry가 아니거나 Eligible_Contract가 없으면 `(None, None)`을
+    반환하므로 호출자는 `gw_for_call = _client or gw` 형태로만 확장하면 된다.
+    반환된 client는 기존 `GatewayClient`를 상속해 builder seam만 오버라이드하며,
+    서명·credential 캐시·retry·prefix 교정·job polling·응답 변환은 전부 상속 구현
+    그대로다(요구사항 1.13, 10.1~10.6).
+
+    Args:
+        gw: 기존 `GatewayClient` 인스턴스(credential 상태의 유일한 소유자).
+        model: 사용자가 선택한 Exact_Model_ID.
+        purpose: 요청 목적.
+        effort: 요청 body의 `effort`(없으면 ``None`` → baseline body와 바이트 동일).
+        plan: 이미 계산한 :func:`capability_plan_for` 결과(재조회 방지).
+
+    Returns:
+        `(client, binding)` 또는 `(None, None)`.
+    """
+    _plan = plan if isinstance(plan, dict) else capability_plan_for(model, purpose, effort)
+    if not _plan.get("transmit"):
+        return None, None
+    try:
+        from ai_engine.capability import request_builder as _rb
+
+        _client = _rb.effort_bound_client(gw, _plan["binding"], _plan["selection"])
+        return _client, _plan["binding"]
+    except Exception as _e:
+        print(f"[Capability] EffortBoundClient 생성 생략: {str(_e)[:200]}")
+        return None, None
+
+
+def capability_gw_for(gw, client, binding, model_id):
+    """전송에 쓸 클라이언트를 고른다 — 결속된 model ID일 때만 capability client.
+
+    `client`가 ``None``이면 항상 기존 `gw`를 그대로 반환한다(`_client or gw`와 동일).
+    model ID 확인은 재라우팅(`model_denied` → Claude 등) 이후에도 다른 모델의
+    Effort_Contract가 실리지 않도록 하는 방어이며, 계약이 결속한 Exact_Model_ID와
+    Invocation_Model_ID만 본다(라벨·provider 문자열은 보지 않는다).
+    """
+    if client is None:
+        return gw
+    if not isinstance(binding, dict):
+        return gw
+    _bound = {binding.get("modelId"), binding.get("invocationModelId")}
+    _observed = binding.get("invocationModelIds")
+    if isinstance(_observed, list):
+        _bound.update(item for item in _observed if isinstance(item, str))
+    _bound.discard("")
+    _bound.discard(None)
+    return client if model_id in _bound else gw
+
+
+def _capability_block_sse_response(plan: dict):
+    """Gateway 전송 없이 Failure_Handler 알림만 SSE로 흘리고 종료한다.
+
+    User_Notification 화이트리스트(`modelId`·`route`·`category`·`retryCount`·
+    `fallback`)만 담으므로 credential·authorization·cookie·signature·raw body가
+    포함될 수 없다(요구사항 9.14~9.19).
+    """
+    _note = plan.get("notification") or {}
+    _message = (
+        "검증된 route가 없어 요청을 보내지 않았습니다 — "
+        f"model={_note.get('modelId', '')}, route={_note.get('route', '') or '-'}, "
+        f"category={_note.get('category', '')}"
+    )
+
+    async def _blocked_stream():
+        yield f"data: {json.dumps({'error': _message, 'capability': _note}, ensure_ascii=False)}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        _blocked_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
 @app.get("/api/models")
 @app.post("/api/models")
 async def list_models(request: Request):
@@ -9083,12 +9417,18 @@ async def list_models(request: Request):
         video_catalog = _filter_uninvokable(video_catalog)
         embed_catalog = _filter_uninvokable(embed_catalog)
         rerank_catalog = _filter_uninvokable(rerank_catalog)
+        # === Managed_Segment 병합 (gateway-models-effort-support, 요구사항 6.14) ===
+        # Baseline_Catalog_Segment(위 denylist·uninvokable 필터·provider 분류 결과)는
+        # 그대로 두고, Activation_Gate를 통과한 Active_Model만 뒤에 덧붙인다.
+        # Managed_Segment가 비거나 병합이 실패하면 catalog와 payload가 변하지 않아
+        # 응답 바이트가 기준선과 동일하다(요구사항 12.1, 12.2).
+        catalog, _capabilities = _merge_managed_segment(catalog)
         _text_count = sum(len(v) for v in catalog.values())
         _image_count = sum(len(v) for v in image_catalog.values())
         _video_count = sum(len(v) for v in video_catalog.values())
         _embed_count = sum(len(v) for v in embed_catalog.values())
         _rerank_count = sum(len(v) for v in rerank_catalog.values())
-        return JSONResponse(content={
+        _payload = {
             "models": catalog,
             "image_models": image_catalog,
             "video_models": video_catalog,
@@ -9103,7 +9443,11 @@ async def list_models(request: Request):
             "video_count": _video_count,
             "embed_count": _embed_count,
             "rerank_count": _rerank_count,
-        })
+        }
+        # Managed_Segment가 있을 때만 신규 최상위 키를 추가한다(없으면 키 자체가 부재).
+        if _capabilities is not None:
+            _payload["capabilities"] = _capabilities
+        return JSONResponse(content=_payload)
     except Exception as e:
         return JSONResponse(content={"models": {}, "error": str(e)})
 
@@ -9348,6 +9692,30 @@ async def run_agent_stream(request: Request):
     messages = _build_messages(body.get("chatHistory", []), prompt, body.get("sessionId", "default"))
     stream_model = _resolve_callable_model_id(model, aws_profile, bedrock_user)
 
+    # === capability client seam (gateway-models-effort-support, 작업 15.1) ===
+    # Managed_Segment entry가 아니면 `_cap_client`가 None → `_cap_gw()`가 기존 `gw`를
+    # 그대로 돌려주므로 아래 스트리밍 경로는 기준선과 완전히 동일하다. `effort`가
+    # body에 없으면 selection이 None으로 전달되어 생성 body도 바이트 동일하다.
+    _cap_effort = body.get("effort")
+    _cap_plan = capability_plan_for(
+        model,
+        purpose=CAPABILITY_PURPOSE_STREAM,
+        effort=_cap_effort,
+        route=capability_route_for_transport(stream_model),
+        invocation_model_id=stream_model,
+    )
+    _cap_client, _cap_binding = capability_client_for(
+        gw, model, purpose=CAPABILITY_PURPOSE_STREAM, effort=_cap_effort, plan=_cap_plan
+    )
+    if _cap_plan["blocked"]:
+        # 선택 route가 `SUPPORTED`가 아니거나 Eligible_Contract가 없다 →
+        # Gateway 전송을 생성하지 않고 Failure_Handler 경로로 종료(요구사항 8.20, 8.22).
+        return _capability_block_sse_response(_cap_plan)
+
+    def _cap_gw():
+        """전송에 쓸 클라이언트(`_cap_client or gw`) — 결속 model ID일 때만 client."""
+        return capability_gw_for(gw, _cap_client, _cap_binding, stream_model)
+
     async def realtime_stream():
         """Lambda SSE를 실시간으로 프론트엔드에 중계 — ChatGPT처럼 글자가 써지는 효과.
         max_tokens로 끊기면 자동으로 이어서 생성 (최대 5회)."""
@@ -9364,7 +9732,7 @@ async def run_agent_stream(request: Request):
             try:
                 # GPT가 스스로 도구(검색/읽기/생성)를 실행하도록 함수호출 루프 사용.
                 _ares = await route_openai_agent(
-                    gw, stream_model, messages, system_prompt=system_prompt,
+                    _cap_gw(), stream_model, messages, system_prompt=system_prompt,
                     project_path=project_path, aws_profile=aws_profile,
                     bedrock_user=bedrock_user, template_id=template_id,
                     max_iters=8, timeout=120,
@@ -9377,7 +9745,7 @@ async def run_agent_stream(request: Request):
                 # 도구 루프 실패 → 단발 응답으로라도 텍스트 시도(후 폴백).
                 print(f"[run-stream/OpenAI] tool loop 실패 → 단발 폴백: {str(_oe)[:200]}")
                 try:
-                    _conv = await route_openai_chat(gw, stream_model, messages, system_prompt=system_prompt, timeout=120)
+                    _conv = await route_openai_chat(_cap_gw(), stream_model, messages, system_prompt=system_prompt, timeout=120)
                     for _c in _conv.get("output", {}).get("message", {}).get("content", []):
                         if isinstance(_c, dict) and _c.get("text"):
                             _txt += _c["text"]
@@ -9484,7 +9852,7 @@ async def run_agent_stream(request: Request):
                 import time as _hb_time2
                 _stream_start_ts = _hb_time2.time()
                 def _mk_stream_s():
-                    return gw.stream_sse_realtime(model_id=stream_model, messages=messages, system_prompt=system_prompt)
+                    return _cap_gw().stream_sse_realtime(model_id=stream_model, messages=messages, system_prompt=system_prompt)
                 async for evt in _stream_with_heartbeat(_mk_stream_s):
                     evt_type = evt.get("type", "")
                     if evt_type == "heartbeat":
@@ -9586,6 +9954,389 @@ def _langgraph_enabled() -> bool:
     return val not in ("0", "false", "off", "no")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 외부 리서치 설정 흐름 (deep-research-engine Task 18.1 — 요구사항 10.2/10.3/14.2)
+# ─────────────────────────────────────────────────────────────────────────────
+# 프론트 설정 UI(src/components/research-settings.js)는 userData/settings/settings.json 에
+# research={enabled, consent, webProviders[], academicProviders[]} 만 저장한다(자격증명 미저장).
+# 여기서 그 플래그를 backend 게이트(research.backend.web_research_enabled)가 읽는 환경변수
+# (AE_ENABLE_WEB_RESEARCH / AE_RESEARCH_CONSENT / AE_RESEARCH_*_PROVIDERS)로 매핑해,
+# **UI 토글이 실제 egress on/off 에 반영**되게 한다(설정 → server → env/config → 게이트 흐름).
+# 요청 진입 시 재읽기하므로 런타임 토글이 다음 요청부터 반영된다. 자격증명은 매핑하지 않는다(P9).
+
+
+# Electron app.getName()(= package.json name)과 productName. userData 디렉터리 이름이
+# 이 둘 중 하나이므로 두 값을 모두 후보로 시도한다.
+_ELECTRON_APP_DIR_NAMES = ("ai-editor", "Mogam Works")
+
+
+def _electron_userdata_dirs() -> list:
+    """Electron ``app.getPath('userData')`` 와 동일한 플랫폼 규약 경로 목록.
+
+    사이드카를 Electron 밖에서 띄우면(예: ``npm run dev:python``) ``AE_GENERATED_ROOT``
+    가 주입되지 않아 UI 가 저장한 settings.json 을 못 찾는다. 그 경우에도 같은 파일을
+    찾도록 플랫폼 표준 userData 위치를 직접 계산해 후보에 넣는다.
+    """
+    home = os.path.expanduser("~")
+    if sys.platform == "darwin":
+        base = os.path.join(home, "Library", "Application Support")
+    elif os.name == "nt":
+        base = os.environ.get("APPDATA") or os.path.join(home, "AppData", "Roaming")
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
+    return [os.path.join(base, name) for name in _ELECTRON_APP_DIR_NAMES]
+
+
+def _userdata_settings_path_candidates() -> list:
+    """userData/settings/settings.json 후보 경로 목록(우선순위 순, 중복 제거).
+
+    Electron process-manager 는 ``AE_GENERATED_ROOT = {userData}/generated`` 로 주입하므로
+    settings.json 은 ``{userData}/settings/settings.json`` =
+    ``dirname(AE_GENERATED_ROOT)/settings/settings.json`` 이다. 비-Electron/폴백 레이아웃도
+    방어적으로 함께 시도한다. ``AE_SETTINGS_PATH`` 로 명시 오버라이드할 수 있다(테스트/CLI).
+
+    ⚠️ 실측 사고(리서치 전면 비활성): ``npm run dev:python`` / uvicorn 직접 실행처럼
+    ``AE_GENERATED_ROOT`` 없이 사이드카가 뜨면 후보가 ``~/.agentic-editor`` /
+    ``~/.ai-editor`` 둘뿐이었고, UI 가 실제로 쓰는
+    ``~/Library/Application Support/ai-editor/settings/settings.json`` 은 후보에
+    없었다. 그래서 설정 로드가 조용히 ``{}`` 로 끝나 ``research`` 플래그가 env 로
+    매핑되지 않고, 사용자가 UI 에서 옵트인·동의를 다 켰어도 게이트가 off 로 남아
+    **웹·논문·딥리서치 전부** 동작하지 않았다. 플랫폼 표준 userData 경로를 후보에
+    포함해 실행 방식과 무관하게 같은 파일을 찾는다.
+    """
+    cands = []
+    override = os.environ.get("AE_SETTINGS_PATH", "").strip()
+    if override:
+        cands.append(override)
+    gen_root = os.environ.get("AE_GENERATED_ROOT", "").strip()
+    if gen_root:
+        parent = os.path.dirname(gen_root.rstrip("/\\"))
+        if parent:
+            cands.append(os.path.join(parent, "settings", "settings.json"))
+        cands.append(os.path.join(gen_root, "settings", "settings.json"))
+    # Electron userData 표준 경로 — AE_GENERATED_ROOT 미주입 실행을 위한 보강.
+    for d in _electron_userdata_dirs():
+        cands.append(os.path.join(d, "settings", "settings.json"))
+    cands.append(os.path.expanduser("~/.agentic-editor/settings/settings.json"))
+    cands.append(os.path.expanduser("~/.ai-editor/settings/settings.json"))
+    seen = set()
+    out = []
+    for c in cands:
+        if c and c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
+
+
+def _load_userdata_settings() -> dict:
+    """userData 의 settings.json 을 읽어 dict 로 반환(없거나 실패 시 ``{}`` — 비차단)."""
+    for path in _userdata_settings_path_candidates():
+        try:
+            if os.path.isfile(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except (OSError, ValueError):
+            continue
+    return {}
+
+
+def _apply_research_settings_to_env(settings: dict) -> bool:
+    """settings.research(UI 플래그) → AE_* 환경변수 매핑 (요구사항 10.2/10.3/14.2 게이트 흐름).
+
+    프론트가 settings.json 에 저장한 ``research`` 객체
+    (``{enabled, consent, webProviders[], academicProviders[]}``)를 backend 게이트가 읽는
+    환경변수(``AE_ENABLE_WEB_RESEARCH`` / ``AE_RESEARCH_CONSENT`` / ``AE_RESEARCH_WEB_PROVIDERS`` /
+    ``AE_RESEARCH_ACADEMIC_PROVIDERS``)로 매핑한다. 이로써 UI 토글이
+    ``research.backend.web_research_enabled()`` 게이트에 실제로 반영된다(UI → egress on/off).
+    ``research`` 키가 없으면 env 를 건드리지 않아 기존 env/기본값(off)을 존중한다(무회귀).
+    자격증명은 매핑하지 않는다(P9 — settings.json 에 키가 저장되지 않음).
+
+    Returns:
+        ``research`` 설정을 적용했으면 ``True``, ``settings.research`` 가 없어 미적용이면 ``False``.
+    """
+    if not isinstance(settings, dict):
+        return False
+    research = settings.get("research")
+    if not isinstance(research, dict):
+        return False  # UI 미설정 → 기존 env/기본값 존중(기본 off, 무회귀)
+    os.environ["AE_ENABLE_WEB_RESEARCH"] = "1" if research.get("enabled") else "0"
+    os.environ["AE_RESEARCH_CONSENT"] = "1" if research.get("consent") else "0"
+    web = research.get("webProviders")
+    if isinstance(web, list):
+        names = [p.strip() for p in web if isinstance(p, str) and p.strip()]
+        if names:
+            os.environ["AE_RESEARCH_WEB_PROVIDERS"] = ",".join(names)
+    acad = research.get("academicProviders")
+    if isinstance(acad, list):
+        names = [p.strip() for p in acad if isinstance(p, str) and p.strip()]
+        if names:
+            os.environ["AE_RESEARCH_ACADEMIC_PROVIDERS"] = ",".join(names)
+    return True
+
+
+def _sync_research_env_from_settings() -> bool:
+    """UI settings.json 의 research 플래그를 backend 게이트 env 로 동기화(비차단).
+
+    graph-stream 요청 진입 시 호출해, 사용자가 설정 UI 에서 토글한 외부 리서치 옵트인/동의/
+    제공자 선택이 이번 요청의 ``backend.web_research_enabled()`` 게이트에 반영되도록 한다.
+    파일 읽기/파싱 실패는 무시한다(무회귀 — 외부 리서치 기본 off 유지).
+
+    동기화 결과를 한 줄 로그로 남긴다. 이전에는 설정 파일을 못 찾아도 아무 신호가 없어
+    "UI 를 다 켰는데 검색이 안 된다"의 원인이 로그에서 보이지 않았다. 자격증명은 로드·
+    로깅 대상이 아니며(P9), 여기서는 플래그와 제공자 이름만 출력한다.
+    """
+    try:
+        settings = _load_userdata_settings()
+        applied = _apply_research_settings_to_env(settings)
+        if applied:
+            print(
+                "[research] settings→env 적용: "
+                f"enabled={os.environ.get('AE_ENABLE_WEB_RESEARCH')} "
+                f"consent={os.environ.get('AE_RESEARCH_CONSENT')} "
+                f"web={os.environ.get('AE_RESEARCH_WEB_PROVIDERS', '(기본)')} "
+                f"academic={os.environ.get('AE_RESEARCH_ACADEMIC_PROVIDERS', '(기본)')}"
+            )
+        elif not settings:
+            # 파일 자체를 못 찾음 — 실행 방식(AE_GENERATED_ROOT 미주입) 문제일 수 있다.
+            print(
+                "[research] settings.json 을 찾지 못해 외부 리서치 게이트가 기본 off 로 "
+                "유지됩니다. 탐색한 경로: "
+                + ", ".join(_userdata_settings_path_candidates())
+            )
+        else:
+            print("[research] settings.json 에 research 설정이 없어 기본 off 유지")
+        return applied
+    except Exception as _e:  # noqa: BLE001 — 설정 동기화 실패는 비차단
+        print(f"[research] settings→env 동기화 실패(무시): {_e}")
+        return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 셸 외부 egress 감사 (run_command 는 리서치 게이트를 우회한다)
+# ─────────────────────────────────────────────────────────────────────────────
+# 실측 사고: 외부 조사 요청이 리서치 도구가 없는 워커로 라우팅되자, 모델이 도구 부재를
+# 정확히 인지한 뒤 `run_command` 로 `curl` 을 실행해 Europe PMC·OpenAlex 를 직접 호출했다.
+# 결과는 나왔지만
+#   (a) 옵트인·동의 게이트를 완전히 우회하고 — 설정에서 리서치를 꺼도 막히지 않는다
+#   (b) 캐시·레이트리밋·인용 검증 파이프라인을 전부 건너뛴다
+#
+# 차단하지 않는 이유: 에디터의 셸은 `npm install` / `git clone` / `pip install` 처럼
+# 정상적으로 네트워크를 쓴다. 이를 막으면 제품이 죽는다. 그래서 **기록**한다 —
+# 지킬 수 없는 약속을 유지하는 것보다 사실을 남기는 편이 안전하다.
+# 설정 UI 문구도 이 사실에 맞게 정정했다(research-settings.js).
+
+# 외부 네트워크에 나가는 것이 명백한 명령 토큰. 부분일치가 아니라 **토큰 경계**로 본다
+# (예: `curling` 같은 단어에 오탐하지 않도록).
+_NET_COMMAND_TOKENS = frozenset(
+    {
+        "curl", "wget", "nc", "ncat", "netcat", "telnet",
+        "ssh", "scp", "sftp", "rsync",
+        "ping", "dig", "nslookup", "host", "traceroute",
+        "http", "https",   # httpie
+    }
+)
+
+
+def _detect_shell_egress(cmd: Any) -> list:
+    """셸 명령에서 외부 네트워크 접근 신호를 추출한다(순수·예외 없음).
+
+    Returns:
+        감지된 신호 목록(예: ``["curl", "url"]``). 없으면 빈 목록.
+        판정은 보수적이다 — 신호가 없으면 조용하고, 있으면 기록만 한다(차단 아님).
+    """
+    try:
+        if not isinstance(cmd, str) or not cmd.strip():
+            return []
+        low = cmd.lower()
+        hits = []
+        # 토큰 경계 분리: 셸 메타문자·공백으로 쪼개 명령 이름만 본다.
+        for tok in re.split(r"[\s|;&()<>`$]+", low):
+            t = tok.strip().strip("\"'")
+            if not t:
+                continue
+            base = t.rsplit("/", 1)[-1]      # /usr/bin/curl → curl
+            if base in _NET_COMMAND_TOKENS and base not in hits:
+                hits.append(base)
+        # URL 리터럴은 명령 이름과 무관하게 외부 접근 의도를 보여준다.
+        if ("http://" in low or "https://" in low) and "url" not in hits:
+            hits.append("url")
+        return hits
+    except Exception:  # noqa: BLE001 — 감사 실패는 명령 실행을 막지 않는다
+        return []
+
+
+def _extract_egress_hosts(cmd: Any) -> list:
+    """셸 명령에서 접속 대상 호스트만 추출한다(순수·예외 없음).
+
+    **명령 원문을 로그에 남기지 않기 위한 함수다.** 절단·마스킹으로 자격증명을 가리는
+    방식은 차단 목록(blocklist)이라 절대 완전해지지 않는다 — 실측으로 확인했다:
+    ``curl "https://x/v1?apikey=SECRET..."`` 는 앞 120자 안에 키가 들어와 절단을 통과한다.
+    그래서 남길 것을 고르는 허용 목록(allowlist) 형태로 뒤집었다. 호스트만 남긴다.
+
+    ``user:pass@host`` 형태의 userinfo 는 제거한다(자격증명이 실릴 수 있는 유일한 지점).
+    """
+    try:
+        if not isinstance(cmd, str) or not cmd.strip():
+            return []
+        hosts = []
+        for m in re.finditer(r"https?://([^\s/?\"'`;|)>\\]+)", cmd, re.I):
+            authority = m.group(1)
+            if "@" in authority:                 # user:pass@host → host
+                authority = authority.rsplit("@", 1)[-1]
+            authority = authority.strip().lower()
+            if authority and authority not in hosts:
+                hosts.append(authority)
+        return hosts
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _audit_shell_egress(cmd: Any) -> None:
+    """셸 외부 egress 를 stdout 에 기록한다(비차단 — 명령을 막지 않는다).
+
+    게이트가 닫혀 있는데 외부로 나가면 경고 수준으로 남긴다 — 사용자가 리서치를 껐는데
+    질의가 외부로 전송된 사실은 추적 가능해야 한다.
+
+    기록 대상은 **신호·호스트·게이트 상태뿐이고 명령 원문은 남기지 않는다**(P9).
+    명령 전문이 필요하면 대화의 도구 호출 기록에 이미 남아 있다 — 로그를 자격증명
+    유출 경로로 만들 이유가 없다.
+    """
+    try:
+        hits = _detect_shell_egress(cmd)
+        if not hits:
+            return
+        try:
+            from ai_engine.research import backend as _rb
+
+            gate_open = bool(_rb.web_research_enabled())
+        except Exception:  # noqa: BLE001
+            gate_open = False
+        hosts = _extract_egress_hosts(cmd)
+        where = ", ".join(hosts[:5]) if hosts else "(URL 없음)"
+        level = "감사" if gate_open else "경고"
+        print(
+            f"[shell-egress:{level}] 외부 네트워크 명령 실행 "
+            f"(신호={','.join(hits)}, 대상={where}, "
+            f"리서치게이트={'on' if gate_open else 'off'})"
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+@app.post("/api/research/credentials")
+async def set_research_credentials(request: Request):
+    """검색 제공자 API 키를 실행 중 프로세스의 env 로 주입한다(파일 미저장).
+
+    Electron 메인이 OS 키체인(safeStorage)에서 복호화한 키를 이 엔드포인트로 밀어넣는다.
+    ``research.security.load_credential`` 은 ``os.environ`` 만 읽으므로, 여기서 env 를
+    채우면 다음 요청부터 웹 검색 제공자(tavily/exa/brave)가 실제로 호출된다.
+
+    왜 spawn-time env 주입이 아니라 런타임 주입인가:
+        dev 모드에서는 Electron 이 Python 을 띄우지 않는다(``electron/main.js`` —
+        ``npm run dev:python`` 이 uvicorn 을 직접 실행). 따라서 spawn env 주입은 패키징
+        모드에서만 동작해, 개발 중에는 키가 전달되지 않는 비대칭이 생긴다. 런타임 주입은
+        누가 사이드카를 띄웠는지와 무관하게 동일하게 동작한다. 기존 ``/api/reset-cache``
+        도 같은 방식으로 Electron 에서 AWS 자격증명을 받는다(관례 정합).
+
+    보안 (요구사항 11 / P9 / steering security):
+        - 키를 어떤 파일에도 쓰지 않는다. 프로세스 env(메모리)만 갱신한다.
+        - 응답은 **제공자별 설정 여부(bool)만** 반환한다 — 값을 되읽는 경로를 만들지 않는다.
+        - 로그에는 ``mask_secret`` 을 거친 값만 남긴다.
+        - 빈 문자열/None 을 주면 해당 제공자 env 를 삭제한다(키 해제).
+
+    Body:
+        ``{"credentials": {"tavily": "<key>", "brave": "", ...}}``
+
+    Returns:
+        ``{"ok": true, "providers": {"tavily": true, "brave": false, ...}}``
+    """
+    from ai_engine.research.security import (
+        PROVIDER_ENV_VARS, _env_var_for, mask_secret,
+    )
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    creds = body.get("credentials") if isinstance(body, dict) else None
+    if not isinstance(creds, dict):
+        return {"ok": False, "error": "invalid_body", "providers": {}}
+
+    applied = {}
+    for provider, value in creds.items():
+        if not isinstance(provider, str) or not provider.strip():
+            continue
+        var = _env_var_for(provider)
+        val = value.strip() if isinstance(value, str) else ""
+        if val:
+            os.environ[var] = val
+            applied[provider.strip().lower()] = True
+        else:
+            os.environ.pop(var, None)
+            applied[provider.strip().lower()] = False
+
+    # 값은 마스킹해서만 로그에 남긴다.
+    masked = {
+        p: mask_secret(os.environ.get(_env_var_for(p), ""))
+        for p in applied
+    }
+    print(f"[research] 제공자 자격증명 주입: {masked}")
+
+    # 전체 제공자의 현재 설정 여부(bool) — UI 표시에 사용. 값은 반환하지 않는다.
+    status = {
+        name: bool(os.environ.get(var, "").strip())
+        for name, var in PROVIDER_ENV_VARS.items()
+    }
+    return {"ok": True, "providers": status}
+
+
+@app.get("/api/research/status")
+async def get_research_status():
+    """외부 리서치 게이트·제공자 상태 요약(값 미노출) — UI 진단용.
+
+    "설정을 다 켰는데 검색이 안 된다"를 사용자가 스스로 확인할 수 있게, 게이트 on/off 와
+    제공자별 키 설정 여부(bool)만 노출한다. 자격증명 값은 어떤 필드에도 담지 않는다(P9).
+    """
+    from ai_engine.research import backend
+    from ai_engine.research.config import DeepResearchConfig
+    from ai_engine.research.security import PROVIDER_ENV_VARS
+
+    _sync_research_env_from_settings()
+    cfg = DeepResearchConfig.from_env()
+    keyed = {
+        name: bool(os.environ.get(var, "").strip())
+        for name, var in PROVIDER_ENV_VARS.items()
+    }
+
+    def _callable(provider: str) -> bool:
+        """이 제공자를 지금 호출할 수 있는가 — 키 불요이거나 키가 있으면 True.
+
+        tavily 는 키리스 모드가 있어 ``_REQUIRES_KEY`` 에 없다. 따라서 키가 하나도
+        없어도 웹 검색이 가능하다(레이트리밋만 낮음).
+        """
+        return provider not in backend._REQUIRES_KEY or bool(keyed.get(provider))
+
+    selected_web = list(cfg.web_providers)
+    web_ready = any(_callable(p) for p in selected_web)
+    return {
+        "enabled": bool(cfg.enable_web_research),
+        "consent": bool(cfg.consent),
+        "gateOpen": backend.web_research_enabled(),
+        "webProviders": selected_web,
+        "academicProviders": list(cfg.academic_providers),
+        "providerKeys": keyed,
+        "requiresKey": sorted(backend._REQUIRES_KEY),
+        # 키 없이 호출 가능한 제공자(선택된 것 중) — UI 안내용.
+        "keylessWebProviders": [
+            p for p in selected_web if p not in backend._REQUIRES_KEY
+        ],
+        "webSearchReady": bool(backend.web_research_enabled() and web_ready),
+        # 학술 제공자는 키리스라 게이트만 열리면 동작한다.
+        "academicSearchReady": backend.web_research_enabled(),
+    }
+
+
 @app.post("/api/agents/graph-stream")
 async def run_agent_graph_stream(request: Request):
     """LangGraph coding 서브그래프 기반 SSE 스트림 (Phase 1 골격).
@@ -9598,6 +10349,17 @@ async def run_agent_graph_stream(request: Request):
         return await run_agent_stream(request)
 
     body = await request.json()
+
+    # 외부 리서치 설정 흐름 배선(Task 18.1 — 요구사항 10.2/10.3/14.2): 프론트 설정 UI 가
+    # userData/settings/settings.json 에 저장한 research 플래그(enabled/consent/providers)를
+    # 이번 요청의 backend 게이트 env(AE_ENABLE_WEB_RESEARCH/AE_RESEARCH_CONSENT/
+    # AE_RESEARCH_*_PROVIDERS)로 동기화한다. research 서브그래프의 4개 리서치 도구
+    # (web_search/search_papers/fetch_content/deep_research)는 이 graph-stream 경로에서만
+    # 도달 가능하므로(외부 egress 는 backend 단일 모듈 — 요구사항 10.4), 요청 진입 시 여기서
+    # 동기화하면 UI 토글이 실제 외부 egress on/off 에 반영된다(설정 → server → env/config →
+    # web_research_enabled 게이트 흐름 완결). 미설정/파일 실패는 비차단이며 기본 off 를
+    # 유지한다(무회귀). 자격증명은 매핑하지 않는다(P9 — settings.json 에 키 미저장).
+    _sync_research_env_from_settings()
 
     # 이미지 모델을 채팅 모델로 선택한 경우 — 그래프(converse) 대신 이미지 경로로 처리.
     # (그래프의 GatewayChatModel=converse 는 이미지 모델을 지원하지 않아 회귀 유발.)
@@ -9885,6 +10647,33 @@ async def run_agent_with_tools(request: Request):
     gw = _get_gw(aws_profile, bedrock_user)
     stream_model = model  # 이미 prefix 처리된 callable id
 
+    # === capability client seam (gateway-models-effort-support, 작업 15.1) ===
+    # Managed_Segment entry가 아니면 `_cap_client`가 None → `_cap_gw()`가 기존 `gw`를
+    # 그대로 돌려주므로 아래 에이전트 turn 루프는 기준선과 완전히 동일하다. `effort`가
+    # body에 없으면 selection이 None으로 전달되어 생성 body도 바이트 동일하다.
+    _cap_effort = body.get("effort")
+    _cap_plan = capability_plan_for(
+        stream_model,
+        purpose=CAPABILITY_PURPOSE_STREAM,
+        effort=_cap_effort,
+        route=capability_route_for_transport(stream_model),
+        invocation_model_id=stream_model,
+    )
+    _cap_client, _cap_binding = capability_client_for(
+        gw, stream_model, purpose=CAPABILITY_PURPOSE_STREAM, effort=_cap_effort, plan=_cap_plan
+    )
+    if _cap_plan["blocked"]:
+        # 선택 route가 `SUPPORTED`가 아니거나 Eligible_Contract가 없다 →
+        # Gateway 전송을 생성하지 않고 Failure_Handler 경로로 종료(요구사항 8.20, 8.22).
+        return _capability_block_sse_response(_cap_plan)
+
+    def _cap_gw():
+        """전송에 쓸 클라이언트(`_cap_client or gw`) — 결속 model ID일 때만 client.
+
+        `stream_model`은 `model_denied` 재라우팅으로 바뀔 수 있으므로 호출 시점의
+        값으로 판정한다(다른 모델에 이 계약의 effort가 실리지 않는다)."""
+        return capability_gw_for(gw, _cap_client, _cap_binding, stream_model)
+
     # 시스템 프롬프트 구성
     if project_path and not system_prompt:
         system_prompt = f"사용자의 프로젝트 경로: {project_path}"
@@ -9979,7 +10768,7 @@ async def run_agent_with_tools(request: Request):
                 try:
                     # GPT가 스스로 도구(검색/읽기/생성)를 실행하는 함수호출 루프.
                     _ares = await route_openai_agent(
-                        gw, stream_model, messages, system_prompt=system_prompt,
+                        _cap_gw(), stream_model, messages, system_prompt=system_prompt,
                         project_path=project_path, aws_profile=aws_profile,
                         bedrock_user=bedrock_user, template_id=body.get("templateId", ""),
                         max_iters=8, timeout=120,
@@ -10001,7 +10790,7 @@ async def run_agent_with_tools(request: Request):
                 except Exception as _oe:
                     print(f"[Agent/OpenAI] tool loop 실패 → 단발 폴백: {str(_oe)[:200]}")
                     try:
-                        _conv = await route_openai_chat(gw, stream_model, messages, system_prompt=system_prompt, timeout=120)
+                        _conv = await route_openai_chat(_cap_gw(), stream_model, messages, system_prompt=system_prompt, timeout=120)
                         _txt = ""
                         for _c in _conv.get("output", {}).get("message", {}).get("content", []):
                             if isinstance(_c, dict) and _c.get("text"):
@@ -10027,7 +10816,7 @@ async def run_agent_with_tools(request: Request):
 
                 try:
                     def _mk_stream():
-                        return gw.stream_sse_realtime(
+                        return _cap_gw().stream_sse_realtime(
                             model_id=stream_model, messages=messages,
                             system_prompt=system_prompt,
                             tool_config=(AGENT_TOOLS if use_tool_config else None),

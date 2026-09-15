@@ -1,0 +1,791 @@
+{
+  "pbtResults": {
+    "2.3 Property 5 테스트 작성 (`scripts/test_capability_canonicalizer_idempotence_pbt.py`)": {
+      "status": "passed",
+      "lastRunTimestamp": 1786595699333
+    },
+    "2.4 Property 6 테스트 작성 (`scripts/test_capability_serialization_roundtrip_pbt.py`)": {
+      "status": "passed",
+      "lastRunTimestamp": 1786595703970
+    },
+    "8.2 Property 8 테스트 작성 (`scripts/test_capability_selection_validity_pbt.py`)": {
+      "status": "passed",
+      "lastRunTimestamp": 1786595739672
+    },
+    "5.5 Property 2 테스트 작성 (`scripts/test_capability_malformed_exclusion_pbt.py`)": {
+      "status": "passed",
+      "lastRunTimestamp": 1786595712790
+    },
+    "5.6 Property 7 테스트 작성 (`scripts/test_capability_ordering_invariance_pbt.py`)": {
+      "status": "passed",
+      "lastRunTimestamp": 1786595717487
+    },
+    "5.4 Property 1 테스트 작성 (`scripts/test_capability_activation_subset_pbt.py`)": {
+      "status": "passed",
+      "lastRunTimestamp": 1786595708460
+    },
+    "7.5 Property 4 테스트 작성 (`scripts/test_effort_injection_exact_once_pbt.py`)": {
+      "status": "passed",
+      "lastRunTimestamp": 1786595726465
+    },
+    "7.4 Property 3 테스트 작성 (`scripts/test_effort_injection_baseline_preservation_pbt.py`)": {
+      "status": "passed",
+      "lastRunTimestamp": 1786595721923
+    },
+    "7.7 Property 10 테스트 작성 (`scripts/test_openai_jobs_modelid_contract_pbt.py`)": {
+      "status": "passed",
+      "lastRunTimestamp": 1786595735282
+    },
+    "7.6 Property 9 테스트 작성 (`scripts/test_openai_sync_body_no_modelid_pbt.py`)": {
+      "status": "passed",
+      "lastRunTimestamp": 1786595730926
+    }
+  },
+  "executionHistory": {
+    "1.1 패키지 진입점과 계약 스키마 작성": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729209353
+      },
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729221683
+      },
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785731045958
+      }
+    ],
+    "1.2 userData 한정 영속 계층 작성": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729209407
+      },
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729226575
+      },
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785731053899
+      }
+    ],
+    "2.1 canonical 정규화·직렬화·fingerprint 구현 (`ai_engine/capability/canonicalizer.py`)": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729209441
+      },
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785731060213
+      },
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785731891804
+      }
+    ],
+    "3.1 10개 Baseline_Category 검사기 작성 (`ai_engine/capability/baseline_inspector.py`)": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729209466
+      },
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729228171
+      },
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785731055114
+      }
+    ],
+    "4. Checkpoint - 계약·canonicalizer·baseline 테스트 통과 확인": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729209492
+      }
+    ],
+    "5.1 Capability_Map 로드·갱신·상태 전이 구현 (`ai_engine/capability/capability_map.py`)": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729209540
+      },
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785733057700
+      },
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785735054265
+      }
+    ],
+    "5.2 Activation_Gate 순수 함수 구현 (`ai_engine/capability/activation_gate.py`)": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729209564
+      },
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785735074074
+      },
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785736896458
+      }
+    ],
+    "5.3 `/api/models` Managed_Segment 병합 seam 추가 (`ai_engine/server.py` 수정 + `capability_map.py` 병합 helper)": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729209592
+      },
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785736912433
+      },
+      {
+        "executionId": "6f120511-e762-4665-8305-b23da6c02004",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785738707057
+      }
+    ],
+    "6. Checkpoint - Capability_Map·Activation_Gate·병합 seam 테스트 통과 확인": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729209628
+      }
+    ],
+    "7.1 jobs model ID seam 추출 (`ai_engine/gateway_module.py` 수정 — seam만)": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729209660
+      },
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785735079346
+      },
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785736904852
+      }
+    ],
+    "7.2 Request_Router 구현 (`ai_engine/capability/request_builder.py`)": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729209695
+      },
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785736917532
+      },
+      {
+        "executionId": "6f120511-e762-4665-8305-b23da6c02004",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785738716340
+      }
+    ],
+    "7.3 EffortBoundClient와 effort 주입 구현 (`ai_engine/capability/request_builder.py`)": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729209723
+      },
+      {
+        "executionId": "6f120511-e762-4665-8305-b23da6c02004",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785738722656
+      },
+      {
+        "executionId": "6f120511-e762-4665-8305-b23da6c02004",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785741276788
+      }
+    ],
+    "8.1 Effort_Settings 순수 로직 작성 (`ai_engine/capability/effort_settings.py`)": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729209756
+      },
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785735080692
+      },
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785736901782
+      }
+    ],
+    "9.1 결정론적 실패 분류·전이·복구 구현 (`ai_engine/capability/failure_handler.py`)": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729209785
+      },
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785735081769
+      },
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785736903202
+      }
+    ],
+    "10. Checkpoint - request builder·effort settings·failure handler 테스트 통과 확인": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729209810
+      }
+    ],
+    "11.1 discovery와 Verification_Record 생성 구현 (`ai_engine/capability/evidence_collector.py`)": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729209845
+      },
+      {
+        "executionId": "6f120511-e762-4665-8305-b23da6c02004",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785738728059
+      },
+      {
+        "executionId": "6f120511-e762-4665-8305-b23da6c02004",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785742373300
+      }
+    ],
+    "11.2 route probe 오케스트레이션 구현 (`ai_engine/capability/evidence_collector.py`)": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729209880
+      },
+      {
+        "executionId": "6f120511-e762-4665-8305-b23da6c02004",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785742382662
+      },
+      {
+        "executionId": "c2878ca3-d9d9-4db9-ad6b-67eb79e12789",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785800929912
+      }
+    ],
+    "11.3 effort probe 오케스트레이션 구현 (`ai_engine/capability/evidence_collector.py`)": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729209913
+      },
+      {
+        "executionId": "c2878ca3-d9d9-4db9-ad6b-67eb79e12789",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785800970233
+      },
+      {
+        "executionId": "c2878ca3-d9d9-4db9-ad6b-67eb79e12789",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785810733152
+      }
+    ],
+    "12.1 CLI 골격·interpreter guard·dry-run·보고서 헤더 구현": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729209976
+      },
+      {
+        "executionId": "c2878ca3-d9d9-4db9-ad6b-67eb79e12789",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785800974227
+      },
+      {
+        "executionId": "41f82ca5-1aa1-43b0-925f-c38f173a3b95",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1786069715411
+      }
+    ],
+    "12.2 stage 오케스트레이션과 보고서 본문 구현": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729210003
+      },
+      {
+        "executionId": "41f82ca5-1aa1-43b0-925f-c38f173a3b95",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1786069733272
+      }
+    ],
+    "13. Checkpoint - Evidence_Collector·Validation_Runner 테스트 통과 확인": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729210027
+      }
+    ],
+    "14.1 Effort_Control Web Component 작성 (`src/effort-control.js` 신규)": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729210054
+      },
+      {
+        "executionId": "6f120511-e762-4665-8305-b23da6c02004",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785741296086
+      },
+      {
+        "executionId": "6f120511-e762-4665-8305-b23da6c02004",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785742367567
+      }
+    ],
+    "14.2 모델 목록·요청 payload seam 확장 (`src/main.js` 수정 — 조건부 분기만)": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729210081
+      },
+      {
+        "executionId": "6f120511-e762-4665-8305-b23da6c02004",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785742392463
+      },
+      {
+        "executionId": "c2878ca3-d9d9-4db9-ad6b-67eb79e12789",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785800934176
+      }
+    ],
+    "14.3 capability IPC 핸들러 등록과 preload 노출": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729210113
+      },
+      {
+        "executionId": "6f120511-e762-4665-8305-b23da6c02004",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785742391065
+      },
+      {
+        "executionId": "c2878ca3-d9d9-4db9-ad6b-67eb79e12789",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785800938922
+      }
+    ],
+    "15.1 capability client seam 추가 (`ai_engine/server.py` 수정 — 조건부 분기만)": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729210155
+      },
+      {
+        "executionId": "c2878ca3-d9d9-4db9-ad6b-67eb79e12789",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785800950616
+      }
+    ],
+    "17. Checkpoint - 무회귀·UI 테스트 통과 확인": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729210194
+      }
+    ],
+    "18.1 interpreter 확인과 dry-run 예산 계획 실행": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729210246
+      }
+    ],
+    "18.2 baseline 검사 stage 실행": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729210290
+      }
+    ],
+    "18.3 catalog discovery stage 실행": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729210326
+      }
+    ],
+    "18.4 route probe stage 실행": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729210374
+      }
+    ],
+    "18.5 effort probe stage 실행": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729210425
+      }
+    ],
+    "18.6 Capability_Map 갱신 stage 실행": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729210450
+      }
+    ],
+    "18.7 Activation_Gate 결과 확인 stage 실행": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729210477
+      }
+    ],
+    "19. Final checkpoint - 전체 테스트와 검증 보고서 확인": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785729210509
+      }
+    ],
+    "1. capability 패키지 계약·영속 계층 구축 (`ai_engine/capability/` 신규)": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785731053938
+      }
+    ],
+    "3. Repository_Baseline_Inspector 구현": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785731055151
+      }
+    ],
+    "2. Capability_Canonicalizer 구현과 결정론 property": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785731891834
+      }
+    ],
+    "2.2 PBT 공통 생성기 작성 (`scripts/_capability_strategies.py`)": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785731922351
+      },
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785733046312
+      }
+    ],
+    "1.3 계약·영속 계층 단위 테스트 작성 (`scripts/test_capability_store_contracts.py`)": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785731927798
+      },
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785733039968
+      }
+    ],
+    "3.2 baseline inspector 단위 테스트 작성 (`scripts/test_capability_baseline_inspector.py`)": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785731928627
+      },
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785733045149
+      }
+    ],
+    "2.3 Property 5 테스트 작성 (`scripts/test_capability_canonicalizer_idempotence_pbt.py`)": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785733051408
+      },
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785735043891
+      }
+    ],
+    "2.4 Property 6 테스트 작성 (`scripts/test_capability_serialization_roundtrip_pbt.py`)": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785733056599
+      },
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785735060605
+      }
+    ],
+    "8. Effort_Settings 정규화·무효화 구현": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785736901810
+      }
+    ],
+    "9. Failure_Handler와 User_Notification 구현": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785736903228
+      }
+    ],
+    "8.2 Property 8 테스트 작성 (`scripts/test_capability_selection_validity_pbt.py`)": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785736918916
+      },
+      {
+        "executionId": "6f120511-e762-4665-8305-b23da6c02004",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785738713952
+      }
+    ],
+    "9.2 Failure_Handler 단위 테스트 작성 (`scripts/test_capability_failure_handler.py`)": [
+      {
+        "executionId": "5d19ca74-79e9-4b63-92cc-89c0141f43c3",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785736919929
+      },
+      {
+        "executionId": "6f120511-e762-4665-8305-b23da6c02004",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785738715353
+      }
+    ],
+    "5. Capability_Map과 Activation_Gate 구현": [
+      {
+        "executionId": "6f120511-e762-4665-8305-b23da6c02004",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785738707215
+      }
+    ],
+    "5.4 Property 1 테스트 작성 (`scripts/test_capability_activation_subset_pbt.py`)": [
+      {
+        "executionId": "6f120511-e762-4665-8305-b23da6c02004",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785738729499
+      },
+      {
+        "executionId": "6f120511-e762-4665-8305-b23da6c02004",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785741284061
+      }
+    ],
+    "5.5 Property 2 테스트 작성 (`scripts/test_capability_malformed_exclusion_pbt.py`)": [
+      {
+        "executionId": "6f120511-e762-4665-8305-b23da6c02004",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785738730909
+      },
+      {
+        "executionId": "6f120511-e762-4665-8305-b23da6c02004",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785741285491
+      }
+    ],
+    "5.6 Property 7 테스트 작성 (`scripts/test_capability_ordering_invariance_pbt.py`)": [
+      {
+        "executionId": "6f120511-e762-4665-8305-b23da6c02004",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785738731784
+      },
+      {
+        "executionId": "6f120511-e762-4665-8305-b23da6c02004",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785741286536
+      }
+    ],
+    "7. Request_Router / Request_Builder와 gateway seam": [
+      {
+        "executionId": "6f120511-e762-4665-8305-b23da6c02004",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785741277020
+      }
+    ],
+    "7.4 Property 3 테스트 작성 (`scripts/test_effort_injection_baseline_preservation_pbt.py`)": [
+      {
+        "executionId": "6f120511-e762-4665-8305-b23da6c02004",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785741301886
+      },
+      {
+        "executionId": "6f120511-e762-4665-8305-b23da6c02004",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785742374655
+      }
+    ],
+    "7.5 Property 4 테스트 작성 (`scripts/test_effort_injection_exact_once_pbt.py`)": [
+      {
+        "executionId": "6f120511-e762-4665-8305-b23da6c02004",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785741303156
+      },
+      {
+        "executionId": "6f120511-e762-4665-8305-b23da6c02004",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785742375760
+      }
+    ],
+    "7.6 Property 9 테스트 작성 (`scripts/test_openai_sync_body_no_modelid_pbt.py`)": [
+      {
+        "executionId": "6f120511-e762-4665-8305-b23da6c02004",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785742388317
+      },
+      {
+        "executionId": "c2878ca3-d9d9-4db9-ad6b-67eb79e12789",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785800920222
+      }
+    ],
+    "7.7 Property 10 테스트 작성 (`scripts/test_openai_jobs_modelid_contract_pbt.py`)": [
+      {
+        "executionId": "6f120511-e762-4665-8305-b23da6c02004",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785742389701
+      },
+      {
+        "executionId": "c2878ca3-d9d9-4db9-ad6b-67eb79e12789",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785800925719
+      }
+    ],
+    "14. Effort UI와 IPC 배선": [
+      {
+        "executionId": "c2878ca3-d9d9-4db9-ad6b-67eb79e12789",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785800938962
+      }
+    ],
+    "15. 서버 요청 경로 seam 배선": [
+      {
+        "executionId": "c2878ca3-d9d9-4db9-ad6b-67eb79e12789",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785800954097
+      }
+    ],
+    "16.1 5개 route baseline body 동일성 테스트 작성 (`scripts/test_capability_baseline_body_equality.py`)": [
+      {
+        "executionId": "c2878ca3-d9d9-4db9-ad6b-67eb79e12789",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785800960685
+      }
+    ],
+    "16. 무회귀 테스트": [
+      {
+        "executionId": "c2878ca3-d9d9-4db9-ad6b-67eb79e12789",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785800960923
+      }
+    ],
+    "16.4 `/api/models`·기존 모델 선택 무회귀 테스트 작성 (`scripts/test_capability_api_models_baseline.py`)": [
+      {
+        "executionId": "c2878ca3-d9d9-4db9-ad6b-67eb79e12789",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785800965106
+      }
+    ],
+    "11. Evidence_Collector 구현": [
+      {
+        "executionId": "c2878ca3-d9d9-4db9-ad6b-67eb79e12789",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785810733269
+      }
+    ],
+    "11.4 Evidence_Collector 단위 테스트 작성 (`scripts/test_capability_evidence_collector.py`)": [
+      {
+        "executionId": "c2878ca3-d9d9-4db9-ad6b-67eb79e12789",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785811843903
+      },
+      {
+        "executionId": "41f82ca5-1aa1-43b0-925f-c38f173a3b95",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1786069710081
+      }
+    ],
+    "16.2 GatewayClient signature introspection 회귀 확장 (`scripts/test_gateway_signature_introspection.py` 수정)": [
+      {
+        "executionId": "c2878ca3-d9d9-4db9-ad6b-67eb79e12789",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785811848490
+      },
+      {
+        "executionId": "41f82ca5-1aa1-43b0-925f-c38f173a3b95",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1786069724195
+      }
+    ],
+    "16.3 adapter·job polling·retry 기존 회귀 자산 실행": [
+      {
+        "executionId": "c2878ca3-d9d9-4db9-ad6b-67eb79e12789",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785811852558
+      },
+      {
+        "executionId": "41f82ca5-1aa1-43b0-925f-c38f173a3b95",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1786069728497
+      }
+    ],
+    "14.4 Playwright effort UI 테스트 작성 (`tests/e2e/test_effort_control_ui.py`)": [
+      {
+        "executionId": "c2878ca3-d9d9-4db9-ad6b-67eb79e12789",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785811857891
+      },
+      {
+        "executionId": "41f82ca5-1aa1-43b0-925f-c38f173a3b95",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1786069719723
+      }
+    ]
+  }
+}

@@ -93,6 +93,25 @@ def make_retrieve_node(deps: Any, domain: str = "coding"):
           {"evidence": None} 을 반환하여 그래프 진행을 막지 않는다.
     """
 
+    # RAG 를 스킵하는 경로에서도 최소한의 도구 사용 지침을 준다. 프로젝트 컨텍스트가
+    # 없을 뿐이지 도구는 바인딩되어 있으므로, 지침이 없으면 모델이 도구를 안 쓴다.
+    # chat 은 도구가 없으므로 지침을 넣지 않는다(무회귀).
+    _DOMAIN_BASELINE_PROMPT = {
+        "research": (
+            "당신은 외부 자료를 실제로 조사해 근거와 함께 답하는 리서치 어시스턴트입니다.\n"
+            "- 로컬 프로젝트에 없는 외부 지식·최신 정보·논문·규제 문서가 필요하면 반드시 "
+            "web_search 또는 search_papers 도구를 호출하세요. 학습 지식만으로 답하지 마세요\n"
+            "- 출처(URL/DOI)를 요구받으면 검색 도구 결과에 실제로 있는 값만 제시하세요. "
+            "URL이나 DOI를 지어내지 마세요\n"
+            "- 발췌문으로 부족하면 fetch_content 로 원문을 확보하세요\n"
+            "- 하위 질문으로 나눠 깊게 조사해야 하면 deep_research 를 사용하세요\n"
+            "- 검색 도구가 빈 결과나 오류(error 필드)를 반환하면 무엇이 실패했는지 그대로 "
+            "알리고, 근거 없는 서술로 대체하지 마세요\n"
+            "- 중간 보고 금지. '조사하겠습니다', '진행하겠습니다' 같은 예고 없이 바로 "
+            "도구를 호출하고, 결과를 받은 뒤 최종 답변만 작성하세요"
+        ),
+    }
+
     async def retrieve_node(state: Any) -> dict:
         # ── 세션 간 장기 기억(Store) 조회 — chat/RAG 무관하게 시스템 컨텍스트에 주입 ──
         mem_ctx = _load_memories(deps, state)
@@ -102,9 +121,14 @@ def make_retrieve_node(deps: Any, domain: str = "coding"):
         # ── 비차단 스킵 조건 (요구사항 3.2) ──
         project_path = state.get("project_path")
         if not project_path or domain == "chat":
-            # RAG 는 스킵하되, 장기 기억이 있으면 system_prompt 에 주입한다.
-            if mem_ctx:
-                return {"evidence": None, "system_prompt": merged_sys_base}
+            # RAG 는 스킵하되, 장기 기억과 도메인 기본 지침은 system_prompt 에 주입한다.
+            #
+            # ⚠️ 실측 사고: 프로젝트를 열지 않은 상태의 research 워커는 SystemMessage 가
+            # 아예 없어(무지시) 모델이 "조사하겠습니다"라는 예고만 남기고 도구를 호출하지
+            # 않은 채 종료했다. RAG 근거가 없어도 "도구를 호출해라"는 지침은 필요하다.
+            parts = [p for p in (merged_sys_base, _DOMAIN_BASELINE_PROMPT.get(domain, "")) if p]
+            if parts:
+                return {"evidence": None, "system_prompt": "\n\n".join(parts)}
             return {"evidence": None}
 
         try:

@@ -32,6 +32,10 @@ const { registerSlidesHandlers, renderHtmlToPng } = require('./src/ipc-slides-ha
 // Templates — `template:*` channels proxied to the FastAPI backend
 // (/api/templates ...). See .kiro/specs/pptx-template-styling/tasks.md §13.4.
 const { registerTemplateHandlers } = require('./src/ipc-template-handlers');
+// Capability / effort — `capability:*` channels persisted under
+// `userData/capability/`. See .kiro/specs/gateway-models-effort-support/tasks.md §14.3.
+const { registerCapabilityHandlers } = require('./src/ipc-capability-handlers');
+const { registerResearchHandlers, pushCredentialsToSidecar } = require('./src/ipc-research-handlers');
 
 // Remote SSH — session manager & router
 // The RemoteSessionManager owns the set of live SSH sessions and the
@@ -138,6 +142,21 @@ app.whenReady().then(() => {
   } else {
     console.log('[ProcessManager] Dev mode — skipping Python start (dev:python handles it)');
   }
+
+  // 저장된 리서치 제공자 키를 사이드카 env 로 주입한다.
+  // 키는 OS 키체인에만 있고 사이드카는 os.environ 만 읽으므로(research/security.py),
+  // 이 주입이 없으면 웹 검색 제공자가 매번 missing_credential 로 실패한다.
+  // 사이드카 기동 순서가 앞설 수도/늦을 수도 있어 몇 번 재시도한다(비차단).
+  (async () => {
+    for (const delay of [1500, 4000, 9000]) {
+      await new Promise((r) => setTimeout(r, delay));
+      try {
+        const res = await pushCredentialsToSidecar();
+        if (res.ok) return;
+      } catch (_) { /* 다음 시도 */ }
+    }
+    console.log('[research-creds] 사이드카 주입 실패 — 설정 화면에서 키 저장 시 재시도됩니다');
+  })();
 });
 
 /**
@@ -428,6 +447,18 @@ function registerAllIpcHandlers() {
   // AE_ENGINE_URL-based FastAPI base. See .kiro/specs/pptx-template-styling
   // tasks.md §13.4 (requirements 8.1, 8.8).
   registerTemplateHandlers(mainWindow);
+
+  // Capability / effort — `capability:load-effort-settings`,
+  // `capability:save-effort-settings`, `capability:load-map`. Persisted under
+  // `userData/capability/` only (요구사항 10.15); settings.json 스키마는 무변경이고
+  // credential은 어떤 파일에도 저장하지 않는다(요구사항 10.7, 10.11).
+  // 등록은 security.md에 따라 main.js에서만 수행한다.
+  registerCapabilityHandlers(dataStore);
+
+  // 리서치 제공자 자격증명 — OS 키체인(safeStorage)에만 암호화 저장하고, 복호화 값은
+  // 실행 중 사이드카 env 로만 주입한다. 평문 파일 저장·렌더러 노출 경로는 없다.
+  // 등록은 security.md 에 따라 main.js 에서만 수행한다.
+  registerResearchHandlers();
 
   console.log('[IPC] All handlers registered');
 }

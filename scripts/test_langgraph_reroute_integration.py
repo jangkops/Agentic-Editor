@@ -57,12 +57,22 @@ GRAPH_RECURSION_LIMIT = 25
 
 # 도메인 고유 도구 집합(정확 매칭) — model 노드의 bind_tools 에 넘긴 tool 이름 집합으로
 # 실제 방문한 서브그래프를 식별한다. 각 도메인의 toolSpec name 집합은 서로 다르다.
+#
+# ⚠️ coding 워커는 CODING_TOOLS 에 읽기 전용 외부 조회 도구 3종
+# (RESEARCH_LOOKUP_TOOLS = web_search/search_papers/fetch_content)을 병합해 바인딩한다
+# (`build_coding_subgraph`). 근거: planner LLM 이 외부 조사 요청을 coding 으로 라우팅하는
+# 일이 실측으로 확인됐고, 조회 도구가 없으면 모델이 run_command + curl 로 우회해
+# 옵트인·동의 게이트를 무력화한다. 지문은 **실제 바인딩과 동일하게** 유지해야 한다.
+from ai_engine.agent_system.subgraphs.research import RESEARCH_LOOKUP_TOOLS  # noqa: E402
+
 _DOMAIN_BY_TOOLSET = {
-    frozenset(t["name"] for t in CODING_TOOLS): "coding",
+    frozenset(t["name"] for t in CODING_TOOLS + RESEARCH_LOOKUP_TOOLS): "coding",
     frozenset(t["name"] for t in MEDIA_TOOLS): "media",
     frozenset(t["name"] for t in RESEARCH_TOOLS): "research",
     frozenset(t["name"] for t in OPS_TOOLS): "ops",
 }
+# 도메인 지문이 서로 겹치면 식별이 무의미해진다(조립 변경 시 조기 발견).
+assert len(_DOMAIN_BY_TOOLSET) == 4, f"도메인 지문 충돌: {list(_DOMAIN_BY_TOOLSET.values())}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

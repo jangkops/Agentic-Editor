@@ -148,6 +148,32 @@ const state = {
   activeTemplateId:'',
 };
 
+// ===== gateway-models-effort-support Task 14.2: 모델 선택 확정 seam =====
+// `state.selectedModel` 대입은 "선택 확정"의 단일 지점이다(드롭다운 클릭, 자동
+// 새로고침 복구, 합의 모델 잠금 전환 등이 모두 여기를 지난다). 값 저장 의미는
+// 백킹 필드로 그대로 두고, 대입 직후 `<effort-control>`에 tuple을 전달한다.
+// capability payload(`state.capabilities`)가 없으면 sync는 즉시 반환하므로
+// 기존 동작과 완전히 동일하다. (Requirements 7.4, 7.5, 7.6, 7.14)
+(function _installSelectedModelEffortSeam() {
+  let _selectedModelValue = state.selectedModel;
+  try {
+    Object.defineProperty(state, 'selectedModel', {
+      configurable: true,
+      enumerable: true,
+      get() { return _selectedModelValue; },
+      set(next) {
+        _selectedModelValue = next;
+        // effort UI 배선 실패가 모델 선택을 깨뜨리지 않도록 전부 방어한다.
+        try {
+          if (typeof _syncEffortControl === 'function') _syncEffortControl();
+        } catch (_e) { /* no-op */ }
+      },
+    });
+  } catch (_e) {
+    // defineProperty 실패(비표준 런타임) → 기존 평범한 프로퍼티 동작 유지
+  }
+})();
+
 
 // === user 메시지 핀 유틸 (sendChat ↔ 종료 지점 공통) ===
 function _releaseUserPin(){
@@ -1174,6 +1200,14 @@ async function loadModelsFromServer(retryCount) {
       renderModelList('');
       document.getElementById('model-dropdown-btn').textContent = (state.selectedModel?.name || '모델 선택') + ' ▾';
       document.getElementById('topbar-model-count').textContent = `${ALL_MODELS.length}개 모델`;
+      // gateway-models-effort-support 14.2: 초기 로드에서도 신규 `capabilities` 키를 보관한다.
+      // 키가 없으면 미설정으로 남아 기존 경로와 동일(무회귀).
+      try {
+        if (_setCapabilitiesPayload(d.capabilities)) _onCapabilitiesChanged();
+        else _syncEffortControl();
+      } catch (err) {
+        console.warn('[Effort] capability payload 반영 실패 — 기존 목록 유지:', err?.message || err);
+      }
       state.authenticated = true;
     }
   } catch (e) {
@@ -1252,6 +1286,14 @@ async function _fetchFilteredModelCatalog() {
     });
     if (kept.length) filtered[provider] = kept;
   }
+  // gateway-models-effort-support 14.2: 신규 `capabilities` 키 보관(요구사항 6.14).
+  // 키가 없으면 `state.capabilities`는 미설정으로 남아 기존 경로와 완전히 동일하고,
+  // 동일 payload 재수신이면 `_setCapabilitiesPayload`가 거짓을 반환해 아무 것도 바뀌지 않는다.
+  try {
+    if (_setCapabilitiesPayload(d.capabilities)) _onCapabilitiesChanged();
+  } catch (e) {
+    console.warn('[Effort] capability payload 반영 실패 — 기존 목록 유지:', e?.message || e);
+  }
   return filtered;
 }
 
@@ -1282,6 +1324,15 @@ async function refreshModelsPreservingSelection() {
   rebuildModelList();
   // 선택 적용(보존 또는 유효 복구)
   state.selectedModel = resolved;
+  // gateway-models-effort-support 14.2: 선택 확정 직후 Effort_Settings 정리·복원
+  // (7.11 entry 삭제 / 7.12 STALE / 7.13 route SUPPORTED 상실 / 7.14 정확 일치만 복원).
+  // 카탈로그 시그니처가 동일하면 위에서 이미 반환했으므로 이 경로는 실행되지 않는다.
+  try {
+    if (_pruneEffortSettings()) _persistEffortSettings();
+    _syncEffortControl();
+  } catch (e) {
+    console.warn('[Effort] 설정 정리 실패:', e?.message || e);
+  }
   renderModelList('');
   const btn = document.getElementById('model-dropdown-btn');
   if (btn) btn.textContent = (state.selectedModel?.name || '모델 선택') + ' ▾';
@@ -1313,6 +1364,406 @@ function startModelRefreshScheduler() {
 if (typeof window !== 'undefined') {
   window.refreshModelsPreservingSelection = refreshModelsPreservingSelection;
   window.startModelRefreshScheduler = startModelRefreshScheduler;
+}
+
+// ===== gateway-models-effort-support Task 14.2: capability payload · effort 배선 =====
+// Requirements: 6.14, 7.4, 7.5, 7.6, 7.11, 7.12, 7.13, 7.14
+//
+// 이 블록은 전부 **조건부 분기**다. `/api/models` 응답에 신규 최상위 키 `capabilities`가
+// 없으면 `state.capabilities`는 미설정으로 남고, 아래 함수들은 즉시 반환하므로 모델
+// 목록·선택·요청 body가 기존과 바이트 수준으로 동일하다(무회귀).
+//
+// 역할 분담:
+//   - `state.capabilities`  : `/api/models`의 `capabilities`(= capability_map.to_ui_payload)
+//   - `<effort-control>`    : tuple `(modelId, route, capabilityFingerprint)`로 결속된 셀렉트 박스
+//   - `_effortSettings`     : 저장된 effort 선택. IPC(`capability:*`)로 userData에 영속화
+//   - `_apiBody()`          : tuple 일치 검증 통과 시에만 `effort` 필드 부착
+//
+// `MODEL_CATALOG`·`ALL_MODELS`·`catalogSignature`·`resolveSelection`은 수정하지 않고
+// 그대로 재사용한다.
+
+/** Effort_Settings 파일 스키마 버전 — `ai_engine/capability/contracts.py::SCHEMA_VERSION`과 동일. */
+const EFFORT_SETTINGS_SCHEMA_VERSION = 1;
+/** `Value_Type` 닫힌 집합(contracts.py). 저장 표현일 뿐 허용 effort 값이 아니다. */
+const EFFORT_VALUE_TYPES = new Set(['STRING', 'INTEGER', 'NUMBER', 'BOOLEAN']);
+/** `Known_Route` 닫힌 집합(contracts.py). */
+const EFFORT_KNOWN_ROUTES = new Set(['CONVERSE', 'INVOKE', 'OPENAI_RESPONSES', 'OPENAI_RESPONSES_JOBS', 'SSE_STREAM']);
+const EFFORT_STATUS_SUPPORTED = 'SUPPORTED';
+
+/** 저장된 effort 선택(메모리 사본). IPC 로드 전에는 빈 상태 = 명시적 미선택. */
+let _effortSettings = { schemaVersion: EFFORT_SETTINGS_SCHEMA_VERSION, entries: [] };
+let _effortSettingsLoaded = false;
+/** capability payload 변경 감지 키. 동일 payload 재수신 시 아무 것도 바꾸지 않는다. */
+let _capabilitiesKey = '';
+
+function _effortText(v) { return typeof v === 'string' ? v : ''; }
+function _effortIsPlainObject(v) { return !!v && typeof v === 'object' && !Array.isArray(v); }
+function _effortIsScalar(v) {
+  return typeof v === 'string' || typeof v === 'boolean' || (typeof v === 'number' && Number.isFinite(v));
+}
+/** 타입까지 포함한 값 동등 비교 키(`1`과 `'1'`을 구분한다). */
+function _effortValueKey(v) { return typeof v + ':' + String(v); }
+function _effortSameValue(a, b) { return _effortValueKey(a) === _effortValueKey(b); }
+
+/** 저장 value가 계약 `valueType`과 일치하는 scalar인지. */
+function _effortValueMatchesType(value, valueType) {
+  switch (valueType) {
+    case 'STRING': return typeof value === 'string';
+    case 'INTEGER': return typeof value === 'number' && Number.isInteger(value);
+    case 'NUMBER': return typeof value === 'number' && Number.isFinite(value);
+    case 'BOOLEAN': return typeof value === 'boolean';
+    default: return false;
+  }
+}
+
+/** 현재 capability payload(없으면 null). */
+function _capabilitiesPayload() {
+  const p = state.capabilities;
+  return _effortIsPlainObject(p) && _effortIsPlainObject(p.models) ? p : null;
+}
+
+/** `capabilities.models[modelId]` view(없으면 null). */
+function _capModelView(modelId) {
+  const payload = _capabilitiesPayload();
+  const id = _effortText(modelId);
+  if (!payload || !id) return null;
+  const view = payload.models[id];
+  if (!_effortIsPlainObject(view)) return null;
+  const declared = _effortText(view.modelId);
+  if (declared && declared !== id) return null;
+  return view;
+}
+
+/** model view의 `effort[route]` view(없으면 null). */
+function _capEffortView(modelView, route) {
+  if (!_effortIsPlainObject(modelView)) return null;
+  const effort = modelView.effort;
+  const key = _effortText(route);
+  if (!_effortIsPlainObject(effort) || !key) return null;
+  const view = effort[key];
+  return _effortIsPlainObject(view) ? view : null;
+}
+
+/**
+ * effort를 설정할 route. UI payload의 `effortRoutes` 첫 항목을 쓰고, 없으면
+ * `effort` 맵에서 `SUPPORTED`인 첫 route를 찾는다. 라우트 문자열을 만들어내지 않고
+ * payload가 알려준 값만 고른다.
+ */
+function _capEffortRoute(modelView) {
+  if (!_effortIsPlainObject(modelView)) return '';
+  const routes = Array.isArray(modelView.effortRoutes) ? modelView.effortRoutes : [];
+  for (const r of routes) {
+    const key = _effortText(r);
+    if (!EFFORT_KNOWN_ROUTES.has(key)) continue;
+    const view = _capEffortView(modelView, key);
+    if (view && view.supported === true && _effortText(view.status) === EFFORT_STATUS_SUPPORTED) return key;
+  }
+  const effort = _effortIsPlainObject(modelView.effort) ? modelView.effort : {};
+  for (const key of Object.keys(effort)) {
+    if (!EFFORT_KNOWN_ROUTES.has(key)) continue;
+    const view = _capEffortView(modelView, key);
+    if (view && view.supported === true && _effortText(view.status) === EFFORT_STATUS_SUPPORTED) return key;
+  }
+  return '';
+}
+
+/**
+ * 현재 선택 모델의 effort tuple `(modelId, route, capabilityFingerprint)`.
+ * capability payload 없음·모델 미포함·effort 비지원이면 null(→ UI 숨김).
+ */
+function _currentEffortTuple() {
+  const modelId = _effortText(state.selectedModel && state.selectedModel.id);
+  const view = _capModelView(modelId);
+  if (!view) return null;
+  const fingerprint = _effortText(view.capabilityFingerprint);
+  const route = _capEffortRoute(view);
+  if (!fingerprint || !route) return null;
+  return { modelId, route, capabilityFingerprint: fingerprint };
+}
+
+function _effortTupleKey(t) {
+  return `${_effortText(t && t.modelId)}\u0000${_effortText(t && t.route)}\u0000${_effortText(t && t.capabilityFingerprint)}`;
+}
+function _effortSameTuple(a, b) { return _effortTupleKey(a) === _effortTupleKey(b); }
+
+/**
+ * value가 Effort_Contract의 verified domain에 속하는지. 허용값을 이 파일이 만들지 않고
+ * payload의 `domainKind`·`enumValues`/`verifiedValues`·inclusive 경계만 읽는다.
+ */
+function _effortValueInDomain(effortView, value) {
+  if (!_effortIsPlainObject(effortView) || !_effortIsScalar(value)) return false;
+  if (effortView.supported !== true) return false;
+  if (_effortText(effortView.status) !== EFFORT_STATUS_SUPPORTED) return false;
+  const kind = _effortText(effortView.domainKind);
+  if (kind === 'ENUM') {
+    const enumValues = Array.isArray(effortView.enumValues) ? effortView.enumValues : [];
+    if (!enumValues.some(v => _effortSameValue(v, value))) return false;
+    const verified = Array.isArray(effortView.verifiedValues) ? effortView.verifiedValues : [];
+    if (verified.length && !verified.some(v => _effortSameValue(v, value))) return false;
+    return true;
+  }
+  if (kind === 'RANGE') {
+    const lo = effortView.rangeLowerInclusive;
+    const hi = effortView.rangeUpperInclusive;
+    if (typeof value !== 'number' || !Number.isFinite(value)) return false;
+    if (!Number.isFinite(lo) || !Number.isFinite(hi)) return false;
+    return value >= Math.min(lo, hi) && value <= Math.max(lo, hi);
+  }
+  return false;
+}
+
+/** 저장 항목이 스키마를 지키는지(IPC 핸들러의 `_sanitizeEntry`와 같은 규약). */
+function _effortEntryWellFormed(entry) {
+  if (!_effortIsPlainObject(entry)) return false;
+  if (!_effortText(entry.modelId) || !_effortText(entry.capabilityFingerprint)) return false;
+  if (!EFFORT_KNOWN_ROUTES.has(_effortText(entry.route))) return false;
+  const valueType = _effortText(entry.valueType);
+  if (!EFFORT_VALUE_TYPES.has(valueType)) return false;
+  return _effortValueMatchesType(entry.value, valueType);
+}
+
+/**
+ * 저장 항목이 현재 capability 상태와 정합한지. 아래 중 하나라도 어긋나면 거짓이며,
+ * 호출자는 request 생성 전에 그 항목을 제거한다.
+ *   entry 삭제(7.11) · entry STALE(= fingerprint 불일치, 7.12) ·
+ *   route의 SUPPORTED 상실(7.13) · verified domain 이탈(7.10) · value type 불일치
+ */
+function _effortEntryStillValid(entry) {
+  if (!_effortEntryWellFormed(entry)) return false;
+  const view = _capModelView(entry.modelId);
+  if (!view) return false;                                          // entry 삭제 · payload 없음
+  if (_effortText(view.capabilityFingerprint) !== _effortText(entry.capabilityFingerprint)) return false; // STALE
+  const routeStatus = _effortIsPlainObject(view.routes) ? view.routes[_effortText(entry.route)] : null;
+  if (_effortIsPlainObject(routeStatus) && _effortText(routeStatus.status) !== EFFORT_STATUS_SUPPORTED) return false;
+  const effortView = _capEffortView(view, entry.route);
+  if (!effortView) return false;
+  if (_effortText(effortView.valueType) !== _effortText(entry.valueType)) return false;
+  return _effortValueInDomain(effortView, entry.value);
+}
+
+/**
+ * 어긋난 Effort_Settings를 제거한다(Model_Selection_Manager 규칙 — 7.10~7.13).
+ * 같은 tuple 중복은 마지막 항목만 남긴다(7.14).
+ * @returns {boolean} 항목 집합이 바뀌었는지
+ */
+function _pruneEffortSettings() {
+  const before = Array.isArray(_effortSettings.entries) ? _effortSettings.entries : [];
+  const byTuple = new Map();
+  for (const entry of before) {
+    if (!_effortEntryStillValid(entry)) continue;
+    byTuple.set(_effortTupleKey(entry), entry);
+  }
+  const after = Array.from(byTuple.values());
+  const changed = after.length !== before.length || after.some((e, i) => e !== before[i]);
+  _effortSettings = { schemaVersion: EFFORT_SETTINGS_SCHEMA_VERSION, entries: after };
+  return changed;
+}
+
+/** tuple과 **세 값 모두** 일치하는 저장 항목(없으면 null) — 복원은 이때만 일어난다(7.14). */
+function _effortFindEntry(tuple) {
+  const key = _effortTupleKey(tuple);
+  for (const entry of _effortSettings.entries) {
+    if (_effortTupleKey(entry) === key) return entry;
+  }
+  return null;
+}
+
+/** tuple + value를 저장한다(7.4~7.6). 검증 실패면 저장하지 않고 거짓을 반환한다. */
+function _effortPutEntry(tuple, value) {
+  const view = _capModelView(tuple && tuple.modelId);
+  const effortView = _capEffortView(view, tuple && tuple.route);
+  if (!view || !effortView) return false;
+  if (_effortText(view.capabilityFingerprint) !== _effortText(tuple.capabilityFingerprint)) return false;
+  if (!_effortValueInDomain(effortView, value)) return false;
+  const valueType = _effortText(effortView.valueType);
+  if (!EFFORT_VALUE_TYPES.has(valueType) || !_effortValueMatchesType(value, valueType)) return false;
+
+  const entry = {
+    modelId: _effortText(tuple.modelId),
+    route: _effortText(tuple.route),
+    capabilityFingerprint: _effortText(tuple.capabilityFingerprint),
+    value,
+    valueType,
+    updatedAt: new Date().toISOString(),
+  };
+  const key = _effortTupleKey(entry);
+  const kept = _effortSettings.entries.filter(e => _effortTupleKey(e) !== key);
+  const prev = _effortSettings.entries.find(e => _effortTupleKey(e) === key) || null;
+  if (prev && _effortSameValue(prev.value, value)) return false; // 동일 값 재선택 → 변경 없음
+  kept.push(entry);
+  _effortSettings = { schemaVersion: EFFORT_SETTINGS_SCHEMA_VERSION, entries: kept };
+  return true;
+}
+
+/** tuple에 결속된 저장 값을 제거한다. @returns {boolean} 제거 여부 */
+function _effortDropEntry(tuple) {
+  const key = _effortTupleKey(tuple);
+  const kept = _effortSettings.entries.filter(e => _effortTupleKey(e) !== key);
+  if (kept.length === _effortSettings.entries.length) return false;
+  _effortSettings = { schemaVersion: EFFORT_SETTINGS_SCHEMA_VERSION, entries: kept };
+  return true;
+}
+
+/** userData/capability/effort_settings.json에 영속화(IPC 화이트리스트 채널). */
+function _persistEffortSettings() {
+  if (!window.electronAPI || typeof window.electronAPI.saveEffortSettings !== 'function') return;
+  const snapshot = {
+    schemaVersion: EFFORT_SETTINGS_SCHEMA_VERSION,
+    entries: _effortSettings.entries.map(e => ({
+      modelId: e.modelId, route: e.route, capabilityFingerprint: e.capabilityFingerprint,
+      value: e.value, valueType: e.valueType, updatedAt: e.updatedAt,
+    })),
+  };
+  try {
+    Promise.resolve(window.electronAPI.saveEffortSettings(snapshot))
+      .catch(err => console.warn('[Effort] 설정 저장 실패:', err?.message || err));
+  } catch (e) {
+    console.warn('[Effort] 설정 저장 호출 실패:', e?.message || e);
+  }
+}
+
+function _effortControlEl() {
+  return document.getElementById('effort-control');
+}
+
+/**
+ * `<effort-control>`에 capability payload와 현재 tuple을 전달한다(선택 확정 seam).
+ * tuple이 없으면 payload를 비워 컴포넌트가 렌더 트리를 만들지 않게 한다(7.3).
+ * 컴포넌트가 domain 이탈 저장값을 조용히 되돌리면 저장 값도 함께 제거한다(7.10).
+ */
+function _syncEffortControl() {
+  const el = _effortControlEl();
+  if (!el || typeof el.update !== 'function') return;
+  const tuple = _currentEffortTuple();
+  if (!tuple) {
+    el.update({ capabilities: null, modelId: '', route: '', capabilityFingerprint: '', value: null });
+    return;
+  }
+  const stored = _effortFindEntry(tuple);
+  el.update({
+    capabilities: _capabilitiesPayload(),
+    modelId: tuple.modelId,
+    route: tuple.route,
+    capabilityFingerprint: tuple.capabilityFingerprint,
+    value: stored ? stored.value : null,
+  });
+  if (stored && el.value === null && _effortDropEntry(tuple)) _persistEffortSettings();
+}
+
+/**
+ * `/api/models` 응답의 신규 `capabilities` 키를 보관한다. 키가 없으면 `state.capabilities`를
+ * **미설정으로 유지**하므로 기존 경로와 완전히 동일하다.
+ * @returns {boolean} payload가 실제로 바뀌었는지(동일 payload면 아무 것도 변경하지 않는다)
+ */
+function _setCapabilitiesPayload(raw) {
+  const next = (_effortIsPlainObject(raw) && _effortIsPlainObject(raw.models)) ? raw : null;
+  let nextKey = '';
+  if (next) {
+    try { nextKey = JSON.stringify(next); } catch (_e) { nextKey = ''; }
+  }
+  if (nextKey === _capabilitiesKey) return false;
+  _capabilitiesKey = nextKey;
+  if (next) state.capabilities = next;
+  else if ('capabilities' in state) delete state.capabilities;
+  return true;
+}
+
+/** capability payload 변경 반영: 어긋난 저장 값 제거 → effort UI 재동기화. */
+function _onCapabilitiesChanged() {
+  const changed = _pruneEffortSettings();
+  _syncEffortControl();
+  if (changed) _persistEffortSettings();
+}
+
+/**
+ * 요청 body에 실을 effort selection. tuple 3요소 일치 + effort UI 표시 + verified domain
+ * 통과를 모두 만족할 때만 값을 반환하고, 그 밖에는 null(→ `effort` 키 자체를 만들지 않음).
+ * 형식은 `ai_engine/capability/effort_settings.to_selection`과 동일하다.
+ */
+function _effortSelectionForModel(modelId) {
+  try {
+    const id = _effortText(modelId);
+    if (!id) return null;
+    const tuple = _currentEffortTuple();
+    if (!tuple || tuple.modelId !== id) return null;
+    const el = _effortControlEl();
+    // effort UI가 없거나 숨겨져 있으면 effort는 0회 생성한다(7.15).
+    if (!el || !el.supported || typeof el.matchesTuple !== 'function' || !el.matchesTuple(tuple)) return null;
+    const detail = typeof el.toDetail === 'function' ? el.toDetail() : null;
+    if (!detail || detail.value === null || detail.value === undefined) return null;
+    const effortView = _capEffortView(_capModelView(id), tuple.route);
+    if (!_effortValueInDomain(effortView, detail.value)) return null;
+    const valueType = _effortText(effortView.valueType);
+    if (!EFFORT_VALUE_TYPES.has(valueType) || !_effortValueMatchesType(detail.value, valueType)) return null;
+    return {
+      modelId: tuple.modelId,
+      route: tuple.route,
+      capabilityFingerprint: tuple.capabilityFingerprint,
+      value: detail.value,
+      valueType,
+    };
+  } catch (e) {
+    console.warn('[Effort] selection 판정 실패 — effort 미부착:', e?.message || e);
+    return null;
+  }
+}
+
+/** 앱 시작 시 저장된 effort 설정 복원 + `effort-change` 이벤트 배선(1회). */
+async function initEffortControl() {
+  if (_effortSettingsLoaded) return;
+  _effortSettingsLoaded = true;
+  if (window.electronAPI && typeof window.electronAPI.loadEffortSettings === 'function') {
+    try {
+      const loaded = await window.electronAPI.loadEffortSettings();
+      if (_effortIsPlainObject(loaded) && Array.isArray(loaded.entries)) {
+        _effortSettings = {
+          schemaVersion: EFFORT_SETTINGS_SCHEMA_VERSION,
+          entries: loaded.entries.filter(_effortEntryWellFormed),
+        };
+      }
+    } catch (e) {
+      console.warn('[Effort] 저장된 설정 로드 실패:', e?.message || e);
+    }
+  }
+  // capability payload가 이미 도착했다면 여기서 정리·복원까지 마친다.
+  _pruneEffortSettings();
+  _syncEffortControl();
+}
+
+// effort 셀렉트 박스 변경 → tuple 일치 시에만 저장(7.4~7.6). CustomEvent는 bubbles: true.
+document.addEventListener('effort-change', (ev) => {
+  try {
+    const d = ev && ev.detail;
+    if (!_effortIsPlainObject(d)) return;
+    const tuple = {
+      modelId: _effortText(d.modelId),
+      route: _effortText(d.route),
+      capabilityFingerprint: _effortText(d.capabilityFingerprint),
+    };
+    if (!tuple.modelId || !tuple.route || !tuple.capabilityFingerprint) return;
+    const current = _currentEffortTuple();
+    if (!current || !_effortSameTuple(current, tuple)) return; // tuple 불일치 → 저장하지 않음
+    const changed = (d.value === null || d.value === undefined)
+      ? _effortDropEntry(tuple)
+      : _effortPutEntry(tuple, d.value);
+    if (changed) _persistEffortSettings();
+  } catch (e) {
+    console.warn('[Effort] 변경 처리 실패:', e?.message || e);
+  }
+});
+
+document.addEventListener('DOMContentLoaded', () => {
+  initEffortControl().catch(err => console.warn('[Effort] 초기화 실패:', err?.message || err));
+});
+
+if (typeof window !== 'undefined') {
+  window.initEffortControl = initEffortControl;
+  window._syncEffortControl = _syncEffortControl;
+  window._setCapabilitiesPayload = _setCapabilitiesPayload;
+  window._onCapabilitiesChanged = _onCapabilitiesChanged;
+  window._pruneEffortSettings = _pruneEffortSettings;
+  window._effortSelectionForModel = _effortSelectionForModel;
+  window._currentEffortTuple = _currentEffortTuple;
 }
 
 // ===== Mode Toggle =====
@@ -2138,6 +2589,12 @@ function _apiBody(extra) {
   const profile = state.settings?.awsProfile || 'bedrock-gw';
   const user = state.settings?.bedrockUser || '';
   const body = { awsProfile: profile, bedrockUser: user, ...extra };
+  // gateway-models-effort-support 14.2: tuple 일치 검증을 통과한 경우에만 `effort` 부착.
+  // capability payload 없음 · effort UI 숨김 · tuple 불일치 · verified domain 이탈이면
+  // 키 자체를 만들지 않으므로 body는 기존과 동일하다(요구사항 7.15~7.17).
+  // 병렬 호출(`models`)처럼 단일 `model`이 없는 요청에는 부착하지 않는다.
+  const _effortSelection = _effortSelectionForModel(body.model);
+  if (_effortSelection) body.effort = _effortSelection;
   // intent classifier 결과 전달 — 서버가 task별로 다양한 모델로 라우팅 가능하게.
   // (e.g. reasoning → DeepSeek-R1, long_context → Qwen3, simple_qa → Nova Lite)
   if (state._lastIntent && typeof state._lastIntent === 'object') {
@@ -2263,7 +2720,7 @@ async function _readWithIdleTimeout(reader, idleMs = 600000) {
 }
 
 // SSE 스트림 읽기 공통 함수
-async function readSSEStream(resp, { onText, onTool, onSlot, onError, onRaw } = {}) {
+async function readSSEStream(resp, { onText, onTool, onSlot, onError, onRaw, onSearchStatus } = {}) {
   const reader = resp.body.getReader(), dec = new TextDecoder();
   let buf = '';
   while (true) {
@@ -2282,6 +2739,7 @@ async function readSSEStream(resp, { onText, onTool, onSlot, onError, onRaw } = 
         if (parsed.error)  { onError?.(parsed.error); continue; }
         if (parsed.slotId) { onSlot?.(parsed); continue; }
         if (parsed.tool)   { onTool?.(parsed); continue; }
+        if (parsed.searchStatus) { onSearchStatus?.(parsed.searchStatus); continue; }
         if (parsed.text)   { onText?.(parsed.text); continue; }
         // JSON이지만 알 수 없는 형식
         onRaw?.(d);
@@ -2805,6 +3263,8 @@ async function runSimpleChat(prompt, opts = {}) {
   const msg = { role:'assistant', content:'' };
   state.messages.push(msg);
   renderMessages();
+  // 새 응답 시작 — 리서치 패널 초기화(리서치가 아니면 숨김 유지, 무회귀). 비차단.
+  try { window.resetResearchPanel?.(); } catch (_) {}
   const _chatStartTime = Date.now();
   // 생각 중 경과 시간 — DOM 직접 업데이트 (전체 리렌더 방지)
   const thinkingTimer = setInterval(() => {
@@ -2850,6 +3310,32 @@ async function runSimpleChat(prompt, opts = {}) {
           if (p.tool) {
             // 도구 실행 이벤트 — 채팅에 표시하지 않음 (로그만)
             try { addLiveLog('system', `도구 ${p.tool} ${p.status || ''}`.trim()); } catch (_) {}
+            continue;
+          }
+          if (p.searchStatus) {
+            // 검색 진행 인디케이터(deep-research-engine 요구사항 18) — <search-indicator> 로 전달.
+            // 동일 이벤트가 <research-panel>(프라이버시 고지/진행/출처)로도 전달된다(handleSearchStatus 내부).
+            // 방출/렌더 실패가 검색·답변 진행을 막지 않도록 비차단(요구사항 18.5, P8).
+            try { window.handleSearchStatus?.(p.searchStatus); } catch (_) {}
+            continue;
+          }
+          if (p.answerQuality) {
+            // 리서치 인용/미검증 표시(요구사항 14.3 렌더 · 8/9.5) — 기존 answerQuality SSE 재사용.
+            // 외부 리서치 활성 시에만 <research-panel> 이 인용/미검증을 표시(비리서치 응답은 무시 · 무회귀).
+            // 신규 백엔드 채널·CSP 없음. 렌더 실패는 비차단(요구사항 18.5, P8).
+            try { window.handleResearchQuality?.(p.answerQuality); } catch (_) {}
+            continue;
+          }
+          if (p.effectSummary) {
+            // 실행 계약 검사 결과 — "켠 기능"과 "실제 일어난 일"의 불일치를 알린다.
+            // 이 리포의 반복 결함은 모두 "기능이 켜져 있는데 조용히 아무것도 안 함"이었고,
+            // 사용자는 답변만 보고는 그 사실을 알 수 없었다. 불일치가 없으면 로그만 남긴다
+            // (항상 뜨는 경고는 무시되므로 무노이즈 유지). 렌더 실패는 비차단.
+            //
+            // 이 이벤트는 **오지 않을 수 있다.** 백엔드는 불일치가 있을 때, 또는 외부 조회
+            // 활동이 관측됐을 때만 방출한다(effect_ledger.should_emit_summary). 순수 코딩
+            // 요청의 스트림은 이전과 완전히 동일하다 — 부재를 정상으로 다룬다.
+            try { _renderEffectSummary(p.effectSummary, msg); } catch (_) {}
             continue;
           }
           if (p.type === 'agent_start') {
@@ -3665,6 +4151,16 @@ function _renderRecommendCardMessage(msg) {
 
 let _consensusModelId = null;
 
+// ===== 합의 모델 선택 접근자 =====
+// classic script의 top-level `let`은 window 속성이 아니다. 따라서 다른 스크립트
+// (model-dropdown-ui.js가 renderConsensusDropdownList를 오버라이드한다)에서
+// `window._consensusModelId = ...`로 대입하면 이 렉시컬 바인딩과 별개의 슬롯이
+// 만들어지고, runConsensus()는 갱신되지 않은 바인딩을 읽어 항상
+// pickConsensusModel()의 1순위(Opus 4.7)로 호출된다.
+// 외부에서의 읽기/쓰기는 반드시 이 접근자를 지나게 한다.
+window.setConsensusModel = (id) => { _consensusModelId = id || null; };
+window.getConsensusModel = () => _consensusModelId;
+
 function updateConsensus() {
   const done = [...state.parallelResults.values()].filter(r => r.status === 'done').length;
   const btn = document.getElementById('consensus-btn');
@@ -3888,11 +4384,20 @@ ${dr.map((r, i) => `### 모델 ${i + 1}: ${r.model}\n${r.content.substring(0, 30
         if (!trimmed || !trimmed.startsWith('data: ')) continue;
         const d = trimmed.slice(6);
         if (d === '[DONE]') continue;
-        try {
-          const parsed = JSON.parse(d);
-          if (parsed.error) { msg.content += `\n[오류: ${parsed.error}]`; continue; }
-          if (parsed.text) { msg.content += parsed.text; continue; }
-        } catch {}
+        // SSE 이벤트 처리. JSON 으로 파싱되면 **구조화 이벤트**이므로, text/error 가
+        // 아닌 종류(tool/workflow/heartbeat/searchStatus 등)는 합의 본문에 넣지 않는다.
+        //
+        // 실측 버그: 예전에는 파싱 성공 후 text/error 가 없으면 아래 `msg.content += d`
+        // 로 떨어져 원문 JSON 이 합의 결과 끝에 그대로 붙었다
+        // (`{"tool": "deterministic-converter", "status": "running", ...}`).
+        // 순수 텍스트 청크(JSON 이 아닌 것)만 원문으로 이어붙인다.
+        let structured = null;
+        try { structured = JSON.parse(d); } catch { structured = null; }
+        if (structured !== null && typeof structured === 'object') {
+          if (structured.error) { msg.content += `\n[오류: ${structured.error}]`; continue; }
+          if (typeof structured.text === 'string') { msg.content += structured.text; continue; }
+          continue;   // 그 외 구조화 이벤트는 본문에 반영하지 않음
+        }
         msg.content += d;
       }
       renderMessages();
@@ -4223,6 +4728,46 @@ function renderParallelResultGrid() {
 // 스트리밍 깜빡임 방지용 상태: 마지막 렌더 시점의 메시지 스냅샷
 const _renderCache = { count: 0, lastIdx: -1, lastLen: 0, lastKind: '', wfKey: '', toolKey: '', lastContentLen: 0 };
 
+// ===== 실행 계약 검사 결과 렌더 =====
+// 백엔드(ai_engine/agent_system/effect_ledger.py)가 [DONE] 직전에 내려보내는
+// effectSummary 를 처리한다. 선언(설정·의도)과 관측(도구 호출·제공자·결과 수)이
+// 어긋났을 때만 사용자에게 보이고, 일치하면 라이브 로그에만 남긴다.
+//
+// 왜 필요한가: 이 리포의 반복 결함은 전부 "기능이 켜져 있는데 조용히 아무것도 안 함"
+// 이었다(라우팅 오분류로 검색 0회 / 게이트 미적용 / 제공자 키 없어 0건). 사용자는
+// 답변만 보고는 근거가 없다는 사실을 알 수 없었다.
+function _renderEffectSummary(summary, msg) {
+  if (!summary || typeof summary !== 'object') return;
+  const obs = summary.observed || {};
+  const mismatches = Array.isArray(summary.mismatches) ? summary.mismatches : [];
+
+  // 관측 사실은 항상 로그에 남긴다(디버깅 근거 — 불일치가 없어도 유용).
+  const facts = [
+    `도구 ${Object.values(obs.toolCalls || {}).reduce((a, b) => a + b, 0)}회`,
+    `검색 ${obs.searchToolCalls || 0}회`,
+    obs.searchResults === null || obs.searchResults === undefined
+      ? null : `결과 ${obs.searchResults}건`,
+    (obs.domains || []).length ? `도메인 ${obs.domains.join('>')}` : null,
+  ].filter(Boolean).join(' · ');
+  try { addLiveLog(mismatches.length ? 'error' : 'system', `실행 요약: ${facts}`); } catch (_) {}
+
+  if (!mismatches.length) return;   // 무노이즈 — 일치하면 화면에 아무것도 띄우지 않는다
+
+  // 불일치는 답변 본문이 아니라 메시지 메타로 붙여 시스템 알림으로 렌더한다
+  // (본문을 오염시키면 복사·재생성 시 섞여 들어간다).
+  if (msg && typeof msg === 'object') msg._effectMismatches = mismatches;
+  const lines = mismatches.map((m) => {
+    const detail = m && m.detail ? ` (${m.detail})` : '';
+    return `• ${(m && m.message) || (m && m.code) || ''}${detail}`;
+  });
+  state.messages.push({
+    role: 'system',
+    content: `이번 응답에서 확인된 불일치\n${lines.join('\n')}`,
+    _effectWarning: true,
+  });
+  try { renderMessages(); } catch (_) {}
+}
+
 function _streamFastPath(){
   // 스트리밍 중이 아니면 fast-path 불가
   if(!state.isStreaming) return false;
@@ -4272,8 +4817,24 @@ function _streamFastPath(){
   if(!mc) return false;
   // 오류 메시지는 보수적으로 전체 재렌더
   if(last.content.includes('[오류:') || last.content.includes('[합의 오류:')) return false;
-  // consensus 등 특수 케이스는 전체 재렌더
-  if(last.isConsensus) return false;
+
+  // 합의 메시지: .msg-content 안에 '합의 결과' 헤더 + .md-body + action bar가 함께 있어
+  // 아래의 mc.innerHTML 교체를 그대로 쓰면 헤더·버튼이 사라진다. 본문 컨테이너
+  // (.md-body)만 in-place 갱신해 노드 파괴 없이 스트리밍한다(깜빡임 제거).
+  // .md-body가 아직 없으면 thinking → 본문 전환 시점이므로 전체 재렌더에 맡긴다.
+  if(last.isConsensus){
+    const body = mc.querySelector(':scope > .md-body');
+    if(!body) return false;
+    if(body.getAttribute('data-stream-len') !== String(last.content.length)){
+      body.innerHTML = fmtMd(last.content);
+      body.setAttribute('data-stream-len', String(last.content.length));
+    }
+    if(!state._pinAnchorSet){
+      const nearBottom = (c.scrollHeight - c.scrollTop - c.clientHeight) < 80;
+      if(nearBottom) c.scrollTop = c.scrollHeight;
+    }
+    return true;
+  }
 
   // in-place 교체: .msg-content의 innerHTML만 갱신 (node 자체는 유지 → 깜빡임 없음)
   const elapsedHtml = last._elapsed ? `<div style="font-size:10px;color:var(--color-text-muted);margin-top:4px;text-align:right">${fmtElapsed(last._elapsed)}</div>` : '';
@@ -6458,15 +7019,16 @@ async function showSettingsDialog() {
   const bu = state.settings?.bedrockUser || '';
 
   o.innerHTML = `<div class="overlay" onclick="if(event.target===this)document.getElementById('sso-dialog').style.display='none'">
-    <div class="dialog" style="text-align:left;max-width:640px;min-width:580px;padding:0;display:flex;min-height:400px;overflow:hidden">
+    <div class="dialog" style="text-align:left;max-width:640px;min-width:580px;padding:0;display:flex;min-height:min(400px,88vh);max-height:88vh;overflow:hidden">
       <div class="settings-sidebar">
         <div class="settings-title">설정</div>
         <button class="settings-nav-btn active" data-stab="appearance"><span class="settings-nav-icon">✦</span> 외관</button>
         <button class="settings-nav-btn" data-stab="cli"><span class="settings-nav-icon">&gt;_</span> CLI</button>
+        <button class="settings-nav-btn" data-stab="research"><span class="settings-nav-icon">◎</span> 리서치</button>
         <button class="settings-nav-btn" data-stab="account"><span class="settings-nav-icon">○</span> 계정</button>
       </div>
       <div class="settings-content">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;flex-shrink:0">
           <h3 id="settings-content-title" style="margin:0;font-size:16px;font-weight:700;color:var(--color-text-primary)">외관</h3>
           <button class="sm-btn" onclick="document.getElementById('sso-dialog').style.display='none'" style="font-size:14px;padding:4px 8px">✕</button>
         </div>
@@ -6488,7 +7050,7 @@ async function showSettingsDialog() {
 function renderSettingsTab(o, profiles) {
   const body = o.querySelector('#settings-body');
   const title = o.querySelector('#settings-content-title');
-  const titles = { appearance:'외관', cli:'CLI', account:'계정' };
+  const titles = { appearance:'외관', cli:'CLI', research:'리서치', account:'계정' };
   // 항상 최신 state에서 읽기
   const cur = state.settings?.awsProfile || '(없음)';
   const bu = state.settings?.bedrockUser || '';
@@ -6585,6 +7147,23 @@ function renderSettingsTab(o, profiles) {
           statusEl.innerHTML = '<span style="color:var(--color-error)">● 오류</span>';
         }
       } catch { statusEl.innerHTML = '<span style="color:var(--color-error)">● 오프라인</span>'; }
+    });
+  } else if (_settingsTab === 'research') {
+    // 외부 리서치 설정 (deep-research-engine 요구사항 14.1/14.3/15.2) — <research-settings> Web Component.
+    // 공유 settings 객체(참조)를 넘겨 컴포넌트가 research 플래그/제공자 이름만 병합·저장한다.
+    // settings.json 에는 자격증명(API 키)을 절대 저장하지 않는다(steering security.md, 요구사항 11).
+    if (!state.settings || typeof state.settings !== 'object') state.settings = {};
+    body.innerHTML = '';
+    const rs = document.createElement('research-settings');
+    body.appendChild(rs);
+    try {
+      // 공유 참조 주입 → 컴포넌트가 기존 settings IPC(saveSettings)로 영속화(신규 채널 없음).
+      // awsProfile/bedrockUser 등 기존 키는 동일 객체에 보존된다.
+      rs.setSettings(state.settings);
+    } catch (_) {}
+    // 변경 시 CustomEvent 수신 — in-memory state 동기 유지(저장은 컴포넌트가 수행).
+    rs.addEventListener('research-change', (e) => {
+      try { if (e.detail?.research) state.settings.research = e.detail.research; } catch (_) {}
     });
   } else if (_settingsTab === 'account') {
     const opts = profiles.map(p => `<option value="${p}" ${p===cur?'selected':''}>${p}</option>`).join('');

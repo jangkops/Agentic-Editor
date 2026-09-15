@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<!--
+  Feature: deep-research-engine — Task 17.3 설정 UI Playwright 테스트 하네스
+  Requirements: 14.1, 14.3
+
+  <research-settings> Web Component (src/components/research-settings.js)를 Electron 앱
+  전체를 띄우지 않고 격리 검증하기 위한 정적 HTML 하네스다. headless Chromium(Playwright)이
+  file:// 로 로드한다.
+
+  - variables.css 를 로드해 실제 디자인 토큰(예: --color-warning) 아래에서 렌더/검증한다.
+  - window.electronAPI 를 컴포넌트 스크립트보다 먼저 stub 으로 정의한다:
+      · loadSettings() → {}  (지연 로드가 결정적으로 기본값으로 정착하도록)
+      · saveSettings(s) → 저장 페이로드를 window.__savedSettings 에 기록(플래그-only 저장 검증용)
+    실제 preload.js 가 contextBridge 로 노출하는 형태와 동일하며, 자격증명은 취급하지 않는다.
+  - 상대 경로(../../../)는 이 파일(tests/e2e/fixtures/)에서 저장소 루트의 src/ 를 가리킨다.
+-->
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>research-settings harness</title>
+  <link rel="stylesheet" href="../../../src/styles/variables.css">
+  <style>
+    html, body { margin: 0; padding: 24px; background: var(--color-bg-primary, #1e1e1e); }
+    /* 설정 모달이 제공하는 행 레이아웃 클래스(컴포넌트가 재사용). 하네스에서 최소 정의. */
+    .settings-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin: 12px 0; }
+    .settings-row-info { flex: 1 1 auto; }
+    .settings-row-label { font-size: 13px; color: var(--color-text-primary, #ccc); font-weight: 600; }
+    .settings-row-desc { font-size: 12px; color: var(--color-text-muted, #6a6a6a); margin-top: 2px; }
+    #host { max-width: 560px; }
+  </style>
+  <script>
+    // 컴포넌트의 connectedCallback → _lazyLoad 가 참조하기 전에 stub 을 정의한다.
+    window.__savedSettings = null;
+    window.electronAPI = {
+      loadSettings: async function () { return {}; },
+      saveSettings: async function (s) {
+        try { window.__savedSettings = JSON.parse(JSON.stringify(s)); } catch (_e) { window.__savedSettings = s; }
+        return true;
+      },
+    };
+  </script>
+</head>
+<body>
+  <div id="host">
+    <research-settings></research-settings>
+  </div>
+  <!-- 컴포넌트 정의 스크립트: 위의 <research-settings> 인스턴스를 업그레이드한다. -->
+  <script src="../../../src/components/research-settings.js"></script>
+</body>
+</html>

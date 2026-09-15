@@ -38,6 +38,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   loadSettings: () => ipcRenderer.invoke('store:load-settings'),
   saveSettings: (s) => ipcRenderer.invoke('store:save-settings', s),
 
+  // 리서치 제공자 자격증명 — OS 키체인 저장. 값을 되읽는 채널은 의도적으로 없다.
+  // status 는 제공자별 설정 여부(bool)만 돌려준다(steering security).
+  researchCredsStatus: () => ipcRenderer.invoke('research-creds:status'),
+  researchCredsSet: (provider, key) => ipcRenderer.invoke('research-creds:set', provider, key),
+  researchCredsClear: (provider) => ipcRenderer.invoke('research-creds:clear', provider),
+
   // Usage
   loadUsage: () => ipcRenderer.invoke('store:load-usage'),
   updateUsage: (tokens) => ipcRenderer.invoke('store:update-usage', tokens),
@@ -162,4 +168,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getTemplate: (id) => ipcRenderer.invoke('template:get', id),
   getTemplateStyleProfile: (id) => ipcRenderer.invoke('template:get-style-profile', id),
   deleteTemplate: (id) => ipcRenderer.invoke('template:delete', id),
+
+  // Capability / effort (gateway-models-effort-support Task 14.3) — 화이트리스트 3개 채널만.
+  // 핸들러는 main 프로세스에서만 등록되며(ipc-capability-handlers.js), 경로 인자를 받지 않고
+  // `userData/capability/` 하위 고정 파일만 읽고 쓴다. ipcRenderer는 노출하지 않는다.
+  //   loadEffortSettings()      → {schemaVersion, entries:[...]}  (파일 부재 시 빈 settings)
+  //   saveEffortSettings(s)     → {ok, entries, dropped} | {ok:false, error}
+  //   loadCapabilityMap()       → Capability_Map 객체 | null (부재·손상 시 null = 기준선 동작)
+  loadEffortSettings: () => ipcRenderer.invoke('capability:load-effort-settings'),
+  saveEffortSettings: (settings) => ipcRenderer.invoke('capability:save-effort-settings', settings),
+  loadCapabilityMap: () => ipcRenderer.invoke('capability:load-map'),
 });

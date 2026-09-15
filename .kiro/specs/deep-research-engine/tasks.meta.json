@@ -1,0 +1,468 @@
+{
+  "pbtResults": {
+    "4.2 중복제거 불변식 속성 테스트": {
+      "status": "passed",
+      "lastRunTimestamp": 1785129904249
+    },
+    "5.2 관련성 정렬 속성 테스트": {
+      "status": "passed",
+      "lastRunTimestamp": 1785129918192
+    },
+    "2.5 직렬화 라운드트립 속성 테스트": {
+      "status": "passed",
+      "lastRunTimestamp": 1785129950706
+    },
+    "7.2 자격증명 비노출 속성 테스트": {
+      "status": "passed",
+      "lastRunTimestamp": 1785130126289
+    },
+    "2.2 `normalize_query` 멱등성 속성 테스트": {
+      "status": "passed",
+      "lastRunTimestamp": 1785130493783
+    },
+    "4.3 중복제거 멱등성 속성 테스트": {
+      "status": "passed",
+      "lastRunTimestamp": 1785130434364
+    },
+    "4.4 커버리지 단조성 속성 테스트": {
+      "status": "passed",
+      "lastRunTimestamp": 1785130465981
+    },
+    "5.4 최신성 필터 속성 테스트": {
+      "status": "passed",
+      "lastRunTimestamp": 1785130923738
+    },
+    "5.6 재랭킹 순열 속성 테스트": {
+      "status": "passed",
+      "lastRunTimestamp": 1785132137218
+    },
+    "9.2 옵트인 게이트 무회귀 속성 테스트": {
+      "status": "passed",
+      "lastRunTimestamp": 1785132707651
+    },
+    "8.2 영속 경로 불변식 속성 테스트": {
+      "status": "passed",
+      "lastRunTimestamp": 1785132744728
+    },
+    "20.5 인디케이터 라이프사이클 속성 테스트": {
+      "status": "passed",
+      "lastRunTimestamp": 1785136854141
+    },
+    "9.6 오류조건 비차단 폴백 속성 테스트": {
+      "status": "passed",
+      "lastRunTimestamp": 1785200078026
+    },
+    "13.3 인용 참조 무결성 속성 테스트": {
+      "status": "passed",
+      "lastRunTimestamp": 1785224587206
+    },
+    "12.5 심화 유한 종료 속성 테스트": {
+      "status": "passed",
+      "lastRunTimestamp": 1785224736244
+    }
+  },
+  "executionHistory": {
+    "3.1 웹 검색 어댑터 구현": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785200798720
+      },
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785200822209
+      },
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785201639471
+      }
+    ],
+    "6. 체크포인트 — 순수 함수 계층 검증": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785200798768
+      },
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785203493456
+      },
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785203499327
+      }
+    ],
+    "10.2 `server._execute_tool` 디스패치 등록": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785200798812
+      },
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785203678958
+      },
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785209648426
+      }
+    ],
+    "11. 체크포인트 — egress·조회 도구(축 A) 검증": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785200798842
+      }
+    ],
+    "12.3 Generator: 인용 포함 Research_Report 종합": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785200798869
+      },
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785203680322
+      },
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785209649858
+      }
+    ],
+    "12.4 Evaluator + 심화 루프(should_deepen) 구현": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785200798894
+      },
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785209651765
+      },
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785211111743
+      }
+    ],
+    "12.6 Coordinator 진입점(`run_deep_research`) + 체크포인트/스토어 + 실행 seam": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785200798923
+      },
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785211111769
+      },
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785211969860
+      }
+    ],
+    "13.1 소스 식별자 스킴 + `verify_citations` 소스 id 대조 구현": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785200798963
+      },
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785211971490
+      },
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785214399373
+      }
+    ],
+    "13.2 미검증 인용 비율 산출 + 근거성 메타데이터 병합": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785200798992
+      },
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785214402611
+      }
+    ],
+    "14.1 `deep_research` 도구를 RESEARCH_TOOLS + _execute_tool에 등록": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785200799020
+      },
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785211973985
+      },
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785214401737
+      }
+    ],
+    "15. 체크포인트 — 딥리서치 파이프라인(축 B) 검증": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785200799053
+      }
+    ],
+    "16.1 평가 하네스 구현(지표 산출)": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785200799084
+      },
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785211111828
+      },
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785211970037
+      }
+    ],
+    "16.2 회귀 게이트 + golden/baseline 스냅샷 + 실행 스크립트": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785200799112
+      },
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785211972542
+      },
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785214400302
+      }
+    ],
+    "17.1 외부 리서치 설정 UI 컴포넌트 구현": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785200799140
+      },
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785200823436
+      },
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785201640270
+      }
+    ],
+    "17.2 프라이버시 고지 + 리서치 진행/출처/인용 렌더": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785200799169
+      },
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785201680569
+      },
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785202733475
+      }
+    ],
+    "18.1 패키지 공개 API 배선 + 설정 플래그 흐름 연결": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785200799204
+      }
+    ],
+    "19. 최종 체크포인트 — 전체 검증": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785200799235
+      }
+    ],
+    "20.4 프론트 SSE 배선 (`src/main.js`, `src/center-views.js`)": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785200799277
+      },
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785202752057
+      },
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785203364293
+      }
+    ],
+    "3. 제공자 어댑터 (`research/providers.py`, 순수 매핑 — egress 없음)": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785201639535
+      }
+    ],
+    "17. 프론트엔드 설정·동의 UI (Electron + Vanilla JS)": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785202733516
+      }
+    ],
+    "20. 검색 진행 인디케이터 (Requirement 18, Kiro 스타일)": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785203364349
+      }
+    ],
+    "9. 단일 외부 egress 백엔드 (`research/backend.py`)": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785203560682
+      }
+    ],
+    "1. 프로젝트 구조 및 데이터 모델": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785203571216
+      }
+    ],
+    "2. 순수 정규화·직렬화 (`research/normalize.py`)": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785203571389
+      }
+    ],
+    "4. 중복제거 (`research/dedup.py`, 순수)": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785203571716
+      }
+    ],
+    "5. 정렬·최신성·재랭킹 (`research/rank.py`, 기존 자산 조합)": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785203573265
+      }
+    ],
+    "7. 자격증명 보안 (`research/security.py`)": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785203574998
+      }
+    ],
+    "8. userData 캐시 (`research/cache.py`)": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785203575717
+      }
+    ],
+    "17.3 설정 UI Playwright 테스트": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785203681375
+      },
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785209650908
+      }
+    ],
+    "10. 조회 도구 통합 (축 A — RESEARCH_TOOLS + _execute_tool)": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785209648478
+      }
+    ],
+    "10.3 도구 등록·name 정합·디스패치 단위 테스트": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785209653217
+      },
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785211111717
+      }
+    ],
+    "20.6 인디케이터 UI Playwright 테스트": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785209654670
+      },
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785211111803
+      }
+    ],
+    "12. 딥리서치 멀티에이전트 파이프라인 (`research/deep_research.py`, 축 B)": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785211969919
+      }
+    ],
+    "16. 품질 평가 하네스 + baseline 회귀 게이트 (`research/eval_harness.py`)": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785214400367
+      }
+    ],
+    "14. 딥리서치 도구 통합 + verified_files": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785214401794
+      }
+    ],
+    "16.3 회귀 판정 단위 테스트": [
+      {
+        "executionId": "641b4b65-b82c-42cb-8303-8ce7639c6d1b",
+        "chatSessionId": "sess_4e74f226-ff2a-42a4-82f8-32457f663150",
+        "timestamp": 1785214403976
+      }
+    ]
+  }
+}

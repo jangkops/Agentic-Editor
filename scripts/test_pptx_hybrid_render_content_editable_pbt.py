@@ -32,6 +32,7 @@ import string
 import sys
 import tempfile
 
+import pytest
 from hypothesis import given, settings, strategies as st, HealthCheck
 
 from pptx import Presentation
@@ -77,12 +78,43 @@ class _DisabledVertexClient:
         raise AssertionError("헤르메틱 위반: Vertex generate 가 호출됨")
 
 
-try:  # 대상 함수는 Vertex 를 만지지 않지만, 안전하게 disabled 로 고정한다.
-    import ai_engine.vertex_image_module as _vim  # noqa: E402
+@pytest.fixture(autouse=True, scope="module")
+def _hermetic_vertex():
+    """Vertex 를 disabled 스텁으로 고정한다 — **이 모듈이 도는 동안만**.
 
+    이전 구현은 import 시점에 ``_vim.get_vertex_image_client`` 를 맨 대입으로 덮고
+    복원하지 않았다. pytest 는 한 프로세스에서 전 파일을 돌리므로, 이 파일이 먼저
+    수집되면 스텁이 세션 끝까지 남아 **다른 파일의 테스트를 거짓 실패**시켰다:
+
+        test_vertex_auto_enable.py::test_get_client_accepts_credentials_param
+        → assert 'credentials' in mappingproxy(... <Signature (*a, **k)>)
+
+    스텁의 시그니처를 검사하고 있었던 것이다. 제품 코드에는 문제가 없었고, 테스트가
+    테스트를 깨뜨렸다. fixture 로 감싸 복원을 보장한다.
+
+    scope="module" 인 이유: 함수 스코프 fixture 를 ``@given`` 테스트에 붙이면
+    hypothesis 의 function_scoped_fixture 헬스체크가 뜬다. 모듈 스코프면 걸리지 않고,
+    이 스텁은 예제마다 초기화할 상태가 없어 모듈 1회 적용으로 충분하다.
+    """
+    try:
+        import ai_engine.vertex_image_module as _vim  # noqa: E402
+    except Exception:      # 모듈 부재 시 헤르메틱은 자동 성립
+        yield
+        return
+
+    _MISSING = object()
+    original = getattr(_vim, "get_vertex_image_client", _MISSING)
     _vim.get_vertex_image_client = lambda *a, **k: _DisabledVertexClient()  # type: ignore[assignment]
-except Exception:
-    pass
+    try:
+        yield
+    finally:
+        if original is _MISSING:
+            try:
+                del _vim.get_vertex_image_client
+            except Exception:
+                pass
+        else:
+            _vim.get_vertex_image_client = original  # type: ignore[assignment]
 
 
 _COMMON = settings(

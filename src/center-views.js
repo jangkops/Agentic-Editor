@@ -1404,3 +1404,106 @@ function showSearchInRightPanel() {
 
 // 외부(main.js 소스제어 패널)에서도 호출 가능하도록 전역 노출
 window.switchGitBranch = switchGitBranch;
+
+// ── 검색 진행 인디케이터 배선 (deep-research-engine 요구사항 18.1/18.3/18.4/18.5) ──
+// 백엔드가 방출한 searchStatus SSE(payload) 를 채팅 UI 의 <search-indicator> 로 전달한다.
+// (sse_bridge → main.js SSE 소비 루프 → 여기 → search-indicator.update)
+//
+// 마운트 위치: 활성 어시스턴트 응답이 누적되는 #chat-messages "바로 다음 형제"로 삽입한다.
+//   renderMessages()/스트리밍 fast-path 는 #chat-messages 내부만 재렌더하므로, 형제로 둔
+//   인디케이터는 스트림 재렌더에도 잔존한다(무회귀 · 안정 마운트).
+// 방어: 마운트/전달 실패가 검색·답변 진행을 막지 않도록 전부 try/catch(요구사항 18.5, P8).
+
+function mountSearchIndicator() {
+  try {
+    const messages = document.getElementById('chat-messages');
+    if (!messages || !messages.parentElement) return null;
+    let ind = document.getElementById('chat-search-indicator');
+    if (!ind) {
+      ind = document.createElement('search-indicator');
+      ind.id = 'chat-search-indicator';
+      // 메시지 리스트 바로 다음(입력창 위)에 형제로 삽입 → 재렌더에도 잔존.
+      messages.insertAdjacentElement('afterend', ind);
+    }
+    return ind;
+  } catch (_e) {
+    // 인디케이터 마운트 실패는 비차단(요구사항 18.5).
+    return null;
+  }
+}
+
+// searchStatus payload 를 인디케이터 인스턴스로 전달(필요 시 지연 마운트).
+function handleSearchStatus(payload) {
+  try {
+    const ind = mountSearchIndicator();
+    if (ind && typeof ind.onSearchStatus === 'function') {
+      ind.onSearchStatus(payload);
+    }
+  } catch (_e) {
+    // 렌더 실패가 검색·답변 진행을 막지 않는다(요구사항 18.5, P8).
+  }
+  // 동일 searchStatus 를 응답에 남는 리서치 패널에도 전달(프라이버시 고지/진행/출처).
+  // 인디케이터(transient)와 패널(persistent)은 독립적으로 실패 방어된다(요구사항 18.5, P8).
+  try {
+    const panel = mountResearchPanel();
+    if (panel && typeof panel.onSearchStatus === 'function') {
+      panel.onSearchStatus(payload);
+    }
+  } catch (_e) { /* 비차단 */ }
+}
+
+// ── 리서치 패널 배선 (deep-research-engine 요구사항 14.1/14.3 · Task 17.2) ──
+// 응답 영역에 남는 <research-panel> — 프라이버시 고지 + 리서치 진행/출처/인용/미검증을
+// 기존 SSE 이벤트(searchStatus / answerQuality)로만 렌더한다(신규 CSP·채널 없음).
+// 마운트: 검색 인디케이터 바로 다음(있으면), 없으면 #chat-messages 다음 형제로 삽입해
+//   renderMessages() 재렌더에도 잔존시킨다(search-indicator 와 동일한 안정 마운트 패턴).
+
+function mountResearchPanel() {
+  try {
+    const messages = document.getElementById('chat-messages');
+    if (!messages || !messages.parentElement) return null;
+    let panel = document.getElementById('chat-research-panel');
+    if (!panel) {
+      panel = document.createElement('research-panel');
+      panel.id = 'chat-research-panel';
+      // 인디케이터가 이미 있으면 그 다음에, 없으면 메시지 리스트 바로 다음 형제로 삽입.
+      const ind = document.getElementById('chat-search-indicator');
+      if (ind && ind.parentElement === messages.parentElement) {
+        ind.insertAdjacentElement('afterend', panel);
+      } else {
+        messages.insertAdjacentElement('afterend', panel);
+      }
+    }
+    return panel;
+  } catch (_e) {
+    // 마운트 실패는 비차단(요구사항 18.5, P8).
+    return null;
+  }
+}
+
+// answerQuality metadata(citation/grounding) 를 리서치 패널로 전달 → 인용/미검증 렌더.
+function handleResearchQuality(meta) {
+  try {
+    const panel = mountResearchPanel();
+    if (panel && typeof panel.onAnswerQuality === 'function') {
+      panel.onAnswerQuality(meta);
+    }
+  } catch (_e) {
+    // 렌더 실패가 답변 진행을 막지 않는다(요구사항 18.5, P8).
+  }
+}
+
+// 새 응답 스트림 시작 시 리서치 패널 초기화(리서치가 아니면 숨김 유지 — 무회귀).
+function resetResearchPanel() {
+  try {
+    const panel = document.getElementById('chat-research-panel');
+    if (panel && typeof panel.reset === 'function') panel.reset();
+  } catch (_e) { /* 비차단 */ }
+}
+
+// SSE 소비 루프(main.js)에서 호출할 수 있도록 전역 노출.
+window.mountSearchIndicator = mountSearchIndicator;
+window.handleSearchStatus = handleSearchStatus;
+window.mountResearchPanel = mountResearchPanel;
+window.handleResearchQuality = handleResearchQuality;
+window.resetResearchPanel = resetResearchPanel;

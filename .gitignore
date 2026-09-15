@@ -42,3 +42,10 @@ scripts/_render_out/
 _tmp*
 scripts/_*_probe.js
 **/_rfb_temp.js
+
+# deep-research-engine: 검색 제공자 자격증명 (절대 커밋 금지)
+# API 키는 env/시크릿 런타임 주입만, 파일 저장 금지 (steering security / 요구사항 11)
+.env.research
+**/research_secrets*
+*research*.key
+*research*.secret

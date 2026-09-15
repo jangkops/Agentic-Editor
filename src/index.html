@@ -165,6 +165,9 @@
           <div class="model-dropdown-list" id="model-dropdown-list"></div>
         </div>
       </div>
+      <!-- gateway-models-effort-support: effort 셀렉트 박스. 선택 모델의 effort가
+           SUPPORTED일 때만 렌더되고(그 외에는 display:none) 검증된 값만 표시한다. -->
+      <effort-control id="effort-control"></effort-control>
     </div>
     <div id="parallel-model-bar" class="model-bar" style="display:none">
       <div class="model-dropdown-wrapper" id="parallel-dropdown-wrapper" style="width:100%">
@@ -286,8 +289,13 @@
 <script src="components/remote-host-key-dialog.js" defer></script>
 <script src="components/remote-status-bar.js" defer></script>
 <script src="components/remote-workspace-picker.js" defer></script>
+<script src="components/search-indicator.js"></script>
+<script src="components/research-settings.js"></script>
+<script src="components/research-panel.js"></script>
 <script src="center-views.js"></script>
 <script src="model-recommender.js"></script>
+<!-- effort 셀렉트 박스 Web Component — main.js가 tuple을 전달하기 전에 정의되어야 한다 -->
+<script src="effort-control.js"></script>
 <script src="main.js"></script>
 <script src="model-dropdown-ui.js"></script>
 </body>

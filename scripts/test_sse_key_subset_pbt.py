@@ -39,6 +39,8 @@ from ai_engine.agent_system.sse_bridge import ALLOWED_EVENT_KEYS
 _GRAPH_STATE_CHANNELS = set(GraphState.__annotations__.keys())
 
 # sse_bridge.graph_events_to_sse 가 정적으로 emit 하는 이벤트 키(실측). 모두 ALLOWED 부분집합.
+# deep-research-engine 요구사항 18.4: on_custom_event(search_status) → {searchStatus} 중계
+# 분기가 추가되어 searchStatus 도 emit 대상이다(부분집합 불변식 유지).
 _SSE_EMITTED_KEYS = {
     "text",
     "tool",
@@ -48,6 +50,7 @@ _SSE_EMITTED_KEYS = {
     "verifiedFiles",
     "heartbeat",
     "error",
+    "searchStatus",
 }
 
 
@@ -223,10 +226,18 @@ def test_sse_emitted_keys_subset_of_allowed():
 
 
 def test_allowed_event_keys_frozen_contract():
-    """허용 이벤트 키 집합이 요구사항 6.5 계약과 정확히 일치(회귀 방지)."""
+    """허용 이벤트 키 집합이 요구사항 6.5 계약 + 순수 확장 2건과 정확히 일치(회귀 방지)."""
     expected = {
         "text", "thinking", "tool", "status", "verifiedFiles", "type",
         "taskId", "heartbeat", "answerQuality", "qualityPending", "error",
+        # deep-research-engine 요구사항 18.4: 검색 진행 표시(searchStatus) 순수 확장.
+        "searchStatus",
+        # 실행 계약 검사(effect_ledger): [DONE] 직전 1회 방출되는 순수 확장.
+        # "선언(설정·의도) vs 관측(도구 호출·제공자·결과 수)" 불일치를 사용자에게 올린다.
+        # 근거: 이 리포의 반복 결함이 모두 "기능이 켜져 있는데 조용히 아무것도 안 함"
+        # 형태였고(라우팅 오분류로 검색 0회 / 게이트 미적용 / 제공자 키 없어 0건),
+        # 답변만으로는 그 사실을 알 수 없었다. 기존 키·CSP·채널은 무변경.
+        "effectSummary",
     }
     assert set(ALLOWED_EVENT_KEYS) == expected
 

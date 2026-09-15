@@ -367,6 +367,9 @@
 
 /* ===== Model Bar ===== */
 .model-bar{padding:8px 12px;border-bottom:1px solid var(--color-border);}
+/* gateway-models-effort-support: effort 셀렉트 박스 — 모델 드롭다운 바로 아래 한 줄.
+   렌더되지 않은 상태(effort 미지원)에서는 display:none이라 공간을 차지하지 않는다. */
+#single-model-bar > effort-control[data-state="ready"]{margin-top:6px;}
 
 /* ===== Context Menu ===== */
 .context-menu{

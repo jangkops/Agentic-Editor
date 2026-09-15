@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<!--
+  Feature: gateway-models-effort-support — Task 14.4 effort UI Playwright 테스트 하네스
+  Requirements: 7.1, 7.2, 7.3, 7.12, 7.13, 7.14, 12.2
+
+  `<effort-control>`(src/effort-control.js)과 그 배선(src/main.js task 14.2 seam)을 Electron
+  앱 전체(SSO/파이썬 백엔드)를 띄우지 않고 격리 검증하기 위한 정적 HTML 하네스다. headless
+  Chromium(Playwright)이 file:// 로 로드한다. (Task 17.3 / 20.6 하네스 패턴 계승)
+
+  설계 요점:
+  - `src/index.html`의 `#single-model-bar` 서브트리(모델 드롭다운 + `<effort-control>`)를 그대로
+    복제한다. 셀렉터·id는 index.html과 동일하므로 main.js의 DOM 계약이 실물과 같다.
+  - variables.css + components.css 를 로드해 **실제 다크 산업풍 토큰** 아래에서 렌더/검증한다.
+  - main.js 는 `load` 이후에 동적 주입한다. 그러면 main.js 가 등록하는 `DOMContentLoaded`
+    부팅 핸들러(SSO 다이얼로그·백엔드 조회)는 이미 지나간 이벤트라 실행되지 않고, effort seam
+    (top-level 정의 + `effort-change` 리스너)만 남는다. 실제 앱의 부팅 핸들러가 effort에 대해
+    수행하는 유일한 동작인 `initEffortControl()`은 주입 직후 명시적으로 1회 호출한다.
+  - `window.electronAPI` 는 preload 화이트리스트(task 14.3)와 같은 이름의 stub 이다.
+      · loadEffortSettings()      → window.__storedEffortSettings (테스트가 미리 심을 수 있다)
+      · saveEffortSettings(snap)  → window.__effortSaves 에 스냅샷 누적(영속 호출 검증용)
+    자격증명은 취급하지 않으며 ipcRenderer 는 노출하지 않는다.
+  - `window.fetch` 는 `/api/models` 응답만 흉내내는 stub 이다. 응답 본문은 테스트가
+    `window.__modelsResponse` 로 갈아끼운다 → `refreshModelsPreservingSelection()`(카탈로그
+    변경·capability payload 반영·Effort_Settings 정리)을 실물 코드 경로로 구동한다.
+  - `effort-change` CustomEvent(bubbles) 를 document 에서 수신해 window.__effortEvents 에 기록한다.
+  - 상대 경로(../../../)는 이 파일(tests/e2e/fixtures/)에서 저장소 루트의 src/ 를 가리킨다.
+
+  이 하네스는 model ID·route·effort 값을 **하나도 만들어내지 않는다.** 전부 테스트가 주입한다.
+-->
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>effort-control harness</title>
+  <link rel="stylesheet" href="../../../src/styles/variables.css">
+  <link rel="stylesheet" href="../../../src/styles/layout.css">
+  <link rel="stylesheet" href="../../../src/styles/components.css">
+  <style>
+    /* 하네스 전용: 앱 셸(3-pane grid) 없이 상단바 한 줄만 배치한다. */
+    html, body { height: auto; margin: 0; padding: 16px; overflow: visible;
+                 background: var(--color-bg-primary, #1e1e1e); }
+    #host { max-width: 420px; background: var(--color-bg-secondary, #252526); }
+    /* 토큰 해석 비교용 프로브(테스트가 computed style 을 읽는다). 시각적으로는 보이지 않는다. */
+    #token-probe-bg-input { background: var(--color-bg-input); }
+    #token-probe-accent { color: var(--color-accent); }
+    #token-probe-muted { color: var(--color-text-muted); }
+    .token-probe { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  </style>
+  <script>
+    // ── preload 화이트리스트(capability:*) stub ─────────────────────────────────────
+    window.__storedEffortSettings = null;  // loadEffortSettings 응답(테스트가 심는다)
+    window.__effortSaves = [];             // saveEffortSettings 스냅샷 누적
+    window.electronAPI = {
+      loadEffortSettings: async function () { return window.__storedEffortSettings; },
+      saveEffortSettings: async function (snapshot) {
+        var copy;
+        try { copy = JSON.parse(JSON.stringify(snapshot)); } catch (_e) { copy = snapshot; }
+        window.__effortSaves.push(copy);
+        window.__storedEffortSettings = copy;
+        return true;
+      },
+      loadCapabilityMap: async function () { return null; },
+    };
+
+    // ── /api/models fetch stub ────────────────────────────────────────────────────
+    // 테스트가 window.__modelsResponse 를 갈아끼우면 다음 refresh 가 그 본문을 받는다.
+    window.__modelsResponse = { models: {} };
+    window.__fetchCalls = [];
+    window.fetch = async function (url, opts) {
+      window.__fetchCalls.push(String(url));
+      var body;
+      try { body = JSON.parse(JSON.stringify(window.__modelsResponse)); }
+      catch (_e) { body = { error: 'harness-serialize-failed' }; }
+      return { ok: true, status: 200, json: async function () { return body; } };
+    };
+
+    // ── effort-change CustomEvent 기록(컴포넌트 정의 전에 걸어 둔다) ────────────────
+    window.__effortEvents = [];
+    document.addEventListener('effort-change', function (e) {
+      window.__effortEvents.push(e.detail);
+    });
+  </script>
+</head>
+<body>
+  <div id="host">
+    <!-- src/index.html #single-model-bar 서브트리 복제 (id/클래스 동일) -->
+    <div id="single-model-bar" class="model-bar">
+      <div class="model-dropdown-wrapper" id="model-dropdown-wrapper" style="width:100%">
+        <button class="model-dropdown-btn" id="model-dropdown-btn" style="width:100%;text-align:left">모델 선택 ▾</button>
+        <div class="model-dropdown-menu" id="model-dropdown-menu" style="display:none">
+          <input class="model-search" id="model-search" placeholder="모델 검색...">
+          <div class="model-dropdown-list" id="model-dropdown-list"></div>
+        </div>
+      </div>
+      <effort-control id="effort-control"></effort-control>
+    </div>
+    <!-- main.js 가 갱신하는 표시 요소(없으면 null 접근) -->
+    <span class="token-probe" id="status-model"></span>
+    <span class="token-probe" id="topbar-model-count"></span>
+    <span class="token-probe" id="token-probe-bg-input"></span>
+    <span class="token-probe" id="token-probe-accent"></span>
+    <span class="token-probe" id="token-probe-muted"></span>
+  </div>
+
+  <script src="../../../src/lib/utils.js"></script>
+  <!-- 컴포넌트 정의 스크립트: 위의 <effort-control> 인스턴스를 업그레이드한다. -->
+  <script src="../../../src/effort-control.js"></script>
+  <script>
+    // main.js 를 load 이후에 주입 → 앱 부팅용 DOMContentLoaded 핸들러는 실행되지 않는다.
+    window.__harnessReady = false;
+    window.__harnessError = null;
+    window.addEventListener('load', function () {
+      var s = document.createElement('script');
+      s.src = '../../../src/main.js';
+      s.onload = function () {
+        try {
+          // 실제 앱의 DOMContentLoaded 핸들러가 effort 에 대해 수행하는 유일한 동작.
+          Promise.resolve(window.initEffortControl()).then(function () {
+            window.__harnessReady = true;
+          }, function (e) {
+            window.__harnessError = String((e && e.message) || e);
+            window.__harnessReady = true;
+          });
+        } catch (e) {
+          window.__harnessError = String((e && e.message) || e);
+          window.__harnessReady = true;
+        }
+      };
+      s.onerror = function () {
+        window.__harnessError = 'main.js 로드 실패';
+        window.__harnessReady = true;
+      };
+      document.body.appendChild(s);
+    });
+
+    // ── 테스트 진입점 ─────────────────────────────────────────────────────────────
+    // `/api/models` 응답을 갈아끼우고 실물 새로고침 seam 을 1회 구동한다.
+    window.__refreshModels = async function (response) {
+      window.__modelsResponse = response;
+      state.authenticated = true;               // 자동 새로고침 전제(인증 상태)
+      await window.refreshModelsPreservingSelection();
+      return {
+        modelIds: ALL_MODELS.map(function (m) { return m.id; }),
+        selectedId: state.selectedModel ? state.selectedModel.id : null,
+        hasCapabilities: ('capabilities' in state),
+      };
+    };
+
+    // 모델 드롭다운 렌더 스냅샷(항목 수·표시 문자열). 기준선 비교용.
+    window.__dropdownSnapshot = function (filter) {
+      renderModelList(typeof filter === 'string' ? filter : '');
+      var list = document.getElementById('model-dropdown-list');
+      var items = Array.prototype.map.call(
+        list.querySelectorAll('.model-dropdown-item'),
+        function (el) { return { text: el.textContent, selected: el.classList.contains('selected') }; });
+      var groups = Array.prototype.map.call(
+        list.querySelectorAll('.model-dropdown-group-title'),
+        function (el) { return el.textContent; });
+      return { itemCount: items.length, items: items, groups: groups, html: list.innerHTML };
+    };
+
+    // 요청 body 생성(실물 `_apiBody`) — effort 필드 부착/부재 검증용.
+    window.__apiBody = function (extra) {
+      return _apiBody(extra || {});
+    };
+
+    // 현재 tuple / 컴포넌트 상태 스냅샷.
+    window.__effortState = function () {
+      var el = document.getElementById('effort-control');
+      var select = el.querySelector('select');
+      return {
+        dataState: el.getAttribute('data-state'),
+        dataSelected: el.getAttribute('data-selected'),
+        innerHTML: el.innerHTML,
+        supported: !!el.supported,
+        value: el.value,
+        domainValues: el.domainValues,
+        tuple: window._currentEffortTuple(),
+        optionValues: select ? Array.prototype.map.call(select.options, function (o) { return o.value; }) : null,
+        optionLabels: select ? Array.prototype.map.call(select.options, function (o) { return o.textContent; }) : null,
+        selectedIndex: select ? select.selectedIndex : null,
+      };
+    };
+
+    // 컴포넌트의 순수 로직으로 계산한 선택 후보(= 기대값 산출 근거). 하드코딩 금지 규약.
+    window.__expectedDomain = function (modelId, route) {
+      var payload = state.capabilities || null;
+      var view = window.EffortControl.resolveEffortView(payload, {
+        modelId: modelId,
+        route: route,
+        capabilityFingerprint: payload && payload.models[modelId]
+          ? payload.models[modelId].capabilityFingerprint : '',
+      });
+      var options = view ? window.EffortControl.buildOptions(view) : null;
+      return options ? options.map(function (o) { return o.value; }) : null;
+    };
+
+    // 모델 드롭다운 항목 클릭(실제 사용자 경로) — 선택 확정 seam 을 그대로 지난다.
+    window.__clickModelItem = function (name) {
+      renderModelList('');
+      var items = document.getElementById('model-dropdown-list').querySelectorAll('.model-dropdown-item');
+      for (var i = 0; i < items.length; i += 1) {
+        if (items[i].textContent === name) { items[i].click(); return true; }
+      }
+      return false;
+    };
+  </script>
+</body>
+</html>

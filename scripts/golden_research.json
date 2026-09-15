@@ -1,0 +1,199 @@
+{
+  "version": 1,
+  "description": "deep-research-engine golden query snapshot + baseline aggregate (task 16.2). Fully inline (no network): each query carries its retrieved results, relevant_ids, and optional recency/citation info. eval_research_quality.py consumes this to compute quality metrics and gate against the frozen baseline. Recency windows are absolute dates so metrics are wall-clock independent; `now` pins any relative interpretation for determinism.",
+  "k": 10,
+  "now": "2025-06-01T00:00:00Z",
+  "queries": [
+    {
+      "query": "python asyncio best practices",
+      "recency_window": "2020-06-01",
+      "raw_count": 7,
+      "results": [
+        {
+          "title": "asyncio — Asynchronous I/O",
+          "url": "https://docs.python.org/3/library/asyncio.html",
+          "source_domain": "docs.python.org",
+          "published_date": "2024-10-01",
+          "relevance_score": 0.95,
+          "provider": "tavily"
+        },
+        {
+          "title": "Async IO in Python: A Complete Walkthrough",
+          "url": "https://realpython.com/async-io-python/",
+          "source_domain": "realpython.com",
+          "published_date": "2023-05-12",
+          "relevance_score": 0.88,
+          "provider": "tavily"
+        },
+        {
+          "title": "asyncio docs (tracking-tagged duplicate)",
+          "url": "https://docs.python.org/3/library/asyncio.html?utm_source=newsletter",
+          "source_domain": "docs.python.org",
+          "published_date": "2024-10-01",
+          "relevance_score": 0.8,
+          "provider": "exa"
+        },
+        {
+          "title": "How to run coroutines concurrently",
+          "url": "https://stackoverflow.com/questions/12345/asyncio-gather",
+          "source_domain": "stackoverflow.com",
+          "published_date": "2022-01-01",
+          "relevance_score": 0.6,
+          "provider": "exa"
+        },
+        {
+          "title": "Legacy asyncio patterns (outdated)",
+          "url": "https://example.com/old-async-guide",
+          "source_domain": "example.com",
+          "published_date": "2016-03-01",
+          "relevance_score": 0.4,
+          "provider": "brave"
+        }
+      ],
+      "relevant_ids": [
+        "web:https://docs.python.org/3/library/asyncio.html",
+        "web:https://realpython.com/async-io-python/"
+      ],
+      "n_citations": 6,
+      "n_unverified": 1
+    },
+    {
+      "query": "transformer attention mechanism",
+      "raw_count": 6,
+      "results": [
+        {
+          "title": "Attention Is All You Need",
+          "authors": [
+            "Vaswani",
+            "Shazeer",
+            "Parmar"
+          ],
+          "year": 2017,
+          "venue": "NeurIPS",
+          "doi_or_url": "https://doi.org/10.5555/3295222.3295349",
+          "citation_count": 90000,
+          "relevance_score": 0.99,
+          "provider": "semantic_scholar"
+        },
+        {
+          "title": "BERT: Pre-training of Deep Bidirectional Transformers",
+          "authors": [
+            "Devlin",
+            "Chang"
+          ],
+          "year": 2019,
+          "venue": "NAACL",
+          "doi_or_url": "https://doi.org/10.18653/v1/n19-1423",
+          "citation_count": 70000,
+          "relevance_score": 0.9,
+          "provider": "semantic_scholar"
+        },
+        {
+          "title": "Language Models are Few-Shot Learners",
+          "authors": [
+            "Brown",
+            "Mann"
+          ],
+          "year": 2020,
+          "venue": "NeurIPS",
+          "doi_or_url": "https://doi.org/10.5555/3495724.3495883",
+          "citation_count": 30000,
+          "relevance_score": 0.82,
+          "provider": "openalex"
+        },
+        {
+          "title": "A survey of loosely related methods",
+          "authors": [
+            "Anon"
+          ],
+          "year": 2021,
+          "venue": "arXiv preprint",
+          "doi_or_url": "https://arxiv.org/abs/2101.00001",
+          "citation_count": 50,
+          "relevance_score": 0.55,
+          "provider": "openalex"
+        },
+        {
+          "title": "Unrelated workshop note",
+          "authors": [
+            "Doe"
+          ],
+          "year": 2015,
+          "venue": "Workshop",
+          "doi_or_url": "https://example.org/paper-xyz",
+          "citation_count": 3,
+          "relevance_score": 0.3,
+          "provider": "openalex"
+        }
+      ],
+      "relevant_ids": [
+        "doi:10.5555/3295222.3295349",
+        "doi:10.18653/v1/n19-1423",
+        "doi:10.5555/3495724.3495883"
+      ],
+      "unverified_ratio": 0.0
+    },
+    {
+      "query": "latest large language model releases",
+      "recency_window": "2024-06-01",
+      "raw_count": 5,
+      "results": [
+        {
+          "title": "Model A general availability",
+          "url": "https://ai.example.com/model-a",
+          "source_domain": "ai.example.com",
+          "published_date": "2025-03-01",
+          "relevance_score": 0.92,
+          "provider": "tavily"
+        },
+        {
+          "title": "Model B launch announcement",
+          "url": "https://openai.com/blog/model-b",
+          "source_domain": "openai.com",
+          "published_date": "2025-01-15",
+          "relevance_score": 0.85,
+          "provider": "brave"
+        },
+        {
+          "title": "A 2019 model retrospective (out of window)",
+          "url": "https://news.example.com/2019-model",
+          "source_domain": "news.example.com",
+          "published_date": "2019-06-01",
+          "relevance_score": 0.7,
+          "provider": "brave"
+        },
+        {
+          "title": "Undated blog post",
+          "url": "https://blog.example.com/undated-post",
+          "source_domain": "blog.example.com",
+          "published_date": "",
+          "relevance_score": 0.5,
+          "provider": "tavily"
+        }
+      ],
+      "relevant_ids": [
+        "web:https://ai.example.com/model-a",
+        "web:https://openai.com/blog/model-b"
+      ],
+      "n_citations": 4,
+      "n_unverified": 1
+    }
+  ],
+  "baseline": {
+    "generated_by": "scripts/eval_research_quality.py --update-baseline",
+    "n_queries": 3,
+    "k": 10,
+    "aggregate": {
+      "n_queries": 3,
+      "precision_at_k": 0.5666666666666667,
+      "mrr": 1.0,
+      "recall_at_k": 1.0,
+      "recency_score": 0.7666666666666666,
+      "authority_score": 0.5449538841920116,
+      "citation_accuracy": 0.8611111111111112,
+      "coverage_sources": 4.333333333333333,
+      "coverage_providers": 2.3333333333333335,
+      "dedup_ratio": 0.2650793650793651
+    }
+  }
+}

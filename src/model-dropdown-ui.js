@@ -111,11 +111,13 @@
   window.renderConsensusDropdownList = function(filter) {
     const list = document.getElementById('consensus-dropdown-list');
     _renderCategorizedModelList(list, filter, (m) => {
-      if (typeof _consensusModelId !== 'undefined') window._consensusModelId = m.id;
+      // main.js의 렉시컬 바인딩에 반영해야 runConsensus()가 이 선택을 읽는다.
+      // `window._consensusModelId = ...`는 별개 슬롯을 만들어 선택이 무시된다.
+      if (typeof window.setConsensusModel === 'function') window.setConsensusModel(m.id);
       document.getElementById('consensus-dropdown-btn').textContent = m.name + ' ▾';
       document.getElementById('consensus-dropdown-menu').style.display = 'none';
     }, {
-      isSelected: (m) => (typeof _consensusModelId !== 'undefined') && m.id === _consensusModelId,
+      isSelected: (m) => typeof window.getConsensusModel === 'function' && m.id === window.getConsensusModel(),
     });
   };
 

@@ -1,211 +1,354 @@
 # Mogam Works
 
-> 다중 모델 AI 코드 에디터 — 병렬 추론, 합의 엔진, 프로젝트 인식 RAG, 멀티에이전트 오케스트레이션, 미디어 생성. AWS Bedrock Gateway 기반.
+> 다중 모델 AI 코드 에디터 — 병렬 추론과 합의, 프로젝트 인식 RAG, LangGraph 멀티에이전트, 딥리서치, 문서·이미지 생성, SSH 원격 개발. 모든 LLM 호출은 자체 AWS Bedrock Gateway를 경유합니다.
 
-- 제품명: Mogam Works
-- 저장소: `jangkops/Agentic-Editor`
-- 플랫폼: macOS (Apple Silicon)
+- 제품명: Mogam Works (패키지명 `ai-editor`, 버전 0.5.4)
+- 저장소: `jangkops/Agentic-Editor` — `main` = 최신 안정 코드, `gamma` = 개발 브랜치
+- 플랫폼: macOS (Apple Silicon 우선, Intel·Windows 빌드 타깃 있음)
+- 백엔드: Python FastAPI 사이드카(포트 8765), 배포 시 PyInstaller로 동결
 
----
-
-## Overview
-
-Mogam Works는 AWS Bedrock Gateway를 통해 90여 개의 LLM을 단일/병렬로 호출하고, 합의를 도출하며, 프로젝트 코드를 인식하는 데스크톱 코드 에디터입니다. 코드 작성뿐 아니라 이미지 생성/편집과 문서(PPTX/PDF/DOCX/XLSX) 생성까지 하나의 워크스페이스에서 수행합니다.
-
-핵심 특징
-- 단일/병렬 호출로 여러 모델 답변을 동시에 비교
-- 사용자가 선택한 고차원 모델(예: Claude Opus 계열)이 병렬 응답을 분석해 합의 도출, 합의 모델로 대화 이어가기
-- 에이전트 모드: LLM이 파일 읽기/쓰기, 명령 실행, 검색, 이미지 생성/편집 도구를 자율 사용
-- 멀티에이전트 오케스트레이션: Coordinator → Planner → Generator → Evaluator (LangGraph)
-- 하이브리드 RAG: 신경망 임베딩(fastembed, 다국어) + BM25 키워드 검색
-- 대화 요약 체크포인트로 장기 맥락 유지
-- 원격 SSH 세션(파일/터미널 브리지)과 통합 터미널(node-pty)
-- AWS SSO + BedrockUser assume-role 기반 사용자별 인증/과금
+이 문서는 **처음 보는 사람이 "어디에 무엇을 썼고, 어떤 순서로 동작하는지"를 코드 없이 이해**할 수 있도록 부분별로 설명합니다. 더 깊은 근거(파일·줄 단위)는 `docs/`와 각 모듈 상단 docstring에 있습니다.
 
 ---
 
-## Architecture
+## 목차
 
-전체 스택(Electron 프론트엔드 · FastAPI 백엔드 · AWS Bedrock Gateway 인프라)은 모두 **동일 운영자가 직접 구축·운영**합니다. 이 저장소는 에디터(Electron + Python 백엔드)를 담고, 게이트웨이 인프라 코드(API Gateway/Lambda/ECS 워커/IAM, Terraform, `handler.py`)는 별도의 인프라 저장소에서 관리됩니다.
+1. [한눈에 보기](#1-한눈에-보기)
+2. [전체 구조](#2-전체-구조)
+3. [동작 원리 — 부분별 설명](#3-동작-원리--부분별-설명)
+   - 3.1 LLM 호출 경로: Bedrock Gateway 클라이언트
+   - 3.2 멀티에이전트 오케스트레이터 (LangGraph)
+   - 3.3 프로젝트 RAG — 무엇을 쓰고 어떻게 검색하나
+   - 3.4 응답 검증과 대화 메모리
+   - 3.5 Deep Research 엔진
+   - 3.6 모델 능력 탐지(capability)와 effort
+   - 3.7 문서 생성 — PPTX 렌더링 파이프라인
+   - 3.8 이미지 생성·편집
+   - 3.9 SSH 원격 개발
+   - 3.10 Electron 앱 구조와 데이터 저장
+4. [기술 스택](#4-기술-스택)
+5. [시작하기](#5-시작하기-개발)
+6. [환경 변수](#6-환경-변수)
+7. [API 엔드포인트와 SSE 이벤트](#7-api-엔드포인트와-sse-이벤트)
+8. [프로젝트 구조](#8-프로젝트-구조)
+9. [테스트와 스펙 기반 개발](#9-테스트와-스펙-기반-개발)
+10. [빌드·배포](#10-빌드배포)
+11. [현재 상태와 알려진 제한](#11-현재-상태와-알려진-제한)
+12. [설계 원칙](#12-설계-원칙)
+
+---
+
+## 1. 한눈에 보기
+
+Mogam Works는 사내 30명 규모를 대상으로 만든 데스크톱 코드 에디터입니다. Monaco 에디터와 통합 터미널 위에 AI 패널을 두고, 하나의 질문을 **한 모델에 보내거나(단일), 여러 모델에 동시에 보내 비교하거나(병렬), 병렬 답변을 고차원 모델이 종합하게(합의)** 할 수 있습니다. 에이전트 모드에서는 LLM이 파일 읽기·쓰기, 명령 실행, 검색, 이미지·문서 생성, 웹·논문 검색 도구를 스스로 골라 사용합니다.
+
+세 가지 설계 축이 전체를 관통합니다.
+
+- **모든 LLM 호출은 자체 Bedrock Gateway 경유.** 앱은 AWS 자격증명을 어떤 파일에도 저장하지 않고, SSO로 받은 자격증명으로 요청을 SigV4 서명해 게이트웨이에 보냅니다. 게이트웨이가 사용자별(`BedrockUser-{이름}` IAM 역할) 허용 모델·한도·과금을 결정합니다.
+- **프로젝트 인식.** 열린 폴더를 로컬에서 인덱싱해(네트워크 없는 임베딩 + BM25) 질문과 관련된 코드 조각을 근거로 붙이고, 답변의 `파일:줄` 인용이 실제 근거와 맞는지 검증합니다.
+- **비차단 폴백.** 어떤 하위 기능이 실패해도 요청 전체가 죽지 않도록, 각 단계가 "실패를 값으로 돌려주고 다음 후보를 시도"합니다(대신 실패 신호가 묻히지 않도록 별도 대조 장치를 두는 방향으로 발전 중).
+
+핵심 기능
+
+| 영역 | 내용 |
+|---|---|
+| AI 채팅 | 단일 / 병렬 / 합의, 스트리밍(SSE), 세션별 히스토리, 자동 인계(긴 대화 요약 후 새 세션) |
+| 에이전트 | 도구 12종(파일·셸·검색·이미지 생성/편집·PPTX/PDF/DOCX/XLSX·네이티브 다이어그램) + 리서치 도구 4종 |
+| 오케스트레이션 | LangGraph "그래프 속 그래프": Planner → 도메인 워커 5종 병렬 → Aggregate → Evaluator |
+| RAG | fastembed(ONNX, 다국어 MiniLM 384차원) + BM25 하이브리드, MMR 다양화, 인용·근거 검증 |
+| 딥리서치 | 웹·학술 provider 7종, 옵트인+동의 게이트, 하위 질의 분해 → 병렬 검색 → 중복 제거·재랭킹 → 인용 검증 → 심화 |
+| 문서 생성 | PPTX(편집 가능한 네이티브 도형 + HTML→PNG 고품질 베이크 하이브리드), PDF, DOCX, XLSX |
+| 이미지 | Bedrock 이미지 모델 병렬 best-of-N, 편집 10모드, Vertex AI 예외 경로 |
+| 원격 개발 | ssh2 기반 SFTP 파일·PTY 터미널·명령 실행, 호스트키 TOFU, 원격 엔진 자동 프로비저닝 |
+| 인증 | AWS SSO 디바이스 플로우 + BedrockUser assume-role, 월간 한도·SSO 만료 게이지 |
+
+---
+
+## 2. 전체 구조
+
+이 저장소는 에디터(Electron + Python 백엔드)만 담습니다. 게이트웨이 인프라(API Gateway / Lambda / ECS 워커 / IAM, Terraform)는 같은 운영자가 별도 저장소에서 관리합니다.
 
 ```
-┌───────────────────────────────────────────────────────────────────────┐
-│                        Electron (Frontend)                             │
-│                                                                        │
-│  Renderer (src/)                          Main process (electron/)      │
-│  ├─ 파일 탐색기 / Monaco 에디터           ├─ IPC 핸들러                  │
-│  ├─ AI 패널: 단일 / 병렬 / 합의           │   (fs·git·project·sso·        │
-│  ├─ 통계 · 검색 · Git Graph               │    terminal·remote)          │
-│  ├─ 통합 터미널 (xterm)                   ├─ ProcessManager             │
-│  ├─ 미디어 / 템플릿 패널                  │   (백엔드 수명주기 + PTY)    │
-│  └─ 모델 추천                             ├─ node-pty (로컬 PTY)         │
-│                                           ├─ AWS SSO Manager            │
-│                                           └─ Remote SSH 브리지          │
-│                                               (파일 / 터미널)           │
-└───────────────────────────────┬───────────────────────────────────────┘
-                                │ IPC(preload contextBridge)
-                                │ HTTP + SSE  (localhost:8765)
-┌───────────────────────────────▼───────────────────────────────────────┐
-│                       FastAPI Backend (ai_engine/)                     │
-│                                                                        │
-│  API: /api/agents/{run-stream, run-agent, run-parallel}                │
-│       /api/models · /api/quota · /api/rag/{index,status}               │
-│                                                                        │
-│  ┌─ 멀티에이전트 (LangGraph) ─────────────────────────────────────┐    │
-│  │  Coordinator → Planner → Generator → Evaluator                 │    │
-│  │  (기본 모델 Claude Sonnet 4.5, Opus 주입 가능)                 │    │
-│  │  grounding gate · depth router · checkpoint store              │    │
-│  └───────────────────────────────────────────────────────────────┘    │
-│  ┌─ Agent Tools ─┐  ┌─ RAG ──────────────┐  ┌─ Media ────────────┐     │
-│  │ read/write/   │  │ indexer · fastembed │  │ 이미지(Stability/  │     │
-│  │ list/run/     │  │ (ONNX MiniLM 384d)  │  │  Nova/Titan/Vertex)│     │
-│  │ search +      │  │ + BM25 하이브리드   │  │ PPTX/PDF/DOCX/XLSX │     │
-│  │ generate_image│  │ · verifier          │  │ 네이티브 다이어그램 │     │
-│  │ /edit_image   │  └─────────────────────┘  └────────────────────┘     │
-│  └───────────────┘  대화 메모리(요약 체크포인트)                        │
-│                                                                        │
-│  Gateway 클라이언트 (gateway_module.py):                                │
-│    SigV4 서명 · BedrockUser assume-role · 자격증명 캐시 ·               │
-│    재시도/폴백 · invoke-job 비동기 폴링                                 │
-└───────────────────────────────┬───────────────────────────────────────┘
-                                │ SigV4 서명 HTTPS (execute-api / lambda)
-┌───────────────────────────────▼───────────────────────────────────────┐
-│         AWS Bedrock Gateway  (동일 운영자 구축·운영, 별도 인프라 저장소) │
-│                                                                        │
-│  API Gateway                                                            │
-│   ├─ POST /converse            논스트리밍 Converse (비동기는 S3 job 폴링)│
-│   ├─ POST /invoke              InvokeModel (이미지 모델 등)             │
-│   ├─ POST/GET /invoke-jobs/*   비동기 잡 제출/폴링/취소                 │
-│   └─ POST /openai/responses*   OpenAI Responses 동기/비동기 라우트      │
-│  Lambda Function URL           SSE 실시간 스트리밍                       │
-│  ECS 워커 → Bedrock Runtime                                             │
-│  IAM: BedrockUser-{name} 역할 · 사용자별 rate limit / quota / 과금       │
-└─────────────────────────────────────────────────────────────────────────┘
+┌─ Electron ──────────────────────────────────────────────────────────────────────┐
+│ Renderer (src/)                              Main process (electron/)             │
+│  ├ Monaco 에디터 · 파일 탐색기 · 터미널(xterm) ├ IPC 핸들러 86채널 (fs·git·project·  │
+│  ├ AI 패널: 단일/병렬/합의, 추천 카드, effort │   sso·terminal·remote·slides·template·  │
+│  ├ 센터 뷰: 구조·의존성·통계·검색·Git·리뷰    │   capability·research-creds)             │
+│  ├ 미디어/템플릿/리서치 패널 (Web Components) ├ ProcessManager — Python 사이드카 수명   │
+│  └ preload contextBridge(electronAPI 92키)   ├ AwsSsoManager — SSO 로그인·자격증명    │
+│                                              ├ bridge-server — 사이드카→Electron 역방향 │
+│                                              ├ remote/ — ssh2 SFTP·PTY·exec 브리지    │
+│                                              └ hidden BrowserWindow — HTML→PNG 캡처   │
+└───────────────┬───────────────────────────────────────┬──────────────────────────┘
+                │ HTTP + SSE (127.0.0.1:8765)            │ bridge HTTP (127.0.0.1:random, 토큰)
+┌───────────────▼───────────────────────────────────────▼──────────────────────────┐
+│ FastAPI 사이드카 (ai_engine/, 엔트리 run_server.py → server.py)                    │
+│  server.py ─ 도구 12종 구현 · /api/agents/* · /api/models · 템플릿 · quota · handoff  │
+│  agent_system/ ─ LangGraph 오케스트레이터 (planner·5 도메인 서브그래프·aggregate·   │
+│                  evaluator, JSON 체크포인터, SSE 브리지)                             │
+│  rag/ ─ 인덱서 · fastembed/LSA 임베딩 · numpy 벡터 스토어 · BM25 · 하이브리드 검색 ·  │
+│         인용/근거 검증 · 대화 메모리                                                │
+│  research/ ─ 딥리서치 (provider 어댑터·정규화·dedup·RRF 랭킹·심화 루프)             │
+│  capability/ ─ 게이트웨이 실측 기반 모델 활성화·effort 계약                          │
+│  slide_templates · native_layout_renderer · native_diagram_pptx · layout_geometry ·  │
+│  template_manager · style_profile ─ PPTX 렌더링                                     │
+│  gateway_module.py ─ SigV4 서명 · SSO 자격증명 캐시 · assume-role · 재시도 · 잡 폴링 │
+└───────────────┬──────────────────────────────────────────────────────────────────┘
+                │ SigV4 HTTPS (execute-api / lambda)
+┌───────────────▼──────────────────────────────────────────────────────────────────┐
+│ AWS Bedrock Gateway (별도 인프라 저장소)                                            │
+│  API Gateway: POST /converse · POST /invoke · /invoke-jobs/* · /openai/responses(-jobs)│
+│  Lambda Function URL: SSE 실시간 스트리밍                                           │
+│  ECS 워커 → Bedrock Runtime · S3 (비동기 잡 결과) · IAM BedrockUser-{name}           │
+└───────────────────────────────────────────────────────────────────────────────────┘
+외부(선택): Vertex AI(이미지, 키가 있을 때만) · 리서치 provider 7종(옵트인+동의) · mermaid.ink(다이어그램 PNG, 옵트아웃 가능)
 ```
 
-LLM/추론/문서 JSON 생성은 전부 Bedrock Gateway 경유입니다. 이미지 생성은 Bedrock 이미지 모델을 기본으로 하되, 텍스트 정확도가 필요한 경우 `AE_ENABLE_VERTEX_IMAGE=1` 옵트인 시 Vertex AI를 예외적으로 사용합니다.
+### 요청 한 건이 흐르는 순서 (채팅 → PPTX 생성 예)
+
+1. **렌더러** `sendMessage`: 첨부 직렬화 → 모델 추천 카드 → `POST /api/agents/classify-intent`로 의도 분류(12초 상한) → 기본 경로 `POST /api/agents/graph-stream`(실패 시 `run-stream`으로 1회 폴백).
+2. **서버**: 게이트웨이 클라이언트(`awsProfile`+`bedrockUser`별 캐시) → JSON 체크포인터/스토어 → `GraphDeps` 조립 → 대화 메모리에서 최근 메시지·요약 로드 → LangGraph 실행.
+3. **그래프**: Planner가 `select_plan` 도구 강제 호출로 하위 작업 목록(`id, domain, subtask, depends_on`) 생성 → DAG를 Wave로 나눠 현재 Wave의 작업을 도메인 서브그래프(coding/media/research/ops/chat)에 `Send`로 동시 분배 → 각 서브그래프는 `retrieve(RAG) → model → tools → verify` 루프 → Aggregate 합성 → Evaluator가 목표 달성 판정(미달이면 재계획, 상한 2회).
+4. **도구 실행**: `generate_pptx` → 템플릿·스타일 프로필 해석 → 표지·본문 슬라이드를 네이티브 도형 또는 HTML→PNG로 렌더 → 저장 후 디스크 재검증 → `{path, absPath}` 반환. verify 노드가 실제 파일 존재를 확인해 `verifiedFiles`로 방출.
+5. **SSE 복귀**: `text`, `agent_start/agent_done`, `verifiedFiles`, `heartbeat`(20초), `[DONE]`. 종료 후 백그라운드로 대화 요약·장기 기억 추출.
+6. **게이트웨이 계층**(모든 단계 공통): 비스트리밍 `converse`(예산 600초, 자격증명 만료 재시도, 모델 ID 접두어 교정, max_tokens 하향, 비동기 잡이면 S3 결과 폴링), 실시간 `stream_sse_realtime`(Lambda URL, 총 3600초).
 
 ---
+## 3. 동작 원리 — 부분별 설명
 
-## Screenshots
+각 절은 "한 줄 요약 → 무엇을 썼나 → 어떻게 동작하나 → 왜 이렇게 했나 → 관련 파일" 순서입니다.
 
-애플리케이션 화면(에디터, AI 패널, 설정, 통계, 병렬 호출 등). 전체 이미지는 `docs/screenshots/`에 있습니다.
+### 3.1 LLM 호출 경로: Bedrock Gateway 클라이언트
 
-| | | |
+**한 줄 요약.** 앱의 모든 LLM 호출은 `gateway_module.py`의 `GatewayClient` 하나를 지나며, 이 클라이언트가 인증·서명·재시도·비동기 잡 처리를 전담합니다.
+
+**무엇을 썼나.** `boto3`(SSO 프로파일·STS assume-role), `botocore` SigV4 서명, `httpx`(SSE 스트림), `urllib`(비스트리밍). 외부 LLM SDK(anthropic, openai)는 쓰지 않습니다.
+
+**어떻게 동작하나.**
+- 인증: SSO 자격증명 → (`bedrockUser`가 있으면) `arn:aws:iam::{account}:role/BedrockUser-{이름}`을 assume → 5분 캐시. API Gateway 요청은 서비스 `execute-api`, Lambda Function URL 요청은 서비스 `lambda`로 SigV4 서명.
+- 라우트 4종:
+
+  | 라우트 | 용도 | 핵심 규칙 |
+  |---|---|---|
+  | `POST /converse` | 도구 호출·계획 수립 등 구조화 응답 | 총 예산 600초 안에서 최대 3회. 자격증명 만료 문구면 갱신 후 재시도, 모델 ID 접두어(`us.`) 거부면 반대 형태로 1회 교정, `max_tokens` 초과면 한계값 또는 50%로 하향(최대 2회). 응답이 `ACCEPTED`+job_id면 S3 결과를 1/2/5/10초 적응형 간격으로 폴링(최대 2시간) |
+  | Lambda URL SSE (`stream_sse_realtime`) | 실시간 채팅 토큰 스트림 | 총 3600초 / 연결 30초 / 읽기 300초. 이벤트를 가공 없이 그대로 넘기고 조립은 소비자가 담당 |
+  | `POST /invoke` | 이미지 모델 | API Gateway 29초 하드리밋 때문에 서버가 비동기 잡으로 넘기면 `/invoke-jobs/{id}`를 폴링 |
+  | `/openai/responses`, `/openai/responses-jobs` | OpenAI 계열 모델 | 동기 120초 → 타임아웃 시 잡 제출 후 폴링. 응답은 `openai_adapter`가 Converse 형식으로 변환 |
+- `maxTokens` 정책: `min(AE_MAX_TOKENS(64000), 모델별 상한표)`. 표에 없는 모델은 64000으로 낙관적으로 잡고, 초과 오류가 오면 하향 재시도가 안전망 역할을 합니다("근거 없는 모델별 추측값을 표에 넣지 않는다").
+
+**왜 이렇게 했나.** 실측 기록이 코드 주석에 남아 있습니다. 비스트리밍 `converse`는 최악 1,800초까지 늘어나 예산(deadline)을 도입했고, 1초 고정 폴링이 2시간에 S3 GET 7,200회를 만들어 적응형으로 바꿨으며, `/invoke`의 29초 게이트웨이 한도 때문에 서버측 비동기 핸드오프를 채택했습니다. Claude Opus 계열은 게이트웨이 스트리밍 경로에서 실패하고 비스트리밍은 S3 잡 폴링(300초)에 걸려, 메타 노드(계획·평가) 기본 모델은 Sonnet 4.5입니다.
+
+**관련 파일.** `ai_engine/gateway_module.py`, `ai_engine/openai_adapter.py`, `ai_engine/openai_catalog.py`, `electron/core/aws-sso-manager.js`, `.kiro/steering/gateway.md`(타임아웃·재시도 절이 코드와 정합).
+
+### 3.2 멀티에이전트 오케스트레이터 (LangGraph)
+
+**한 줄 요약.** 한 요청을 Planner가 하위 작업으로 나누고, 도메인별 서브그래프(각각 ReAct 도구 루프)를 병렬 실행한 뒤, Aggregate가 합치고 Evaluator가 목표 달성을 판정하는 "그래프 속 그래프"입니다.
+
+**무엇을 썼나.** `langgraph`(StateGraph, `Send` fan-out, `astream_events v2`), `langchain-core`(BaseChatModel 어댑터). 체크포인터는 SQLite 없이 **파일 기반 JSON**(`JsonFileCheckpointSaver`), 장기 스토어도 JSON(`JsonFileStore`).
+
+**어떻게 동작하나.**
+```
+START → planner ──Send×N (현재 Wave)──► coding | media | research | ops | chat ──► aggregate
+          ▲                                                                          │
+          └──── evaluator ◄───────── (DAG 남은 Wave 있으면 planner로) ◄──────────────┘
+                   │ achieved=false, refine_count < 2 → planner(재계획)
+                   └ achieved=true 또는 상한 → END
+```
+- 각 도메인 서브그래프: `[retrieve →] model → (tool_calls 있으면) tools → model … → verify → END`. 도구 집합만 다릅니다(coding: 파일·검색·셸 / media: 문서·이미지 7종 / research: 파일·검색 + 웹·논문·본문수집·딥리서치 + MCP / ops: 셸 + MCP / chat: 없음).
+- DAG: Planner 출력의 `depends_on`을 정리(`sanitize_depends_on`) → 순환 검사 → 위상 정렬로 **Wave** 목록 생성(`topological_waves`). 순환이면 단일 Wave로 폴백. Wave 수는 하위 작업 수를 넘지 않습니다.
+- 유한 종료 예산: Wave ≤ 작업 수, 재계획 ≤ `AE_MAX_REFINE`(2), 동시 fan-out ≤ `AE_MAX_PARALLEL_TASKS`(4), 서브그래프 recursion ≤ 25, 전체 recursion 50, 전체 시간 1,800초.
+- 도구 실행(`GatewayToolNode`): tool_calls를 **순차** 실행(부작용 경합 회피), MCP → 원격 브리지 → 로컬 `server._execute_tool` 순으로 디스패치. 미디어 도구 7종은 전역 세마포어 1개·600초로 직렬화(병렬 fan-out에서 동시 실행되면 워크스테이션이 포화되던 실측 대응).
+- 상태(`GraphState`) reducer 설계: 스칼라 채널은 last-wins(`_take_right`), 카운터(`refine_count`, `grounding_refine_count`)는 **단조 증가 MAX**, `verified_files`는 절대경로 기준 누적 dedup. 병렬 워커가 자기 substate를 그대로 되돌려주는 "echo" 때문에 last-wins 카운터가 0으로 리셋되어 무한 루프가 났던 결함을 MAX reducer로 막았고, 리스트인 `plan`은 `plan_dispatch`가 워커에 같은 값을 실어 보내 echo를 무해화합니다.
+- 모델 배분: 도메인 워커와 라우터는 사용자가 선택한 모델, Planner/Aggregate/Evaluator는 `deps.py` 기본값(Sonnet 4.5). 계획·평가 같은 "도구 강제 호출"은 `prefer_streaming`으로 스트리밍 경로를 우선 사용합니다(같은 호출 실측: 비스트리밍 35초 vs 스트리밍 7.6초).
+- SSE 브리지: `astream_events`를 `{text}`, `{tool,status}`, `agent_start/agent_done`, `verifiedFiles`, `searchStatus`, `heartbeat`(20초 무수신), `[DONE]`으로 변환. Python 3.14에서 스트림 루프 전체를 `wait_for`로 감싸면 취소 시 멈추는 현상 때문에 개별 이벤트 단위로만 타임아웃을 걸고 deadline은 수동 검사합니다(`.kiro/specs/langgraph-hierarchical-orchestrator/API_NOTES.md`).
+- 체크포인터는 저장 직전 값 안에 `AKIA|ASIA`+16자 패턴이 있으면 저장을 거부합니다(자격증명 유출 방지).
+
+**왜 이렇게 했나.** 요청별 고유 `thread_id`를 써서 체크포인터와 대화 메모리가 이중으로 맥락을 싣지 않게 했고, 그래프 구조를 바꾸는 플래그(`AE_ENABLE_DAG_PLANNER`, `AE_ENABLE_EVALUATOR`)는 조립 시 1회만 읽어 실행 중 구조가 변하지 않습니다.
+
+**관련 파일.** `ai_engine/agent_system/{supervisor,dag,depth_router,graph_state,deps,chat_model_adapter,sse_bridge,checkpoint_store,store,mcp_tools}.py`, `agent_system/subgraphs/*.py`, `agent_system/nodes/{retrieve,tool_node,verify}.py`.
+
+### 3.3 프로젝트 RAG — 무엇을 쓰고 어떻게 검색하나
+
+**한 줄 요약.** 열린 프로젝트를 로컬에서 청킹·임베딩·색인하고, 질문마다 **벡터 유사도(의미) + BM25(키워드)를 섞어** 관련 코드 조각 8개를 시스템 프롬프트에 근거로 붙입니다. 네트워크 호출 없이 전부 로컬에서 돕니다.
+
+**무엇을 썼나.**
+
+| 구성 | 사용한 것 | 비고 |
 |---|---|---|
-| ![01](docs/screenshots/01.png) | ![02](docs/screenshots/02.png) | ![03](docs/screenshots/03.png) |
-| ![04](docs/screenshots/04.png) | ![05](docs/screenshots/05.png) | ![06](docs/screenshots/06.png) |
-| ![07](docs/screenshots/07.png) | ![08](docs/screenshots/08.png) | ![09](docs/screenshots/09.png) |
-| ![10](docs/screenshots/10.png) | ![11](docs/screenshots/11.png) | ![12](docs/screenshots/12.png) |
-| ![13](docs/screenshots/13.png) | ![14](docs/screenshots/14.png) | |
+| 임베딩 모델 | **fastembed**(ONNX Runtime, CPU) · `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` · **384차원** | PyTorch 불필요. 다국어라 한국어 질의 ↔ 영문 코드 교차 검색. 모델 파일은 최초 1회 다운로드(약 0.2GB), 동결 빌드는 실행파일 옆 `fastembed_models/`에 사전 번들 |
+| 임베딩 폴백 | **LSA**: scikit-learn TF-IDF(1~2gram, `max_features` 4096, sublinear tf) → `TruncatedSVD` 256차원 | fastembed 로드 실패 시 자동. `AE_EMBED_FALLBACK=tfidf`를 명시하면 어휘 TF-IDF(1024차원)로 대체 |
+| 벡터 저장 | **numpy** `.npy` float32 행렬 + `vectors.meta.json`(청크 인덱스·파일) | 외부 벡터 DB 없음. 코사인 유사도 브루트포스(프로젝트 규모 ≤ 20,000 청크라 충분) |
+| 키워드 검색 | 자체 구현 **BM25** | 코드 식별자 토큰화 `[a-z_][a-z0-9_]*` + 한글 `[가-힣]+` |
+| 캐시 위치 | `/fsx/home/<user>/.cache/ae_rag/<hash>` → `<project>/.rag_cache` → `~/.cache/ae_rag/<hash>` → `/tmp/ae_rag/<hash>` | 각 후보에 실제 쓰기 테스트 후 선택 |
+
+**어떻게 동작하나.**
+1. **인덱싱**(`indexer.py`): 프로젝트를 재귀 순회하되 `node_modules`, `.venv`, 빌드 산출물, `vendor` 등은 제외하고(`IGNORE_DIRS`), 코드 확장자(`CODE_EXTS`)만, 파일당 500KB 초과 스킵, 누적 `AE_RAG_MAX_CHUNKS`(20,000) 상한. **청킹**은 언어별 함수/클래스 경계 정규식(Python `class|def|async def`, JS/TS `function|class|const x =|export|interface|type`)을 찾아 경계 ±2줄로 자르고, 경계가 없으면 60줄 창 / 10줄 오버랩 슬라이딩. 변경 감지는 트리 전체 mtime의 md5, 5분마다 재색인 여부 확인.
+2. **임베딩·저장**: 청크 텍스트를 `"File: {path}\n{content}"`로 감싸 임베딩 → `.npy` 저장. 캐시가 유효(크기·차원 일치)하면 재사용.
+3. **질의 분류**(`context_builder.py`): "다양한/비교/examples…"가 있으면 *탐색형*, "함수/클래스/where/exact…"가 있으면 *특정 조회형*. 탐색형이면 MMR 다양화를 켜고(λ 0.4) 임계값을 낮춥니다(0.05); 아니면 λ 0.7, 임계값 0.1.
+4. **하이브리드 검색**(`hybrid_search.py`):
+   ```
+   후보 풀 = top_k × 4
+   bm25_norm  = BM25(q, d) / max(BM25)            # k1=1.5, b=0.75
+   cos        = cosine(E(q), E(d))                 # 임베딩 차원이 맞을 때만
+   score(d)   = (1 − α)·bm25_norm + α·cos          # 기본 weighted, α = 0.5
+              또는 AE_FUSION=rrf 이면 RRF(d) = Σ_r 1/(60 + rank_r(d)) 를 max 정규화
+   → 파일 필터(산출물·캐시 제외) → score ≥ 임계값
+   → (탐색형) MMR: argmax λ·score(d) − (1−λ)·max_{s∈선택} cos(d, s)
+   → 상위 8개
+   ```
+5. **컨텍스트 조립**: 개요 + 파일 트리(40줄) + 열린 파일(6,000자) + 각 청크를 `### {file}:L{s}-{e}, score:` 헤더와 언어 코드펜스로 24,000자 예산 안에 삽입 → 시스템 프롬프트.
+6. **선택 고급 파이프라인**(`AE_RETRIEVAL_PIPELINE=1`, 게이트웨이 필요): 질의가 짧거나 모호하면 HyDE·동의어로 최대 5개 확장 → 후보 40개 → 다중 질의는 RRF로 합침 → LLM 리랭크(인덱스 배열 JSON, 누락은 원순서 보존) → 8개.
+
+**왜 이렇게 했나.** 게이트웨이 정책상 `BedrockUser`는 `/converse`만 호출할 수 있어 Titan 임베딩을 쓸 수 없었고, 그래서 임베딩을 전부 로컬 CPU에서 처리합니다. 하이브리드 가중 α=0.5는 30개 질의 골든 셋에서 MRR 0.872 → 0.919로 개선된 실측값이며, MMR의 관련성 항을 벡터 유사도가 아닌 하이브리드 점수로 바꾼 것은 정확 키워드 질의의 MRR이 급락했던 회귀의 수정입니다. 배포본에서 ONNX 로드에 실패하면 어휘 검색으로 조용히 떨어지는 대신 LSA로 의미 검색을 유지합니다(0.5.4 릴리스 노트).
+
+**관련 파일.** `ai_engine/rag/{indexer,embedder,hybrid_search,context_builder,retrieval_pipeline,query_expansion,reranker}.py`, 벤치마크 `scripts/rag_benchmark.py`, 스펙 `.kiro/specs/rag-answer-quality/`.
+
+### 3.4 응답 검증과 대화 메모리
+
+**응답 검증(answer quality).** 모델 답변이 나온 뒤 세 층으로 신뢰도를 재고 결과를 `answerQuality` 메타로 붙입니다(답변을 막지는 않습니다).
+1. **인용 검증**: 답변 속 `파일:줄` 인용(정규식)을 이번 검색에서 실제로 가져온 청크 범위와 대조 → `verified / unverified`.
+2. **로컬 grounding 점수**: 답변 문장(최대 40개) 각각에 대해 근거 청크와의 최대 코사인 유사도를 구해 평균. 함의 판단이 아닌 "겹침 근사 하한"입니다.
+3. **LLM faithfulness**: 근거(12,000자)와 답변(8,000자)을 게이트웨이 모델에 보내 `SCORE=`를 받음. 10초 타임아웃, 실패 시 `degraded=true`.
+게이트웨이 모델 호출이 실측 110~285초까지 걸리는 경우가 있어 기본은 **deferred**: 서버가 `{"qualityPending": id}`만 먼저 보내고 백그라운드로 계산한 뒤 클라이언트가 `GET /api/answer-quality`로 폴링합니다.
+
+**대화 메모리(`conversation_memory.py`).** 최근 10개 메시지를 20,000자 예산 안에서 역순 선택(메시지당 2,000자, 이미지 블록 5개)하고 Bedrock의 user/assistant 교대 규칙을 정리합니다. 12개 이상 쌓이면 Haiku 4.5로 3,000자 요약 + 핵심 사실 10개를 체크포인트로 만들어 첫 user 메시지에 주입합니다. 렌더러는 별도로 16개 메시지 또는 60,000자를 넘으면 `POST /api/conversation/handoff`로 요약을 받아 새 세션에서 이어갑니다.
+
+**관련 파일.** `ai_engine/rag/{answer_quality,citation,verifier,gw_text,quality_store,conversation_memory}.py`.
+
+### 3.5 Deep Research 엔진
+
+**한 줄 요약.** 외부 웹·학술 검색을 **사용자가 켜고(옵트인) 동의했을 때만** 수행하며, 질문을 하위 질의로 나눠 병렬 검색 → 중복 제거 → 순위 융합 → 본문 수집 → 인용 포함 리포트 → 인용 검증 → 부족하면 심화 조사의 루프를 돕니다.
+
+**무엇을 썼나.** `httpx`(패키지 안에서 유일한 네트워크 출구는 `backend.py` 한 파일), provider 어댑터 7종, RRF와 권위도 계산은 순수 함수. LLM은 Planner(하위 질의 분해)와 Generator(리포트 작성) 두 곳에서만, 모두 게이트웨이 경유.
+
+| 축 | provider | 키 |
+|---|---|---|
+| 웹 | Tavily(키리스 모드 `X-Tavily-Access-Mode: keyless`), Exa, Brave | Exa·Brave만 키 필수 |
+| 학술 | Semantic Scholar(키 선택), OpenAlex, arXiv(Atom), PubMed(ESearch→EFetch) | 전부 키리스 동작 |
+
+키는 환경변수(`TAVILY_API_KEY`, `EXA_API_KEY`, `BRAVE_API_KEY`, `SEMANTIC_SCHOLAR_API_KEY`)로만 읽고 파일에 저장하지 않습니다. Electron 쪽은 키를 OS 키체인(`safeStorage`)으로 암호화해 `userData/settings/research-credentials.json`에 암호문만 두고, 실행 시 `POST /api/research/credentials`로 사이드카 프로세스 환경에만 주입합니다. 렌더러는 키가 "있다/없다"만 봅니다.
+
+**어떻게 동작하나(`run_deep_research`).**
+1. 게이트 확인: `AE_ENABLE_WEB_RESEARCH`와 `AE_RESEARCH_CONSENT`가 모두 참일 때만 네트워크 호출.
+2. Planner가 `plan_subqueries` 도구 강제 호출로 하위 질의(최대 8개, `depends_on` 포함) 생성 → 오케스트레이터의 `dag.topological_waves`를 재사용해 Wave로 분할.
+3. Wave 안에서 하위 질의를 병렬 실행. 각 질의는 웹 폴백 체인과 학술 폴백 체인을 동시에 돌리고(체인은 provider를 순차 시도해 첫 성공만 사용) → 어댑터가 공통 스키마(`SearchResult`/`PaperResult`)로 정규화.
+4. **source_id 스킴**으로 중복 제거: 웹은 `web:<canonical_url>`(스킴·호스트 소문자, 추적 파라미터·fragment 제거), 논문은 `doi:<canonical_doi>`. dedup 키와 인용 검증 키가 같습니다.
+5. **순위 융합**: provider 순위 리스트와 신뢰도 순위 리스트를 RRF(`rag.hybrid_search.rrf_fuse` 재사용)로 합치고, 각 소스의 **권위도**를 noisy-OR로 계산합니다.
+   ```
+   authority = 1 − (1−dom)(1−venue)(1−cite)
+   dom   = 큐레이션·정부 도메인 0.9 · 학술 국가 도메인(ac.kr, edu.au 등) 0.85 · 기타 신뢰 도메인 0.8 · .org 0.5 · 그 외 0.3
+   venue = 저명 학회·저널 키워드 0.8 · 그 외 게재처 있으면 0.5 · 없으면 0
+   cite  = log1p(인용수) / (log1p(인용수) + log1p(50))
+   ```
+6. 상위 5개 소스 본문을 `fetch_url_raw`(10초, 100,000자)로 병렬 수집 → `EvidenceSource`.
+7. Generator가 소스별 발췌 2,000자를 받아 `[web:…]`/`[doi:…]` 인용이 포함된 리포트 작성. 실패하면 소스 목록 나열로 폴백.
+8. 인용 검증: 리포트의 `(web|doi):…` 토큰을 추출해 실제 수집 소스와 대조 → `unverified_ratio`, RAG의 `enhance_answer`로 grounding 점수.
+9. **심화 판단**: 소스 5개 미만, provider 2종 미만, 미검증 비율 0.2 초과 중 하나면 "심화 조사 N회차" 질의로 2~8을 반복(최대 3회).
+10. `userData/research/{session}/report.{json,md}` 원자적 저장.
+
+경량 도구 `web_search`/`search_papers`/`fetch_content`는 딥리서치 없이 단발 검색을 제공하며, 여러 provider 결과를 RRF로 융합하고 `recency_days`가 있으면 최신성 필터를 적용합니다. 검색 시작·종료는 `searchStatus` SSE로 채팅 옆 인디케이터에 "어느 provider에 어떤 질의 요약을 보냈는지"만 표시합니다(개별 URL·키는 표시하지 않음).
+
+**관련 파일.** `ai_engine/research/{backend,providers,normalize,dedup,rank,deep_research,models,config,security,eval_harness}.py`, `agent_system/subgraphs/research.py`, `src/components/{research-settings,search-indicator,research-panel}.js`, `electron/core/research-credentials.js`, 스펙 `.kiro/specs/deep-research-engine/`.
+
+### 3.6 모델 능력 탐지(capability)와 effort
+
+**한 줄 요약.** "이 게이트웨이가 어떤 모델의 어떤 라우트를 실제로 지원하는가"를 하드코딩하지 않고, **실제 프로브 요청을 보내 얻은 증거만으로** 모델을 활성화하고 추론 강도(effort) 파라미터를 붙이는 게이트입니다.
+
+**어떻게 동작하나.**
+- 후보 라벨(`opus 5`, `sonnet 5`, `gpt 5.6`, `sol`, `terra`, `luna`)에 대해 카탈로그가 라벨↔모델 ID 관계를 명시한 경우에만 정확한 모델 ID를 기록합니다(문자열에서 추론하지 않음).
+- 라우트 5종(CONVERSE / INVOKE / OPENAI_RESPONSES / OPENAI_RESPONSES_JOBS / SSE_STREAM)마다 최소 요청(`"ping"`, `maxTokens=1`)을 **기존 전송 코드로 실제 전송**하고, HTTP 성공·유효 출력·정상 종료 세 조건을 모두 만족한 라우트만 `SUPPORTED`. 일시 오류·쿼터·인증 오류는 기록하지 않아 기존 SUPPORTED를 강등시키지 않습니다.
+- effort는 카탈로그가 선언한 계약(값 타입·enum·range)만 후보로 삼고, 무-effort 기준선 성공을 확인한 뒤 경계값을 실제 주입 경로로 검증합니다.
+- 결과는 `userData/capability/capability_map.json`에 canonical JSON + 지문(fingerprint)으로 저장되고, `/api/models` 응답에 `capabilities`로 병합됩니다. 렌더러의 `<effort-control>`은 `(modelId, route, fingerprint)` 세 값이 정확히 일치하고 `SUPPORTED`일 때만 렌더됩니다.
+- 요청 시 seam(`run-stream`, `run-agent`): 계획이 `transmit=false`면 게이트웨이로 보내지 않고 SSE 오류로 종료(폴백 아님), 허용이면 기준 body에 effort를 1회만 기록.
+
+**관련 파일.** `ai_engine/capability/{contracts,store,canonicalizer,baseline_inspector,capability_map,activation_gate,effort_settings,request_builder,failure_handler,evidence_collector}.py`, `scripts/validate_gateway_model_capabilities.py`(검증 실행기), `src/effort-control.js`, 스펙 `.kiro/specs/gateway-models-effort-support/`.
+
+### 3.7 문서 생성 — PPTX 렌더링 파이프라인
+
+**한 줄 요약.** 슬라이드마다 **편집 가능한 네이티브 도형**(python-pptx)과 **HTML→PNG 고품질 베이크**(Electron hidden BrowserWindow 캡처) 두 경로를 조합하되, "콘텐츠 텍스트는 절대 이미지로 굽지 않는다"와 "생성된 이미지는 폐기하지 않는다(손실-0)"를 지킵니다. 목표 품질은 코드 주석이 반복 인용하는 "Genspark/Gamma급"입니다.
+
+**무엇을 썼나.** `python-pptx`(도형·텍스트·그림), `layout_geometry.py`(겹침·경계·슬롯 판정 순수 함수, 표준 라이브러리만), `slide_templates.py`(11종 HTML 레이아웃, 1920×1080), `native_layout_renderer.py`(7종 네이티브 레이아웃), `native_diagram_pptx.py`(다이어그램 8종 + 표지), `template_manager.py`/`style_profile.py`(사용자 .pptx 테마 XML → 7토큰 스타일 프로필), `icon_assets.py`(Lucide 아이콘 → 헤드리스 Chrome → PNG 캐시), Vertex AI(장식 배경, 키가 있을 때).
+
+**어떻게 동작하나(`_tool_generate_pptx`).**
+1. 입력 정규화 → 템플릿이 있으면 `Presentation(base.pptx)`로 마스터·테마 상속, 템플릿 슬라이드는 비우지 않고 **디자인 도너**로 재사용.
+2. HTML 게이트: Electron 브리지(`/bridge/render-html-to-png`) 또는 로컬 Chrome이 있을 때만 베이크 경로 활성.
+3. 표지: `build_native_cover`(KPI 카드·아이콘 배지·스텝 그리드 등 밀도 항목 7개 중 6개 이상) → 제목 길이에 따라 폰트를 단계적으로 자동 축소 → 풀블리드 배경이면 위의 텍스트 제거.
+4. 본문 슬라이드 사다리(위에서부터 성공하는 첫 경로 채택):
+   - 네이티브 레이아웃 라우팅(`AE_NATIVE_LAYOUT_RENDER=1`일 때): LLM이 11종 중 레이아웃을 고르면 7종 네이티브로 매핑 → 후보 사다리(픽 → feature_grid → two_column → section_divider) → 폴백 → 제목만.
+   - **하이브리드 content 편집 경로(기본 ON)**: 역할이 `content`인 슬라이드는 네이티브 레이아웃으로 그리고 히어로 이미지를 우측 슬롯에 배치.
+   - HTML 베이크: `render_layout` → hidden BrowserWindow(`data:` URL, 외부 URL 정규식 5종 사전 차단, sandbox) → PNG → 풀블리드 배경.
+   - 네이티브 다이어그램: 슬라이드당 풀블리드 1장 보장(`fullbleed_guard`), 구운 텍스트 배경과 본문 분리(`body_safe_area`).
+   - 이미지 임베드: 슬롯에 맞지 않으면 콘텐츠 영역으로 승격(`slot_image_fits`), 종횡비 보존, 경계 클램프.
+5. 덱 후처리: 단일 chrome 소스(헤더 밴드·번호 배지·푸터), 전 슬라이드 도형 경계 클램프, 저장 후 0바이트 재검증, `renderReport` 반환.
+6. 겹침 판정은 감사 스크립트(`scripts/audit_pptx_textbox_overlap.py`)와 같은 정의(면적비 0.10)를 쓰고, `finalize_placement`가 dedup → 클램프 → 충돌 해소 → 과밀 검사를 수행합니다.
+
+**밀도 모델.** 표지 7항목·본문 8항목 체크리스트에 대해 Genspark 실측 기준점 6을 넘으면 합격(`density_score ≥ 6`). 이 기준으로 `scripts/audit_pptx_native_density.py`가 산출물을 기계 판정합니다.
+
+**PDF / DOCX / XLSX.** reportlab(한글 폰트 등록, 이미지 12cm 캡), python-docx(레벨 1~3 헤딩, 이미지 6in), openpyxl(헤더 색 `#007ACC`). 문서 파생 다이어그램은 기본적으로 네이티브 도형으로 그리며, Mermaid(mermaid.ink 공개 API) 경로는 `AE_PREFER_EDITABLE_DIAGRAM=0`일 때만 사용됩니다.
+
+**왜 이렇게 했나.** 주석에 남은 과거 결함이 설계를 설명합니다: LLM이 11종 레지스트리로 고르는데 네이티브는 7종만 있어 슬라이드 전체가 편집 불가 통짜 이미지가 되던 문제(→ 매핑), 표지 제목·부제 95% 겹침(→ `vertical_stack`), 배지가 카드 안에 100% 포함(→ 거터 배치), 3840×2160 이미지가 0.25인치 슬롯에 찌그러짐(→ 슬롯 승격), 동시 캡처 20개 이상에서 프레임 무음 드롭(→ 동시 4개), CJK 폰트 안착 전 캡처가 DejaVu 글리프로 나옴(→ 500ms 대기).
+
+**관련 파일.** 위 모듈들과 `electron/src/ipc-slides-handler.js`, `electron/src/ipc-template-handlers.js`, 스펙 `.kiro/specs/pptx-*/`(9개, 태스크 246개 완료).
+
+### 3.8 이미지 생성·편집
+
+- `generate_image`: 프롬프트 키워드로 모델 체인을 고르고(diagram → sd3.5-large → ultra → core → nova-canvas → titan-v2 등) 상위 N개(`AE_IMAGE_PARALLEL_N`=5)를 **동시에** 호출해 품질 점수(파일 크기 ≤40 + 해상도 일치 20 + 엔트로피 ≤25 + 우선순위 ≤15)로 best-of-N을 뽑고, 60점 미만이면 프롬프트를 보강해 1회 재시도. 순차 폴백이 "5모델 × 60초"로 30분 이상 걸리던 실측이 병렬화의 근거입니다.
+- 서킷브레이커: 모든 모델이 access-denied 패턴으로만 실패하면 300초 동안 이미지 생성을 차단하고 `/api/debug/image-gen-status`로 상태를 보여줍니다.
+- Vertex AI(Gemini/Imagen): 서비스 계정 키가 발견되면 1순위로 시도(`AE_DISABLE_VERTEX_IMAGE=1`로 끔). 픽셀값 대신 종횡비 토큰(16:9 등)으로 요청합니다.
+- `edit_image`: inpaint, outpaint, upscale, remove-background, erase, search-replace, recolor, style-transfer, control-sketch, control-structure 10모드. 매직바이트로 포맷 판정, 5MB 상한.
+
+### 3.9 SSH 원격 개발
+
+**한 줄 요약.** 원격 호스트에 ssh2로 접속해 파일(SFTP)·터미널(PTY)·명령 실행을 로컬 IPC 뒤에 숨기고, 렌더러는 로컬/원격을 구분하지 않습니다.
+
+- 연결: `~/.ssh/config`(Include 재귀 지원) 또는 즉석 호스트 → 인증 스톰 방지(60초 3회) → 호스트키 **TOFU**(앱 자체 `known_hosts`, 첫 접속 시 지문 확인 다이얼로그, 불일치면 즉시 실패) → publickey → keyboard-interactive(2FA) → 인증 직후 `connected`.
+- `ProxyJump`/`ProxyCommand` 호스트는 OS `ssh -N -L` 터널을 먼저 열고 ssh2가 그 로컬 포트에 붙습니다.
+- 라우팅: `sessionRouter` 싱글턴이 fs·terminal·git·project IPC와 사이드카의 파일·셸 도구(브리지 서버 경유)를 원격으로 분기합니다. 산출물은 항상 로컬에 저장합니다.
+- 프로비저닝(백그라운드): `python3 ≥ 3.11` 확인 → 로컬 `ai_engine` 트리 해시와 원격 매니페스트 비교 후 SFTP 업로드 → venv → `pip install` → `supervisor.sh`(uvicorn 재기동 루프) 기동.
+- 자격증명(패스프레이즈·2FA)은 메인 프로세스 메모리에만 두고 종료 시 지우며, 로그는 키 이름 기반 마스킹 후 0600으로 기록합니다.
+- 현재 제한은 11장을 보세요(원격 엔진 포트 포워딩·자동 재연결).
+
+**관련 파일.** `electron/src/remote/`(24모듈), `electron/src/ipc-remote-handlers.js`, `src/components/remote-*.js`, `ai_engine/bridge_client.py`, `docs/REMOTE_SSH.md`, 스펙 `.kiro/specs/remote-ssh/`.
+
+### 3.10 Electron 앱 구조와 데이터 저장
+
+- **메인 프로세스**(`electron/main.js`, 약 500줄): WindowManager · ProcessManager · DataStore · AwsSsoManager 4개 매니저를 만들고 IPC 핸들러 86채널을 등록합니다. 사이드카는 개발 시 `ai_engine/.venv` Python, 배포 시 `resources/ai_engine_dist/ai-engine-server`(PyInstaller onedir)로 띄우고 `AE_GENERATED_ROOT=userData/generated`를 주입합니다(설치 폴더가 읽기 전용일 수 있는 배포 환경 대비).
+- **preload**: `contextBridge.exposeInMainWorld('electronAPI', …)` 92키만 노출, `ipcRenderer` 자체는 노출하지 않습니다. 메인 창은 `contextIsolation: true`, `nodeIntegration: false`.
+- **렌더러**(`src/`): 모듈 시스템 없는 classic script. `main.js`가 상태·채팅·SSE 소비·에디터·터미널을 담당하고, `center-views.js`(구조·의존성·통계·검색·Git·리뷰 뷰), `model-recommender.js`(작업 유형 21종 패턴 → 모델 추천), `effort-control.js`, `components/`(Web Components: 템플릿·파일 미리보기·리서치·검색 인디케이터·뷰어)로 나뉩니다. 디자인 토큰은 `src/styles/variables.css`.
+- **데이터 저장**(`userData/`, macOS는 `~/Library/Application Support/Mogam Works`): `settings/settings.json`(프로파일 이름·리서치 플래그 등, 자격증명 없음), `settings/chat-sessions.json`, `history/<date>.json`, `usage/usage.json`, `checkpoints/`, `capability/`, `settings/research-credentials.json`(암호문), `generated/`(산출물·LangGraph 체크포인트·리서치 리포트·템플릿).
+- **HTML→PNG 렌더 창**: `sandbox: true`, `data:` URL만 로드, 외부 URL 정규식 차단, 동시 4개.
+
+---
+## 4. 기술 스택
+
+| 계층 | 기술 | 버전(package.json / requirements.txt) |
+|---|---|---|
+| 데스크톱 | Electron, Vanilla JS/HTML/CSS, Web Components | electron ^28, electron-builder ^24 |
+| 에디터·터미널 | Monaco Editor(CDN 0.50.0), xterm + node-pty | xterm ^5.3, node-pty ^1.1 |
+| 원격 | ssh2 (SFTP·shell·exec) | ssh2 ^1.17 |
+| 백엔드 | Python 3.11+, FastAPI, Uvicorn, httpx, boto3 | fastapi ≥0.115, uvicorn ≥0.30, httpx ≥0.27, boto3 ≥1.34 |
+| 오케스트레이션 | LangGraph, langchain-core | langgraph ≥0.2(실측 1.1.x), langchain-core ≥0.3 |
+| RAG | fastembed(ONNX) 다국어 MiniLM 384d, scikit-learn(LSA·TF-IDF), numpy, 자체 BM25 | fastembed ≥0.8, scikit-learn ≥1.4, numpy ≥1.26 |
+| 문서 | python-pptx, reportlab, python-docx, openpyxl, matplotlib, Pillow | python-pptx ≥1.0, reportlab ≥4.0 |
+| LLM 게이트웨이 | AWS Bedrock Gateway(API Gateway + Lambda URL SSE), SigV4 | botocore |
+| 인증 | AWS SSO(OIDC device flow) + BedrockUser IAM role assume | @aws-sdk/client-sso·sso-oidc·sts |
+| 테스트 | Jest + fast-check(JS PBT), pytest + hypothesis(Python PBT), Playwright(e2e) | jest ^29.7, fast-check ^4.8 |
+| 패키징 | electron-builder(DMG/zip/NSIS/AppImage) + PyInstaller onedir | — |
 
 ---
 
-## Features
+## 5. 시작하기 (개발)
 
-### Editor
-- Monaco Editor(VS Code 엔진) — 구문 강조, 자동완성, 미니맵
-- 파일 탐색기 — 인라인 생성/수정/삭제
-- 프로젝트 전체 코드 검색 — 결과 클릭 시 해당 라인 이동 및 강조
-- 파일 저장(Cmd+S), 수정 표시
-- 다크/라이트 테마, 글자 크기 조절
-- 통합 터미널(node-pty) — 실제 셸(PTY) 기반 입출력
+### 사전 요구
+- Node.js 18+ (CI는 20)
+- Python 3.11+ (개발 venv는 3.14 사용 중 — 11장 참고)
+- AWS SSO 접근 권한(조직 SSO 프로파일 + `BedrockUser-{이름}` IAM 역할)
 
-### AI Chat
-- 에이전트 모드 — LLM이 도구를 자율 사용해 작업 수행(도구 루프)
-- 단일 호출 — 도구 사용 가능한 단일 모델 호출
-- 병렬 호출 — 여러 모델 동시 호출, 가운데 패널 카드로 결과 비교
-- 합의 도출 — 고차원 모델이 병렬 응답을 분석해 최종 합의, 합의 모델로 대화 이어가기
-- 대화 히스토리 — 세션별 격리, 모드 전환 시 맥락 유지
-- 스트리밍 fast-path — 토큰 단위 in-place 갱신(깜빡임 최소화)
-
-### Agent Tools (서버 측)
-에이전트 모드에서 LLM이 자율 호출하는 도구:
-
-| 도구 | 설명 |
-|------|------|
-| `read_file` | 파일 내용 읽기 |
-| `write_file` | 파일 생성/덮어쓰기 |
-| `list_directory` | 디렉토리 목록 |
-| `run_command` | 셸 명령 실행 |
-| `search_files` | 프로젝트 텍스트 검색(grep) |
-| `generate_image` | 텍스트 프롬프트로 이미지 생성(Stability SD3.5 / Stable Image Core / Amazon Titan Image v2), PNG를 `.generated/`에 저장 |
-| `edit_image` | 기존 이미지 편집. 모드 10종: inpaint, outpaint, upscale, remove-background, erase, search-replace, recolor, style-transfer, control-sketch, control-structure |
-
-### Multi-Agent Orchestration
-- LangGraph 기반 계층형 오케스트레이션: Coordinator → Planner → Generator → Evaluator
-- 프로덕션 기본 모델은 세 역할 모두 Claude Sonnet 4.5(스트리밍 신뢰 경로)이며, Opus는 주입 시 선택적으로 사용(스트리밍 메타호출 제약으로 기본은 Sonnet — `deps.py` 참조)
-- 워크플로당 반복 상한과 체크포인트 저장(재개 가능)
-- grounding gate, depth router 등으로 응답 신뢰도/깊이 조절
-
-### Media Generation
-- 이미지 생성/편집: Bedrock 이미지 모델(Stability / Nova Canvas / Titan) 경유
-- 이미지 생성 예외: 텍스트 정확도가 필요한 경우 `AE_ENABLE_VERTEX_IMAGE=1` 옵트인 시 Vertex AI 사용(사용자 결정 예외)
-- 문서 생성: PPTX / PDF / DOCX / XLSX (네이티브 다이어그램 PPTX 포함)
-
-### RAG (Retrieval-Augmented Generation)
-프로젝트 코드를 인식한 답변을 위한 하이브리드 검색 파이프라인.
-
-- 인덱싱: 함수/클래스 경계 기반 스마트 청킹, 파일 해시 변경 감지, 대용량 파일 스킵
-- 임베딩: fastembed(ONNX, PyTorch 불필요) 다국어 모델 `paraphrase-multilingual-MiniLM-L12-v2`(384차원)로 한국어 질의 ↔ 영문 코드 교차언어 검색
-  - fastembed 미가용 시 LSA(의미 검색)로 폴백, 명시 설정 시 어휘 TF-IDF 폴백
-  - 오프라인 배포용으로 빌드 시 실행파일 옆 `fastembed_models/`에 모델 사전 번들
-- 하이브리드 검색: 벡터 코사인 유사도 + BM25 키워드 가중 결합
-- 컨텍스트 빌더: 열린 파일/프로젝트 경로 인식 후 시스템 프롬프트에 근거 주입
-
-### Conversation Memory
-- 일정 메시지 누적 시 자동 요약(빠른 모델 사용), 세션별 JSON 체크포인트 저장
-- 요약 + 최근 원본 메시지 + 현재 질문으로 토큰 한도 내 맥락 유지
-- Bedrock user/assistant 교대 규칙 자동 정리
-
-### Remote SSH
-- 원격 호스트에 파일/터미널 브리지로 접속(SSH config 파싱, 포트 할당, 자격 캐시)
-- 로컬/원격 터미널 IPC 채널 동일 — 렌더러는 전송 방식에 무관
-
-### Source Control / Analytics
-- Git Graph, 브랜치 드롭다운 전환, dirty 체크
-- 통계(개요, 품질/생산성, 토큰 비용, 기여자, 팀), AI 코드 리뷰(정적 분석), 의존성 분석, 실시간 모니터
-
-### Infrastructure
-- AWS SSO 인증 + BedrockUser assume-role
-- 월간 사용량/한도 게이지, SSO 세션 만료 게이지
-- 스킬 관리(영속성, GitHub MD import)
-- 대화 세션 및 병렬/합의 결과 로컬 저장
-- SSE idle timeout으로 스트림 끊김 자동 감지
-
----
-
-## Tech Stack
-
-| Layer | Technology |
-|-------|-----------|
-| Frontend | Electron + Vanilla JS + HTML + CSS |
-| Editor | Monaco Editor |
-| Terminal | node-pty (PTY) |
-| Backend | Python 3.11+ / FastAPI / Uvicorn |
-| LLM Gateway | AWS Bedrock Gateway (SigV4) + Lambda Function URL (SSE) |
-| Orchestration | LangGraph 멀티에이전트 |
-| RAG 임베딩 | fastembed(ONNX) 다국어 MiniLM (384d), LSA/TF-IDF 폴백 |
-| 검색 | 벡터 코사인 + BM25 하이브리드 |
-| Auth | AWS SSO + BedrockUser IAM Role (assume-role) |
-| Storage | Electron userData(JSON) + localStorage |
-| HTTP Client | httpx / urllib (비동기 SSE) |
-| Packaging | electron-builder(DMG) + PyInstaller(동결 백엔드) |
-
----
-
-## Quick Start (개발)
-
-### Prerequisites
-- Node.js 18+
-- Python 3.11+
-- AWS SSO 접근 권한(조직 SSO + `BedrockUser-{이름}` IAM role)
-
-### Installation
+### 설치
 ```bash
 git clone https://github.com/jangkops/Agentic-Editor.git
 cd Agentic-Editor
-npm install
+npm install                      # postinstall이 node-pty를 Electron ABI로 리빌드
 python3 -m venv ai_engine/.venv
 source ai_engine/.venv/bin/activate
 pip install -r ai_engine/requirements.txt
@@ -215,150 +358,207 @@ pip install -r ai_engine/requirements.txt
 ```bash
 aws sso login --profile bedrock-gw
 ```
-로그인 후 앱에서 프로파일 선택 + BedrockUser 이름(예: `cgjang`)을 입력하면 모델 목록이 로드됩니다. 자격증명은 어떤 파일에도 저장하지 않고 런타임에 주입/assume-role로만 사용합니다.
+앱에서 프로파일과 BedrockUser 이름을 입력하면 모델 목록이 로드됩니다. 자격증명은 파일에 저장하지 않고 런타임 주입과 assume-role로만 사용합니다.
 
-### Run
+### 실행
 ```bash
-npm run dev
+npm run dev            # uvicorn(8765) + Electron 동시 실행
+NO_RELOAD=1 npm run dev # 서버 auto-reload 끄기
 ```
-`concurrently`로 Python 서버(uvicorn, 8765)와 Electron을 동시 실행합니다. 프론트엔드(`src/`, `electron/`) 수정은 Cmd+R 새로고침으로 반영되고, Electron 메인/Python 변경은 앱/서버 재시작이 필요합니다.
+프론트엔드(`src/`, `electron/`) 변경은 Cmd+R, 메인/Python 변경은 재시작이 필요합니다. `dev:python`을 단독으로 띄울 때는 Electron이 주입하는 `AE_GENERATED_ROOT`가 없으므로 설정 파일을 못 찾을 수 있습니다. 이 경우 `AE_SETTINGS_PATH`로 `settings.json` 경로를 지정하세요.
 
-### Development Notes
-- 서버는 `--reload --reload-dir ai_engine`로 실행되어 `ai_engine/*.py` 변경 시에만 리로드됩니다.
-- `src/`, `electron/` 등 프론트엔드 수정은 서버에 영향이 없습니다(Cmd+R 새로고침).
-- `NO_RELOAD=1 npm run dev`로 서버 auto-reload를 완전히 비활성화할 수 있습니다.
-
-### Keyboard Shortcuts
-`src/main.js`에 구현된 전역 단축키(실측):
-
+### 단축키
 | 단축키 | 동작 |
-|--------|------|
-| `Cmd/Ctrl+S` | 현재 파일 저장 |
+|---|---|
+| `Cmd/Ctrl+S` | 파일 저장 |
 | `Cmd/Ctrl+Shift+F` | 프로젝트 검색 |
 | `Cmd/Ctrl+Shift+G` | Git 뷰 |
 | `Cmd/Ctrl+Shift+S` | 통계 뷰 |
-| `Cmd/Ctrl+Shift+L` | 원격 로그 열기(Show Remote Log) |
+| `Cmd/Ctrl+Shift+L` | 원격 로그 |
 | `Cmd/Ctrl+B` | 사이드 패널 토글(Alt 조합 시 오른쪽) |
 | `Esc` | 에디터로 복귀 |
 
 ---
 
-## macOS 배포 (무서명 사내 배포)
+## 6. 환경 변수
 
-이 빌드는 유료 Apple Developer 서명/공증을 사용하지 않는 사내 배포입니다.
+리포 전체에서 `AE_*` 이름이 170여 개 쓰입니다. 처음 보는 사람이 알아야 할 것만 영역별로 모았습니다(기본값은 코드 기준).
 
-### 빌드
-```bash
-npm run build:python                              # PyInstaller 동결 백엔드
-npx electron-builder --mac --arm64 --publish never # arm64 DMG
-```
-- node-pty는 네이티브 모듈이라 대상 아키텍처(arm64)로 리빌드되어야 하며, 패키징 시 `asarUnpack`으로 asar 밖에 풀립니다.
-- 현재 호스트에서 정상 빌드 가능한 대상은 Apple Silicon(arm64)입니다. Intel(x64)은 별도 Intel 러너에서 백엔드를 빌드해야 합니다.
-
-### 설치 (수신자)
-DMG와 `scripts/install-mac.command`를 같은 폴더에 두고 스크립트를 실행하면 DMG 마운트 → `/Applications` 복사 → quarantine 제거 → ad-hoc 서명이 자동 수행됩니다. 미서명 빌드라 첫 실행 시 Gatekeeper 경고가 있을 수 있어 스크립트로 우회합니다.
-
-메신저 전달 시 주의: 파일을 개별로 전송하고, 폴더째/DMG를 zip으로 다시 압축하지 않습니다(한글 zip 압축 해제 실패 및 번들 손상 방지).
+| 영역 | 변수 | 기본 | 의미 |
+|---|---|---|---|
+| 게이트웨이 | `GATEWAY_URL` | us-west-2 execute-api URL | 게이트웨이 베이스 URL |
+| | `AE_CONVERSE_TOTAL_BUDGET` / `AE_JOB_MAX_WAIT` | 600 / 7200초 | 비스트리밍 총 예산 / 비동기 잡 대기 |
+| | `AE_SSE_TOTAL_TIMEOUT` | 3600초 | 실시간 스트림 총 상한 |
+| | `AE_MAX_TOKENS` | 64000 | maxTokens 상한 |
+| 오케스트레이터 | `AE_LANGGRAPH` / `AE_LANGGRAPH_PARALLEL` | on / on | LangGraph 경로 / 병렬 그래프 |
+| | `AE_ENABLE_DAG_PLANNER` / `AE_ENABLE_EVALUATOR` | on / on | DAG 계획 / 평가 노드 |
+| | `AE_MAX_REFINE` / `AE_MAX_PARALLEL_TASKS` / `AE_MAX_ROUTE_HOPS` | 2 / 4 / 4 | 재계획 상한 / 동시 작업 / 순차 홉 |
+| | `AE_GRAPH_TOTAL_TIMEOUT` / `AE_MODEL_NODE_TIMEOUT` / `AE_MEDIA_TOOL_TIMEOUT` | 1800 / 300 / 600초 | |
+| | `AE_ENABLE_ADAPTIVE_DEPTH` / `AE_ENABLE_GROUNDING_GATE` / `AE_MCP_ENABLED` | off | 단순 질의 fast path / 근거 게이트 / MCP 도구 |
+| RAG | `AE_EMBED_PROVIDER` / `AE_EMBED_MODEL` | fastembed / MiniLM-L12-v2 | 임베딩 |
+| | `AE_EMBED_FALLBACK` / `AE_LSA_COMPONENTS` | lsa / 256 | 폴백 |
+| | `AE_RAG_MAX_CHUNKS` / `AE_TOP_K` / `AE_FUSION` | 20000 / 8 / weighted | 색인 상한 / 반환 수 / 융합 방식(rrf 선택) |
+| | `AE_RETRIEVAL_PIPELINE` / `AE_QUERY_EXPAND` / `AE_RERANK` | off | 고급 파이프라인 |
+| | `AE_ANSWER_QUALITY` / `AE_VERIFY` / `AE_VERIFY_MODE` | on / on / deferred | 응답 검증 |
+| 리서치 | `AE_ENABLE_WEB_RESEARCH` / `AE_RESEARCH_CONSENT` | off / off | 옵트인 / 동의 (둘 다 필요) |
+| | `AE_RESEARCH_WEB_PROVIDERS` / `AE_RESEARCH_ACADEMIC_PROVIDERS` | tavily,exa,brave / semantic_scholar,openalex | |
+| | `AE_RESEARCH_MAX_SUBQUERIES` / `AE_MAX_DEEPENING` | 8 / 3 | |
+| | `TAVILY_API_KEY` `EXA_API_KEY` `BRAVE_API_KEY` `SEMANTIC_SCHOLAR_API_KEY` | — | 앱이 런타임에 주입 |
+| 문서·이미지 | `AE_HYBRID_RENDER` | on ("0"만 off) | PPTX 하이브리드 편집 경로 |
+| | `AE_NATIVE_LAYOUT_RENDER` | 0 | 네이티브 레이아웃 라우팅(실험) |
+| | `AE_ENABLE_HTML_SLIDES` / `AE_DISABLE_HTML_SLIDES` | — | HTML 베이크 강제/차단 |
+| | `AE_PREFER_EDITABLE_DIAGRAM` | 1 | 편집 가능 다이어그램 우선 |
+| | `AE_PREFER_VERTEX_IMAGE` / `AE_DISABLE_VERTEX_IMAGE` | 1 / — | Vertex 이미지 우선 / 완전 차단 |
+| | `AE_ENABLE_VERTEX_IMAGE` | — | Vertex **장식 배경** 옵트인(=1) |
+| | `AE_IMAGE_PARALLEL_N` / `AE_IMAGE_QUALITY_THRESHOLD` | 5 / 60 | best-of-N |
+| | `AE_DISABLE_MERMAID` | — | mermaid.ink 경로 차단 |
+| 경로 | `AE_GENERATED_ROOT` | Electron이 `userData/generated` 주입 | 산출물·체크포인트·템플릿 루트 |
+| | `AE_SETTINGS_PATH` / `AE_USERDATA_PATH` / `AE_CHECKPOINT_DIR` | — | 오버라이드 |
+| 개발 | `NO_RELOAD` | — | uvicorn auto-reload 끄기 |
 
 ---
 
-## Project Structure
+## 7. API 엔드포인트와 SSE 이벤트
+
+사이드카 `server.py`의 라우트 28개(+ `/health`).
+
+| Method | Path | 설명 |
+|---|---|---|
+| GET/HEAD | `/health` | 헬스 체크 |
+| GET/POST | `/api/models` | 모델 카탈로그(텍스트·이미지·비디오·임베딩·리랭크) + capability 병합. POST 바디로 SSO 자격증명 주입 |
+| POST | `/api/reset-cache` | 게이트웨이 클라이언트 캐시 초기화 + 자격증명 재주입 |
+| POST | `/api/agents/classify-intent` | 의도 분류(haiku→sonnet 후보 체인) |
+| POST | `/api/agents/graph-stream` | **기본 채팅 경로** — LangGraph SSE |
+| POST | `/api/agents/run-stream` | 단일 모델 SSE(폴백·합의) |
+| POST | `/api/agents/run-agent` | 도구 루프 에이전트 SSE(파이프라인 단계) |
+| POST | `/api/agents/run-parallel` | 병렬 모델 비교 SSE |
+| POST | `/api/agents/run-orchestrated` | Planner/Worker/Merger 오케스트레이터 SSE(레거시) |
+| POST | `/api/agents/run` | 비스트리밍 단발(레거시) |
+| GET | `/api/answer-quality` | deferred 응답 검증 결과 조회 |
+| POST | `/api/conversation/handoff` | 긴 대화 요약 후 새 세션 인계 |
+| GET | `/api/quota` | BedrockUser별 월 사용량·한도 |
+| POST | `/api/rag/index` · GET `/api/rag/status` | 프로젝트 색인 트리거 / 상태 |
+| POST | `/api/attachments/extract-zip` | 첨부 zip 해제(파일 5MB·총 50MB·200개) |
+| POST | `/api/research/credentials` · GET `/api/research/status` | 리서치 provider 키 런타임 주입 / 상태 |
+| POST/GET | `/api/templates`, GET/DELETE `/api/templates/{id}`, GET `/api/templates/{id}/style-profile` | PPTX 템플릿 CRUD·스타일 프로필 |
+| POST | `/api/media/pptx-render` | 저장된 PPTX 미리보기(제목·불릿·이미지 data URL) |
+| GET | `/api/debug/cwd` · `/api/debug/bridge` · `/api/debug/image-gen-status` · `/api/debug/openai-test` | 진단 |
+
+### SSE 이벤트
+
+| 이벤트 | 형식 | 방출 경로 |
+|---|---|---|
+| 텍스트 | `{"text": "..."}` | 전부 |
+| 추론 | `{"thinking": "..."}` | run-stream, run-agent |
+| 하트비트 | `{"heartbeat": true, "elapsed": n, "phase": "..."}` (run-stream·run-agent) · `{"type": "heartbeat"}` (12초 무이벤트 합성) · graph-stream은 20초 무수신마다 | 전부 |
+| 도구 | `{"tool": "read_file", "status": "running|done", "durationMs": n}` | run-agent, graph-stream(MCP 도구) |
+| 서브그래프 | `{"type": "agent_start", "taskId": "media"}` → 작업 후 `{"type": "agent_done"}` | graph-stream |
+| 산출물 | `{"verifiedFiles": [{"path","absPath","tool"}]}` | 디스크 실측 후 |
+| 검색 상태 | `{"searchStatus": {"phase": "start|end", "kind": "web|academic|…", "providers": [이름만], "query_summary": "...", "status"?: "ok|error"}}` | graph-stream(리서치 도구) |
+| 응답 검증 | `{"answerQuality": {...}}` / `{"qualityPending": id}` | run-stream, run-agent |
+| 라우팅 | `{"model_routing": {...}}` | run-agent, run-orchestrated |
+| 오케스트레이터 | `plan`, `hierarchical_info`, `agent_delta`, `merge` | run-orchestrated |
+| 병렬 | `{"slotId","modelId","status","content"}`, `{"heartbeat","progress","total"}` | run-parallel (합의 순위 계산은 렌더러 로컬) |
+| 오류 | `{"error": "...", "category"?...}` | 전부 |
+| 종료 | `[DONE]` | 전부(예외 시에도 보장) |
+
+---
+
+## 8. 프로젝트 구조
 
 ```
 agentic-editor/
-├── electron/                     # Electron main process
-│   ├── main.js                   # 윈도우, IPC 등록
-│   ├── preload.js                # contextBridge API
-│   ├── core/
-│   │   ├── aws-sso-manager.js     # SSO 로그인/자격증명
-│   │   ├── process-manager.js     # Python 백엔드 + 로컬 PTY
-│   │   └── pty-worker.js          # PTY 워커(ABI 우회 대안)
+├── electron/
+│   ├── main.js                    # 매니저 4개 조립, IPC 등록, 사이드카·브리지 기동
+│   ├── preload.js                 # contextBridge electronAPI(92키)
+│   ├── core/                      # aws-sso-manager · process-manager · data-store · window-manager · research-credentials
 │   └── src/
-│       ├── ipc-terminal-handlers.js  # 터미널 IPC(로컬/원격 공통)
-│       ├── ipc-*-handlers.js         # fs/git/project/sso/remote 핸들러
-│       └── remote/                   # 원격 SSH 브리지(파일/터미널/큐/포트)
-├── src/                          # Renderer(frontend)
-│   ├── index.html
-│   ├── main.js
-│   ├── center-views.js
-│   ├── components/               # web components
-│   └── styles/                   # variables/layout/components.css
-├── ai_engine/                    # Python backend
-│   ├── server.py                 # FastAPI 엔드포인트, 에이전트 도구
-│   ├── gateway_module.py         # Bedrock Gateway 클라이언트(SigV4, SSE, invoke-job 폴링)
-│   ├── native_diagram_pptx.py    # 네이티브 다이어그램 PPTX
-│   ├── slide_templates.py        # 슬라이드 템플릿
-│   ├── agent_system/             # LangGraph 멀티에이전트
-│   │   ├── supervisor.py
-│   │   ├── graph_state.py
-│   │   ├── deps.py
-│   │   ├── grounding_gate.py
-│   │   ├── checkpoint_store.py
-│   │   ├── nodes/                # tool_node 등
-│   │   └── subgraphs/            # coding/ops 등
-│   └── rag/
-│       ├── indexer.py            # 스마트 청킹/인덱싱
-│       ├── embedder.py           # fastembed + LSA/TF-IDF 폴백
-│       ├── hybrid_search.py      # 벡터 + BM25
-│       ├── context_builder.py    # 시스템 프롬프트 주입
-│       ├── verifier.py           # grounding 검증
-│       └── eval_metrics.py
-├── scripts/
-│   ├── start_server.py           # uvicorn 시작
-│   ├── setup-venv.js             # venv 자동 설정
-│   ├── build-python.js           # PyInstaller 빌드 + 임베딩 모델 번들
-│   └── install-mac.command       # macOS 설치 도우미
-├── package.json
-├── electron-builder.yml
-└── README.md
+│       ├── ipc-{fs,git,project,sso,terminal,remote,slides,template,capability,research}-handlers.js
+│       ├── ipc-slides-handler.js  # hidden BrowserWindow HTML→PNG
+│       └── remote/                # ssh2 세션 상태머신·SFTP/PTY 브리지·프로비저너·bridge-server·session-router
+├── src/                           # Renderer
+│   ├── index.html · main.js · center-views.js · model-recommender.js · effort-control.js · model-dropdown-ui.js
+│   ├── components/                # template-panel · file-preview-panel · research-{settings,panel} · search-indicator · viewers
+│   ├── lib/                       # 순수 함수(파일 정렬·썸네일·크기 포맷·utils)
+│   └── styles/                    # variables.css(토큰) · layout.css · components.css
+├── ai_engine/
+│   ├── run_server.py · server.py  # 엔트리 / FastAPI 라우트 + 도구 12종 + PPTX 파이프라인
+│   ├── gateway_module.py · openai_adapter.py · openai_catalog.py · vertex_image_module.py · bridge_client.py
+│   ├── agent_system/              # supervisor · dag · depth_router · graph_state · deps · chat_model_adapter · sse_bridge
+│   │   ├── nodes/                 # retrieve · tool_node · verify
+│   │   ├── subgraphs/             # coding · media · research · ops · chat · _common
+│   │   └── checkpoint_store.py · store.py · grounding_gate.py · mcp_tools.py · effect_ledger.py
+│   ├── rag/                       # indexer · embedder · hybrid_search · context_builder · answer_quality · citation · verifier · conversation_memory · retrieval_pipeline · reranker
+│   ├── research/                  # backend · providers · normalize · dedup · rank · deep_research · config · security · eval_harness
+│   ├── capability/                # contracts · store · capability_map · activation_gate · evidence_collector · request_builder · effort_settings · failure_handler
+│   ├── slide_templates.py · native_layout_renderer.py · native_diagram_pptx.py · layout_geometry.py · template_manager.py · style_profile.py · icon_assets.py
+│   └── requirements.txt
+├── scripts/                       # test_*.py(PBT·통합) · audit_*.py(산출물 감사) · eval_*.py(품질 회귀) · probe_*.py(게이트웨이 실측) · build-python.js · setup-venv.js · install-mac.command · validate_gateway_model_capabilities.py
+├── tests/                         # unit/*.test.js(Jest) · unit/**/test_*.py · e2e/(Playwright) · integration/remote/(docker sshd)
+├── .kiro/specs/                   # 스펙 21개(requirements/design/tasks) · steering/(gateway.md 등)
+├── docs/                          # REMOTE_SSH.md 등
+├── ai-engine-server.spec · electron-builder.yml · jest.config.js · package.json
 ```
 
 ---
 
-## Key API Endpoints
+## 9. 테스트와 스펙 기반 개발
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET/HEAD | `/health` | 백엔드 헬스 체크 |
-| GET/POST | `/api/models` | 사용 가능한 모델 목록 |
-| POST | `/api/agents/run-stream` | 단일 모델 SSE 스트리밍 |
-| POST | `/api/agents/run-agent` | 에이전트 모드 SSE(도구 실행 루프) |
-| POST | `/api/agents/run-parallel` | 병렬 모델 SSE 스트리밍 |
-| GET | `/api/quota` | BedrockUser별 월 사용량/한도 |
-| POST | `/api/rag/index` | 프로젝트 인덱싱 트리거 |
-| GET | `/api/rag/status` | RAG 인덱스 상태 |
-
-### SSE Event Types (run-agent)
-
-| Event | Format | Description |
-|-------|--------|-------------|
-| text delta | `{"text": "..."}` | LLM 응답 텍스트 조각 |
-| tool start | `{"tool": "read_file", "input": {...}, "status": "running"}` | 도구 실행 시작 |
-| tool done | `{"tool": "read_file", "output": "...", "status": "done"}` | 도구 실행 완료 |
-| error | `{"error": "..."}` | 에러 메시지 |
-| stream end | `[DONE]` | 스트림 종료 |
+- **JS 단위/속성 테스트**: `npm test` → `jest tests/unit/` (fast-check PBT 포함: SSO 프로파일 왕복, 자격증명 비저장 불변식, 로그 마스킹, SSH config 파서 왕복, 상태머신 전이, effort 배선, capability IPC).
+- **Python 속성·통합 테스트**: `scripts/test_*.py` 250여 개(hypothesis PBT 100여 개). 러너에 자동 연결되어 있지 않으므로 수동 실행합니다:
+  ```bash
+  source ai_engine/.venv/bin/activate
+  pytest scripts/ -q          # scripts/conftest.py가 Vertex·외부 호출을 끕니다(헤르메틱)
+  pytest tests/unit -q        # ai_engine 단위 테스트
+  npm run test:e2e            # Playwright(tests/e2e)
+  ```
+- **산출물 감사**: `scripts/audit_pptx_native_density.py`, `audit_pptx_textbox_overlap.py` 등이 생성된 PPTX의 밀도·겹침·경계를 기계 판정합니다. `scripts/eval_research_quality.py`는 골든 셋 대비 리서치 품질 회귀를 검사합니다.
+- **스펙 기반 개발(`.kiro/specs/`)**: 기능마다 `requirements.md`(EARS 형식) → `design.md`(Correctness Properties 포함) → `tasks.md`(체크박스, `*`는 선택 테스트) 순서로 진행합니다. 버그 수정 스펙은 `bugfix.md`와 3단 테스트(`*_bug_condition`: 수정 전 실패해야 함 → `*_fix_pbt`: 수정 후 통과 → `*_preservation_pbt`: 기존 동작 보존)를 씁니다.
+- CI(`.github/workflows/release.yml`)는 태그 `v*` 푸시 시 macOS/Windows 매트릭스에서 필수 모듈 import 게이트 → PyInstaller 동결 → electron-builder 빌드를 수행합니다(테스트 실행 스텝은 아직 없음, 11장).
 
 ---
 
-## Configuration
+## 10. 빌드·배포
 
-### Settings (`userData/settings/settings.json`)
-```json
-{
-  "awsProfile": "bedrock-gw",
-  "bedrockUser": "cgjang"
-}
-```
-자격증명(accessKeyId/secretAccessKey)은 절대 저장하지 않습니다. 프로파일 이름과 게이트웨이 설정만 저장합니다.
-
-### 주요 환경 변수
+### 빌드
 ```bash
-GATEWAY_URL=https://5l764dh7y9.execute-api.us-west-2.amazonaws.com/v1  # 게이트웨이(오버라이드 가능)
-AWS_REGION=us-west-2
-AE_EMBED_PROVIDER=fastembed        # RAG 임베딩 provider(기본 fastembed)
-AE_ENABLE_VERTEX_IMAGE=1           # 이미지 생성 시 Vertex AI 옵트인(선택)
-NO_RELOAD=1                        # 서버 auto-reload 비활성화(선택)
+npm run build:python                                # PyInstaller onedir + fastembed 모델 사전 번들
+npx electron-builder --mac --arm64 --publish never  # arm64 DMG (무서명 사내 배포)
+npm run dist                                        # build:python + electron-builder
 ```
+- `node-pty`는 대상 아키텍처로 리빌드되어야 하며 asar 밖으로 풀립니다(`asarUnpack`).
+- PyInstaller spec은 `ai_engine` 서브모듈 전체와 서드파티 33개를 수집합니다. 필수 4모듈(matplotlib, scipy, langgraph, pptx)은 `scripts/check_frozen_imports.py`가 동결 전에 검사합니다.
+
+### macOS 설치(수신자)
+DMG와 `scripts/install-mac.command`를 같은 폴더에 두고 스크립트를 실행하면 마운트 → `/Applications` 복사 → ad-hoc 서명 → quarantine 제거를 수행합니다. 미서명 빌드라 첫 실행 시 Gatekeeper 경고가 있을 수 있어 스크립트로 우회합니다. 메신저 전달 시 DMG를 zip으로 재압축하지 마세요.
+
+---
+
+## 11. 현재 상태와 알려진 제한
+
+정직한 상태 표시입니다. 항목별 상세와 조치 계획은 내부 분석 문서를 따릅니다.
+
+- **원격 SSH**: 파일·터미널·명령 실행은 동작하지만, 원격 `ai_engine`으로의 로컬 포트 포워딩은 현재 빌드에서 동작하지 않아 **AI 엔진은 항상 로컬에서 실행**됩니다. 자동 재연결은 미구현이며 끊김 시 로컬로 폴백합니다.
+- **effort(추론 강도) 컨트롤**: 카탈로그에 effort 계약이 선언된 모델에서만 표시됩니다. 현재 운영자 카탈로그에는 선언이 없어 UI가 나타나지 않습니다.
+- **기본 채팅 경로(graph-stream)**: `thinking`·`answerQuality` SSE는 아직 `run-stream`/`run-agent`에서만 방출됩니다.
+- **Python 버전**: 개발·검증은 3.14에서 이루어졌습니다. `server.py`의 `Optional` 타입 import 누락 때문에 3.12/3.13에서는 기동에 실패하며 수정 예정입니다(3.14는 지연 평가로 통과).
+- **테스트 자동화**: `npm test`는 `tests/unit` JS만 실행하고, `scripts/test_*.py`는 수동 실행 자산입니다. 릴리스 CI에는 테스트 스텝이 없습니다.
+- **모델**: Claude Opus 계열은 게이트웨이 스트리밍 경로에서 지원되지 않아 계획·평가 노드에는 Sonnet 4.5를 사용합니다.
+- **오프라인**: Monaco 에디터는 CDN에서 로드되므로 오프라인에서는 에디터가 뜨지 않습니다.
+
+---
+
+## 12. 설계 원칙
+
+코드 주석과 스펙에 반복해서 선언된 원칙입니다.
+
+- **게이트웨이 전용**: LLM 호출은 `GatewayClient`만 경유. 직접 SDK(boto3 bedrock-runtime, anthropic, openai) 사용 금지. 예외는 이미지 생성의 Vertex AI 한 곳.
+- **자격증명 비저장**: AWS 자격증명은 어떤 파일에도 쓰지 않고 런타임 주입·assume-role만. 리서치 키는 OS 키체인 암호문만 저장. 체크포인트 저장 전 키 패턴 검사.
+- **비차단 폴백**: 하위 실패는 값으로 표현하고 다음 후보로 넘어간다. 대신 요청 종료 시 "선언(설정·의도) vs 관측(실제 도구 호출)"을 대조해 조용한 무동작을 표면화한다(`effect_ledger.py`).
+- **손실-0 · 바이트 보존**: 생성된 이미지는 어떤 분기에서도 폐기하지 않고, 새 렌더 기능은 no-op 기본값으로만 추가해 기존 산출물이 바이트 단위로 동일하게 유지되도록 한다.
+- **콘텐츠 텍스트는 이미지로 굽지 않는다**: 편집 가능성 우선. 외부 URL은 HTML 슬라이드에 절대 넣지 않는다.
+- **실측 근거를 남긴다**: 타임아웃·동시성·모델 선택 같은 수치는 재현한 사고나 벤치마크와 함께 주석에 기록한다("동시 캡처 20개 이상에서 프레임 드롭, macOS Sonoma+M2 실측" 등).
+- **스펙 먼저**: requirements → design(Correctness Properties) → tasks, 버그는 bug_condition 테스트로 재현한 뒤 수정한다.
 
 ---
 

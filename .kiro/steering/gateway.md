@@ -31,12 +31,19 @@
 - 선택: `system` (`[{text}]`), `toolConfig`
 
 ## Timeout
-- `/converse`: 300초 (`urllib` read), quota 조회 전용(`converse_quota_only`)은 15초
-- 실시간 SSE(`stream_sse_realtime`): total 3600초(1시간) / connect 30초 / read 300초
-  (5분 무응답 시 끊김으로 판단)
-- 스트리밍 단발(`_converse_stream_live_once`): total 300초 / connect 30초
+- `/converse`: 300초 (`urllib` read) 상한. **연결 시도 예산**
+  `AE_CONVERSE_TOTAL_BUDGET`(기본 600초)이 재시도 누적을 제한하며 남은 예산으로
+  clamp된다. 이 예산은 **비동기 잡 대기를 포함하지 않는다**
+- 비동기 잡 대기(`_poll_job_data`): `AE_JOB_MAX_WAIT`(기본 **7200초 = 2시간**).
+  1시간 이상 걸리는 긴 출력은 잡 폴링만이 경로다. 폴링 간격은 적응형 —
+  처음 30초 1초 / 그 다음 2초 / 5분 이후 5초 / 20분 이후 10초
+- quota 조회 전용(`converse_quota_only`)은 15초
+- 실시간 SSE(`stream_sse_realtime`): total `AE_SSE_TOTAL_TIMEOUT`(기본 3600초=1시간) /
+  connect 30초 / read 300초 (5분 무응답 시 끊김으로 판단)
+- 스트리밍 단발(`_converse_stream_live_once`): total = SSE total과 동일(기본 3600초,
+  `AE_STREAM_LIVE_TOTAL_TIMEOUT`로 개별 조정) / connect 30초
 - `/invoke`: 기본 30초, connect 10초
-- OpenAI Responses: 동기 120초 / 비동기 잡 제출 30초
+- OpenAI Responses: 동기 120초 / 비동기 잡 제출 30초 / 잡 폴링 `AE_JOB_MAX_WAIT`
 
 ## Retry / Fallback
 - 토큰 만료(`expired` / `security token` / `not authorized`) 시 자격증명 강제 갱신 후
@@ -45,9 +52,15 @@
   (논스트리밍·스트리밍 경로 모두 적용)
 - 모델별 `max_tokens`를 `_MODEL_MAX_TOKENS_MAP`으로 자동 조정 —
   `min(env_cap, model_limit)`을 사용. env `AE_MAX_TOKENS`는 상한선으로만 작동하며
-  **기본값 64000**, 맵에 매칭되는 패턴이 없는 모델은 `_DEFAULT_MAX_TOKENS`(4096)로 폴백
-- 실시간 SSE는 `maximum tokens ... exceeds` 검증 실패를 감지하면 한계의 50%(또는 에러가
-  알려준 실제 한계−1)로 줄여 최대 2회 재시도
+  **기본값 64000**. 맵에 매칭되는 패턴이 없는 **미지 모델**(예: `claude-opus-5`,
+  `claude-sonnet-5`, gpt 계열)은 `_UNKNOWN_MODEL_MAX_TOKENS`(64000, 낙관적 상한)로
+  폴백한다 — 과거의 4096 폴백이 긴 출력의 1순위 천장이었다.
+  `_DEFAULT_MAX_TOKENS`(4096)는 빈 model_id 같은 비정상 입력에만 쓴다.
+  근거 없는 모델별 추측값을 맵에 추가하지 않는다
+- 낙관적 상한의 안전망: **비스트리밍 `converse`와 실시간 SSE 양쪽 모두**
+  `maximum tokens ... exceeds` 검증 실패를 감지하면 한계의 50%(또는 에러가 알려준
+  실제 한계−1, 하한 1024)로 줄여 최대 2회 재시도한다. converse의 step-down은
+  만료·prefix 재시도 예산(3회)과 **별도 카운터**다
 
 ## Models
 - anthropic.claude-3-opus-20240229-v1:0     → Planner, Evaluator

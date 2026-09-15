@@ -9,7 +9,8 @@ Task 5.4 산출물. design.md 섹션 6(SSE 이벤트 매핑 표) + API_NOTES.md 
   `data: [DONE]\n\n` 를 yield 한다(요구사항 5.6).
 - emit 하는 이벤트 키는 요구사항 5.5의 허용 집합
   `{text, thinking, tool, status, verifiedFiles, type, taskId, heartbeat,
-    answerQuality, qualityPending, error}` 의 부분집합만 사용한다(Property 6).
+    answerQuality, qualityPending, error}` 에 deep-research-engine 요구사항 18.4의
+  `searchStatus` 를 순수 확장한 집합의 부분집합만 사용한다(Property 6 / P14 정합).
 
 이벤트 매핑 (API_NOTES 항목 5 실측 data 키):
 | astream_events 이벤트          | data 키          | SSE emit                                        |
@@ -19,6 +20,7 @@ Task 5.4 산출물. design.md 섹션 6(SSE 이벤트 매핑 표) + API_NOTES.md 
 | on_tool_end                    | output           | {"tool", "status":"done"}                       |
 | on_chain_start (서브그래프명)  | input            | {"type":"agent_start", "taskId": name}          |
 | on_chain_end   (서브그래프명)  | output           | {"verifiedFiles":[path...]} → {"type":"agent_done"} |
+| on_custom_event (search_status)| payload          | {"searchStatus": payload} (요구사항 18.4)       |
 
 ⚠️ 설계 정합(사용자 결정): 요구사항 5.5의 허용 키 집합에는 `input`/`output` 이 없다.
 태스크 초안은 tool 이벤트에 `input`/`output` 최상위 키를 포함했으나, Property 6(허용 키
@@ -51,6 +53,8 @@ HEARTBEAT_INTERVAL = float(os.environ.get("AE_HEARTBEAT_INTERVAL", "20"))
 GRAPH_TOTAL_TIMEOUT = float(os.environ.get("AE_GRAPH_TOTAL_TIMEOUT", "1800"))
 
 # ── 요구사항 5.5의 허용 이벤트 키 집합(부분집합만 emit — Property 6) ──
+# deep-research-engine 요구사항 18.4: 검색 진행 표시를 위해 `searchStatus` 를 순수 확장으로
+# 추가한다(기존 키 보존 — 무회귀, 신규 SSE 채널·CSP 변경 없음). design.md "9-3) 중계" 정합.
 ALLOWED_EVENT_KEYS = frozenset(
     {
         "text",
@@ -64,6 +68,10 @@ ALLOWED_EVENT_KEYS = frozenset(
         "answerQuality",
         "qualityPending",
         "error",
+        "searchStatus",
+        # 실행 계약 검사 결과(effect_ledger). [DONE] 직전 1회 방출되는 순수 확장 키다.
+        # 기존 키·CSP·SSE 채널은 무변경(무회귀).
+        "effectSummary",
     }
 )
 
@@ -158,6 +166,28 @@ async def graph_events_to_sse(
     events = compiled_graph.astream_events(state, config=config, version="v2")
     it = aiter(events)
 
+    # ── 실행 계약 검사(effect_ledger) ──────────────────────────────────────
+    # "선언(설정·의도)" 과 "관측(도구 호출·제공자·결과 수)" 을 대조해 불일치를 [DONE]
+    # 직전에 1회 방출한다. 이 리포에서 반복된 결함은 모두 "기능이 켜져 있는데 조용히
+    # 아무것도 안 한다" 형태였고(라우팅 오분류·게이트 미적용·키 없어 0건 등), 개별 수정만
+    # 으로는 재발했다. 중계 계약은 그대로 두고 같은 이벤트를 수집기에도 흘려보낸다.
+    # 수집·판정은 전부 예외를 삼키므로 실패해도 스트림을 막지 않는다.
+    _ledger = None
+    _declared: dict = {}
+    try:
+        from ai_engine.agent_system.effect_ledger import (
+            EffectCollector,
+            build_effect_summary,
+            declared_from_env,
+            should_emit_summary,
+        )
+
+        _ledger = EffectCollector()
+        _prompt = state.get("prompt", "") if isinstance(state, dict) else ""
+        _declared = declared_from_env(_prompt)
+    except Exception:  # noqa: BLE001 — 관측 장치 실패는 본체를 막지 않는다
+        _ledger = None
+
     pending: Optional[asyncio.Task] = None
     try:
         while True:
@@ -199,6 +229,8 @@ async def graph_events_to_sse(
 
             elif etype == "on_tool_start":
                 # 도구 실행 시작 → {tool, status:"running"}(요구사항 5.2 + 5.5 허용 키만).
+                if _ledger is not None:
+                    _ledger.on_tool_start(name)
                 yield _sse({"tool": name, "status": "running"})
 
             elif etype == "on_tool_end":
@@ -207,14 +239,29 @@ async def graph_events_to_sse(
 
             elif etype == "on_chain_start" and name in SUBGRAPH_NAMES:
                 # 서브그래프 진입 → agent_start(요구사항 5.3).
+                if _ledger is not None:
+                    _ledger.on_agent_start(name)
                 yield _sse({"type": "agent_start", "taskId": name})
 
             elif etype == "on_chain_end" and name in SUBGRAPH_NAMES:
                 # 서브그래프 종료 → (verified_files path 만 emit) → agent_done(요구사항 5.3/5.4).
                 paths = _verified_paths_from_output(data.get("output"))
                 if paths:
+                    if _ledger is not None:
+                        _ledger.on_verified_files(paths)
                     yield _sse({"verifiedFiles": paths})
                 yield _sse({"type": "agent_done", "taskId": name})
+
+            elif etype == "on_custom_event" and name == "search_status":
+                # 검색 진행 이벤트(deep-research-engine 요구사항 18.4) → {searchStatus: payload}.
+                # `adispatch_custom_event("search_status", payload)` 가 astream_events(v2) 에서
+                # on_custom_event(name="search_status") 로 표면화되며, 이때 data 는 payload
+                # 자체다(phase/kind/providers/query_summary/status). 순수 확장이라 기존 이벤트
+                # 계약은 그대로 보존(무회귀), 신규 SSE 채널·CSP 변경 없음. payload 에는
+                # Provider_Credential 원문이 포함되지 않는다(P9 — 방출 측 GatewayToolNode 보장).
+                if _ledger is not None:
+                    _ledger.on_search_status(data)
+                yield _sse({"searchStatus": data})
 
             # 그 외 이벤트(on_chain_stream / on_chat_model_start 등)는 무시.
 
@@ -227,6 +274,22 @@ async def graph_events_to_sse(
         # 실행 자체는 recursion_limit / per-node 타임아웃으로 유한 종료가 이미 보장된다.
         if pending is not None and not pending.done():
             pending.cancel()
+
+    # 실행 계약 검사 결과를 [DONE] 직전 **최대 1회** 방출한다(정상/에러/타임아웃 무관).
+    #
+    # 방출 여부는 should_emit_summary 가 정한다 — 불일치가 있을 때, 또는 불일치가 없어도
+    # 외부 조회 활동이 관측됐을 때만이다. 처음 구현은 무조건 방출했는데 순수 코딩 질문과
+    # 빈 스트림에도 페이로드가 실렸고, 페이로드 목록을 정확 동일로 단정하던 SSE 계약
+    # 테스트 6건이 깨졌다(test_langgraph_sse_contract_pbt.py). 계약을 느슨하게 푸는 대신
+    # 방출을 좁혔다 — 그 단정은 "약속하지 않은 이벤트를 흘리지 않는다" 를 지키는 장치라
+    # 느슨하게 만들면 다른 유출도 같이 통과한다.
+    if _ledger is not None:
+        try:
+            _summary = build_effect_summary(_declared, _ledger.observed())
+            if should_emit_summary(_summary):
+                yield _sse({"effectSummary": _summary})
+        except Exception:  # noqa: BLE001 — 요약 방출 실패는 [DONE] 을 막지 않는다
+            pass
 
     # 스트림 종료(정상/에러 무관) → [DONE](요구사항 5.6).
     yield "data: [DONE]\n\n"
