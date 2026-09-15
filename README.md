@@ -211,9 +211,9 @@ START → planner ──Send×N (현재 Wave)──► coding | media | research
 
 | 단계 | 구현 | 코드 |
 |---|---|---|
-| 토큰화 | 소문자화 후 `[a-z_][a-z0-9_]*`(식별자) 또는 `[가-힣]+`(한글 어절)만 토큰으로 인정. 숫자로 시작하는 토큰과 기호는 버림 | [indexer.py#L169-L171](ai_engine/rag/indexer.py#L169-L171), [hybrid_search.py#L59-L61](ai_engine/rag/hybrid_search.py#L59-L61) |
+| 토큰화 | 소문자화 후 `[a-z_][a-z0-9_]*`(식별자) 또는 `[가-힣]+`(한글 어절)만 토큰으로 인정. 숫자로 시작하는 토큰과 기호는 버림 | [indexer.py#L169-L171](ai_engine/rag/indexer.py#L169-L171), [hybrid_search.py#L61-L63](ai_engine/rag/hybrid_search.py#L61-L63) |
 | 청킹 | 함수·클래스 경계 정규식으로 분할, 경계가 없으면 60줄 창·10줄 오버랩. 500KB 초과 파일 스킵, 전체 20,000청크 상한 | [indexer.py#L105-L168](ai_engine/rag/indexer.py#L105-L168) |
-| BM25 | 질의 토큰 t마다 `idf = ln((N − df + 0.5)/(df + 0.5) + 1)`, `tf' = tf·(k1+1) / (tf + k1·(1 − b + b·dl/avgdl))`, 문서 점수 = Σ idf·tf'. k1=1.5, b=0.75(표준 기본값). 후보 풀은 top_k×4 | [hybrid_search.py#L12-L57](ai_engine/rag/hybrid_search.py#L12-L57) |
+| BM25 | 질의 토큰 t마다 `idf = ln((N − df + 0.5)/(df + 0.5) + 1)`, `tf' = tf·(k1+1) / (tf + k1·(1 − b + b·dl/avgdl))`, 문서 점수 = Σ idf·tf'. k1=1.5, b=0.75(표준 기본값). 후보 풀은 top_k×4 | [hybrid_search.py#L12-L58](ai_engine/rag/hybrid_search.py#L12-L58) |
 | 벡터 점수 | 질의 임베딩과 청크 임베딩의 코사인 유사도(L2 정규화 후 내적) | [embedder.py#L112-L119](ai_engine/rag/embedder.py#L112-L119) |
 | 융합 | `score = 0.5·bm25/max(bm25) + 0.5·cos`. α=0.5는 호출부가 지정하며 클래스 기본값 0.6과 다름. 질의 임베딩 차원이 캐시와 다르면 벡터 항을 끄고 BM25만 사용 | [hybrid_search.py#L113-L158](ai_engine/rag/hybrid_search.py#L113-L158), [context_builder.py#L51-L53](ai_engine/rag/context_builder.py#L51-L53) |
 | 필터·임계 | 산출물·캐시 파일 제외 → 점수 < 임계(특정 조회형 0.1, 그 외 0.05) 제거 | [hybrid_search.py#L160-L167](ai_engine/rag/hybrid_search.py#L160-L167), [context_builder.py#L223-L235](ai_engine/rag/context_builder.py#L223-L235) |
@@ -222,7 +222,7 @@ START → planner ──Send×N (현재 Wave)──► coding | media | research
 | 컨텍스트 조립 | 상위 8개를 `### 파일:L시작-끝, score:` 헤더와 코드펜스로 24,000자 예산 안에 삽입 | [context_builder.py#L171-L300](ai_engine/rag/context_builder.py#L171-L300) |
 
 **이 검색이 얼마나 믿을 만한가.**
-- 측정된 것: [scripts/rag_benchmark.py](scripts/rag_benchmark.py)가 이 저장소 코드를 대상으로 만든 **한↔영 질의 30개(10범주)** 골든 셋으로 recall@k·MRR·context_precision([eval_metrics.py#L11-L76](ai_engine/rag/eval_metrics.py#L11-L76))을 잽니다. 이 벤치에서 α=0.5가 MRR 0.872→0.919(recall 1.0 유지)로 최적이었고, MMR λ=0.7이 0.5보다 precision·MRR에서 앞섰습니다([context_builder.py#L51](ai_engine/rag/context_builder.py#L51), [hybrid_search.py#L100-L102](ai_engine/rag/hybrid_search.py#L100-L102)).
+- 측정된 것: [scripts/rag_benchmark.py](scripts/rag_benchmark.py)가 이 저장소 코드를 대상으로 만든 **한↔영 질의 30개(10범주)** 골든 셋으로 recall@k·MRR·context_precision([eval_metrics.py#L11-L76](ai_engine/rag/eval_metrics.py#L11-L76))을 잽니다. 이 벤치에서 α=0.5가 MRR 0.872→0.919(recall 1.0 유지)로 최적이었고, MMR λ=0.7이 0.5보다 precision·MRR에서 앞섰습니다([context_builder.py#L51](ai_engine/rag/context_builder.py#L51), [hybrid_search.py#L101-L102](ai_engine/rag/hybrid_search.py#L101-L102)).
 - 한계: 골든 셋이 저자가 이 저장소 하나로 만든 30개라 다른 프로젝트·다른 언어 분포에서의 성능은 보장하지 않으며, 외부 표준 벤치마크 수치는 없습니다. 검색은 "관련 코드 후보"를 제시할 뿐 정답을 보장하지 않으므로, 답변 단계에서 3.4의 검증 층이 근거 일치 여부를 다시 확인합니다.
 
 **관련 파일.** `ai_engine/rag/{indexer,embedder,hybrid_search,context_builder,retrieval_pipeline,query_expansion,reranker}.py`, 벤치마크 `scripts/rag_benchmark.py`, 스펙 `.kiro/specs/rag-answer-quality/`.
