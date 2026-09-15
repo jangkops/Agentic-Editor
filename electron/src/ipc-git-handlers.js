@@ -37,6 +37,34 @@ async function run(cmd, opts) {
 }
 
 /**
+ * sessionRouter.execFile 래퍼 — 인자 배열 실행(로컬은 셸 미경유, 원격은 요소별 인용).
+ * 사용자·모델 입력(브랜치명·검색어·해시·메시지·URL)이 섞이는 git 명령은 전부 이 헬퍼로
+ * 실행해 셸 인젝션을 원천 차단한다. 비-영 종료 시 run() 과 같은 형태로 throw.
+ *
+ * @param {string} file
+ * @param {string[]} args
+ * @param {{cwd?:string, timeout?:number, env?:object}} [opts]
+ * @returns {Promise<string>} stdout (utf-8)
+ */
+async function runFile(file, args, opts) {
+  const result = await sessionRouter.execFile(file, args, opts || {});
+  if (result.code !== 0) {
+    const err = new Error(result.stderr || result.stdout || `exit ${result.code}`);
+    err.code = result.code;
+    err.status = result.code;
+    err.stdout = result.stdout;
+    err.stderr = result.stderr;
+    throw err;
+  }
+  return result.stdout;
+}
+
+/** 커밋 해시(축약 포함). 그 외 입력은 git 에 넘기지 않는다. */
+const HASH_RE = /^[0-9a-fA-F]{4,64}$/;
+/** 브랜치/참조명 — `git check-ref-format` 의 보수적 부분집합(선행 `-`/`.`·공백·제어문자·`~^:?*[\` 금지). */
+const REF_RE = /^(?![-.])[^\s~^:?*[\\\x00-\x1f]+$/;
+
+/**
  * Git IPC 핸들러 등록
  */
 function registerGitHandlers() {
@@ -49,8 +77,9 @@ function registerGitHandlers() {
    */
   ipcMain.handle('git:log', async (_, dirPath, limit = 50) => {
     try {
-      const cmd = `git log --oneline --decorate --all -n ${limit}`;
-      const output = await run(cmd, {
+      const n = Number(limit);
+      const count = Number.isInteger(n) && n > 0 ? Math.min(n, 5000) : 50;
+      const output = await runFile('git', ['log', '--oneline', '--decorate', '--all', '-n', String(count)], {
         cwd: dirPath,
         timeout: 10000,
       });
@@ -80,8 +109,8 @@ function registerGitHandlers() {
    */
   ipcMain.handle('git:show', async (_, dirPath, hash) => {
     try {
-      const showCmd = `git show --stat --format="%H%n%an%n%ae%n%ai%n%s%n%b%n---STAT---" ${hash}`;
-      const info = await run(showCmd, {
+      if (!HASH_RE.test(String(hash || ''))) return null;
+      const info = await runFile('git', ['show', '--stat', '--format=%H%n%an%n%ae%n%ai%n%s%n%b%n---STAT---', String(hash)], {
         cwd: dirPath,
         timeout: 10000,
       });
@@ -94,12 +123,14 @@ function registerGitHandlers() {
       try {
         // `2>/dev/null` 제거 — exec가 stderr를 분리 캡처하므로 Windows(cmd.exe)에서
         // 깨지는 Unix 리다이렉트가 불필요하다. `||` 폴백은 cmd.exe·sh 모두 지원.
-        diff = await run(`git diff ${hash}~1 ${hash} || git show ${hash} --format=""`, {
-          cwd: dirPath,
-          timeout: 10000,
-        });
+        diff = await runFile('git', ['diff', `${hash}~1`, String(hash)], { cwd: dirPath, timeout: 10000 });
       } catch {
-        // diff 없을 수 있음 (첫 커밋 등)
+        // 첫 커밋 등 부모가 없으면 show 로 폴백
+        try {
+          diff = await runFile('git', ['show', String(hash), '--format='], { cwd: dirPath, timeout: 10000 });
+        } catch {
+          // diff 없을 수 있음
+        }
       }
 
       return {
@@ -129,8 +160,8 @@ function registerGitHandlers() {
   ipcMain.handle('git:search', async (_, dirPath, query, options) => {
     try {
       if (!dirPath || !query) return [];
-      const ci = options?.caseSensitive ? '' : '-i';
-      const q = String(query).replace(/"/g, '\\"');
+      const ciArgs = options?.caseSensitive ? [] : ['-i'];
+      const q = String(query);
       // `git grep`은 크로스플랫폼(Windows용 Git 포함)이라 Unix 전용 grep/head/파이프/
       // `2>/dev/null` 없이 동작한다. 원격(SSH linux)에서도 동일하게 실행된다.
       // 출력 형식은 "path:line:text". 매치가 없으면 git grep이 비-영으로 종료 →
@@ -138,8 +169,7 @@ function registerGitHandlers() {
       // (참고: git 워크트리 밖 폴더는 검색되지 않는다 — .gitignore/바이너리 자동 제외 이점.)
       let result = '';
       try {
-        const cmd = `git grep --no-color -n -I ${ci} -e "${q}"`.replace(/\s+/g, ' ').trim();
-        result = await run(cmd, { cwd: dirPath, timeout: 15000 });
+        result = await runFile('git', ['grep', '--no-color', '-n', '-I', ...ciArgs, '-e', q], { cwd: dirPath, timeout: 15000 });
       } catch (_gitErr) {
         // git 저장소가 아니거나(=fatal: not a git repository) 매치 없음 →
         // git 비의존 재귀 grep 으로 폴백. 열린 폴더가 git repo가 아니어도 검색된다.
@@ -147,9 +177,8 @@ function registerGitHandlers() {
         const excl = [
           'node_modules', '.git', '.venv', 'dist', 'build', '__pycache__',
           'ai_engine_dist', 'dist_electron', '.next', 'coverage', 'venv',
-        ].map((d) => `--exclude-dir=${d}`).join(' ');
-        const cmd2 = `grep -rn -I ${ci} ${excl} -e "${q}" .`.replace(/\s+/g, ' ').trim();
-        result = await run(cmd2, { cwd: dirPath, timeout: 15000 });
+        ].map((d) => `--exclude-dir=${d}`);
+        result = await runFile('grep', ['-rn', '-I', ...ciArgs, ...excl, '-e', q, '--', '.'], { cwd: dirPath, timeout: 15000 });
       }
 
       const byFile = new Map();
@@ -265,9 +294,12 @@ function registerGitHandlers() {
         return { ok: false, error: 'invalid_args' };
       }
 
+      if (!REF_RE.test(String(branch))) {
+        return { ok: false, error: 'invalid_branch' };
+      }
       // 원격 브랜치(origin/xxx)인 경우 로컬 tracking 브랜치로 변환
       const isRemote = branch.includes('/') && !branch.startsWith('refs/heads/');
-      let checkoutCmd;
+      let checkoutArgs;
 
       if (isRemote) {
         const localName = branch.replace(/^[^/]+\//, '');
@@ -275,7 +307,7 @@ function registerGitHandlers() {
         // 로컬에 이미 같은 이름의 브랜치가 있는지 확인
         let hasLocal = false;
         try {
-          await run(`git rev-parse --verify --quiet "refs/heads/${localName}"`, {
+          await runFile('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${localName}`], {
             cwd: dirPath,
             timeout: 3000,
           });
@@ -285,18 +317,22 @@ function registerGitHandlers() {
         }
 
         if (hasLocal) {
-          checkoutCmd = `git checkout ${localName}`;
+          checkoutArgs = ['checkout', localName];
         } else {
-          checkoutCmd = `git checkout -b ${localName} --track ${branch}`;
+          checkoutArgs = ['checkout', '-b', localName, '--track', branch];
         }
       } else {
-        checkoutCmd = `git checkout ${branch}`;
+        checkoutArgs = ['checkout', branch];
       }
 
-      const output = await run(`${checkoutCmd} 2>&1`, {
-        cwd: dirPath,
-        timeout: 15000,
-      });
+      // git 은 "Switched to branch ..." 를 stderr 로 쓴다 — 예전 `2>&1` 과 같은 결과가 되도록 합친다.
+      const r = await sessionRouter.execFile('git', checkoutArgs, { cwd: dirPath, timeout: 15000 });
+      if (r.code !== 0) {
+        const err = new Error(r.stderr || r.stdout || `exit ${r.code}`);
+        err.stdout = r.stdout; err.stderr = r.stderr;
+        throw err;
+      }
+      const output = `${r.stdout || ''}${r.stderr || ''}`;
 
       // 체크아웃 후 현재 브랜치 재조회
       let current = null;
@@ -326,9 +362,15 @@ function registerGitHandlers() {
       // 변경사항이 없으면 stash 불필요
       const status = (await run('git status --porcelain', { cwd: dirPath })).trim();
       if (!status) return { ok: true, skipped: true, message: 'nothing to stash' };
-      const output = (await run(`git stash push -m "${msg}" --include-untracked 2>&1`, {
+      const r = await sessionRouter.execFile('git', ['stash', 'push', '-m', String(msg), '--include-untracked'], {
         cwd: dirPath, timeout: 10000,
-      })).trim();
+      });
+      if (r.code !== 0) {
+        const err = new Error(r.stderr || r.stdout || `exit ${r.code}`);
+        err.stdout = r.stdout; err.stderr = r.stderr;
+        throw err;
+      }
+      const output = `${r.stdout || ''}${r.stderr || ''}`.trim();
       return { ok: true, output, message: msg };
     } catch (error) {
       const msg = String(error.stdout || error.stderr || error.message || error);
@@ -424,9 +466,12 @@ function registerGitHandlers() {
     try {
       if (!url || !dest) return { ok: false, error: 'url과 dest가 필요합니다' };
 
-      // 입력 인용 — 셸 인젝션 방지(큰따옴표 감싸고 위험문자 제거).
-      const safeUrl = String(url).trim().replace(/["`$\\]/g, '');
-      const safeDest = String(dest).replace(/"/g, '\\"');
+      // 인자 배열 실행(runFile)이라 셸 인용은 필요 없다. URL 은 스킴만 검증하고 선행 `-` 를 막아
+      // git 옵션으로 오인되지 않게 하며(`--` 도 함께 사용), 브랜치는 참조명 문자로 제한한다.
+      const safeUrl = String(url).trim();
+      if (!/^(https?:\/\/|ssh:\/\/|git:\/\/|git@)/i.test(safeUrl)) return { ok: false, error: '지원하지 않는 저장소 URL 형식입니다' };
+      const safeDest = String(dest);
+      if (safeDest.startsWith('-')) return { ok: false, error: '잘못된 대상 경로입니다' };
       const safeBranch = String(branch || '').trim().replace(/[^\w.\-/]/g, '');
       // 토큰은 URL basic-auth로만 사용 — 셸/URL을 깨뜨리는 문자를 제거해 인젝션 방지.
       const safeToken = rawToken.replace(/[^\w.\-~+/=]/g, '');
@@ -448,7 +493,8 @@ function registerGitHandlers() {
         cloneUrl = bare.replace(/^https:\/\//i, `https://x-access-token:${safeToken}@`);
       }
 
-      const branchArg = safeBranch ? `--branch "${safeBranch}"` : '';
+      const cloneArgs = ['clone'];
+      if (safeBranch) cloneArgs.push('--branch', safeBranch);
       // 비대화식 강제 환경변수는 셸 프리픽스(`VAR=val cmd`)로 넣지 않는다 — 그 문법은
       // POSIX 셸 전용이라 Windows cmd.exe에서 실행 자체가 실패한다. run()→exec의
       // `env` 옵션으로 셸 밖에서 주입해 win/mac/원격 모두에서 동일하게 동작하게 한다.
@@ -459,15 +505,36 @@ function registerGitHandlers() {
       // `--` 로 옵션/URL 경계를 명확히 하여 URL이 옵션으로 오인되지 않게 한다.
       // (`2>&1` 제거 — exec가 stdout/stderr를 분리 캡처하므로 리다이렉트 불필요.
       //  실패 시 run()이 stderr로 throw → 아래 catch에서 정확한 사유를 반환한다.)
-      const cmd = `git clone ${branchArg} --depth 1 -- "${cloneUrl}" "${safeDest}"`;
+      cloneArgs.push('--depth', '1', '--', cloneUrl, safeDest);
 
       // clone은 네트워크/인증이 걸리므로 넉넉히(120초). 비대화식이라 실패 시 빨리 끝난다.
-      const output = await run(cmd, { timeout: 120000, env: cloneEnv });
+      const output = await runFile('git', cloneArgs, { timeout: 120000, env: cloneEnv });
       return { ok: true, dest, output: maskSecrets(String(output || '').trim()) };
     } catch (error) {
       const msg = maskSecrets(String(error.stdout || error.stderr || error.message || error).trim());
       console.error('[git:clone] Error:', msg);
       return { ok: false, error: msg };
+    }
+  });
+
+  /**
+   * 기여자 집계 — `git shortlog -s -n -e --all` 을 파싱한다.
+   * 통계 뷰의 기여자 탭이 사용한다(--oneline 로그에는 author 가 없어 집계가 불가능했다).
+   * @param {string} dirPath 저장소 디렉터리
+   * @returns {Array<{name:string,email:string,commits:number}>} 커밋 수 내림차순
+   */
+  ipcMain.handle('git:contributors', async (_, dirPath) => {
+    try {
+      if (!dirPath) return [];
+      const out = await runFile('git', ['shortlog', '-s', '-n', '-e', '--all'], { cwd: dirPath, timeout: 15000 });
+      return String(out || '')
+        .split('\n')
+        .map((line) => line.match(/^\s*(\d+)\s+(.*?)(?:\s+<([^>]*)>)?\s*$/))
+        .filter(Boolean)
+        .map((m) => ({ commits: Number(m[1]) || 0, name: (m[2] || '').trim() || 'Unknown', email: (m[3] || '').trim() }));
+    } catch (error) {
+      console.error('[git:contributors] Error:', error.message);
+      return [];
     }
   });
 }

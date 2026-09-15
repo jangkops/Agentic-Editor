@@ -79,7 +79,8 @@
         window.electronAPI.remoteStatus().then((status) => {
           if (status) {
             // status is { [alias]: { state, localPort?, error? } }
-            const aliases = Object.keys(status);
+            // remote:status 는 별칭 외에 `_active`/`_apiBase` 메타 키를 함께 담는다 — 별칭만 남긴다.
+            const aliases = Object.keys(status).filter((k) => !k.startsWith('_') && status[k] && typeof status[k] === 'object');
             if (aliases.length > 0) {
               // Find the first connected or non-disconnected session, or just the first
               const active = aliases.find((a) => status[a].state === 'connected')

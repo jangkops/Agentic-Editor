@@ -20,6 +20,7 @@ const logger = require('./remote/logger');
 const credentialCache = require('./remote/credential-cache');
 const sshBinaryTunnel = require('./remote/ssh-binary-tunnel');
 const portAllocator = require('./remote/port-allocator');
+const { mountForwarder } = require('./remote/forwarder-mount');
 
 // Lazy load modules that depend on ssh2 — only when user actually connects.
 let _connectDeps = null;
@@ -306,20 +307,20 @@ function registerRemoteHandlers(deps) {
             });
             await provisioner.ensureProvisioned();
             if (deps.PortForwarder) {
-              try {
-                const forwarder = new deps.PortForwarder(session, provisioner.remotePort, portAllocator);
-                localPort = await forwarder.open();
+              // 과거 코드는 `new PortForwarder(session, port, allocator)` + `forwarder.open()` 을 호출했다.
+              // 둘 다 실제 API(`constructor(opts)` / `start(session)`)가 아니어서 TypeError 가 warn 으로
+              // 삼켜지고 포트 포워딩이 한 번도 성립하지 않았다. mountForwarder 는 올바른 API 로 열고,
+              // 터널 너머 원격 ai_engine 의 /health 가 2xx 일 때만 라우팅 전환·로컬 Python 정지를 한다.
+              const mounted = await mountForwarder({
+                PortForwarder: deps.PortForwarder, session, remotePort: provisioner.remotePort,
+                sessionRouter: deps.sessionRouter, fileBridge, termBridge, processManager, logger, alias,
+              });
+              if (mounted.ok) {
+                localPort = mounted.localPort;
                 const existing = bridges.get(alias) || {};
-                bridges.set(alias, Object.assign(existing, { forwarder }));
-                // Update the router with the new localPort
-                if (deps.sessionRouter) deps.sessionRouter.setActive({ session, fileBridge, termBridge, localPort });
-                // Stop local Python — remote ai_engine is now reachable
-                if (processManager && typeof processManager.stopPython === 'function') {
-                  processManager.stopPython();
-                }
-                try { logger.info('remote-provision-complete', { alias, localPort }); } catch {}
-              } catch (pfe) {
-                try { logger.warn('remote-portforward-failed', { alias, message: pfe && pfe.message }); } catch {}
+                bridges.set(alias, Object.assign(existing, { forwarder: mounted.forwarder }));
+                // 렌더러가 apiBase() 를 127.0.0.1:<localPort> 로 바꾸도록 알린다(onRemoteState 가 localPort 를 병합).
+                send('remote:event:state', { alias, from: 'connected', to: 'connected', reason: 'forwarding-ready', localPort });
               }
             }
           } catch (pe) {
@@ -405,12 +406,13 @@ function registerRemoteHandlers(deps) {
         const b = bridges.get(alias);
         return { [alias]: { state: s ? s.state : 'disconnected', localPort: b && b.forwarder ? b.forwarder.localPort : null } };
       }
-      // Iterate via list() if available, else skip
-      if (typeof manager.list === 'function') {
-        for (const row of manager.list()) {
-          const b = bridges.get(row.alias);
-          result[row.alias] = { state: row.state, localPort: b && b.forwarder ? b.forwarder.localPort : null };
-        }
+      // RemoteSessionManager 는 all() 을 제공한다(list() 는 없어서 목록이 항상 비었고, 그 결과
+      // 상태바의 초기 상태가 비어 있었다). 둘 중 있는 것을 쓴다.
+      const rows = typeof manager.all === 'function' ? manager.all()
+        : (typeof manager.list === 'function' ? manager.list() : []);
+      for (const row of rows) {
+        const b = bridges.get(row.alias);
+        result[row.alias] = { state: row.state, localPort: b && b.forwarder ? b.forwarder.localPort : null };
       }
       result._active = manager.getActiveAlias();
       const deps = getConnectDeps();
@@ -448,7 +450,10 @@ function registerRemoteHandlers(deps) {
 
   // --- remote:show-log ---
   ipcMain.handle('remote:show-log', () => {
-    try { return { path: (logger && logger.logFilePath) || '' }; }
+    try {
+      const p = logger && (typeof logger.getLogPath === 'function' ? logger.getLogPath() : logger.logFilePath);
+      return { path: p || '' };
+    }
     catch { return { path: '' }; }
   });
 

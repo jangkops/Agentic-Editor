@@ -51,7 +51,7 @@
  */
 
 const { EventEmitter } = require('events');
-const { execSync } = require('child_process');
+const { execSync, execFileSync } = require('child_process');
 
 /** Default local API base — matches ai_engine/server.py defaults. */
 const LOCAL_API_BASE = 'http://localhost:8765';
@@ -453,6 +453,44 @@ class SessionRouter extends EventEmitter {
     }
   }
 
+  /**
+   * Run `file` with an argv array — the injection-safe sibling of `exec()`.
+   *
+   * Local: `child_process.execFileSync(file, args)` — no shell is involved, so
+   * user/model supplied arguments (branch names, search queries, commit
+   * messages) can never be parsed as shell syntax on any platform.
+   * Remote: the argv is quoted per element with `shellQuote` and joined into a
+   * single POSIX-sh command for `ssh2.exec` (remote hosts are POSIX per the
+   * provisioner contract). `cwd`/`env`/`timeout` follow `exec()` semantics.
+   *
+   * @param {string} file
+   * @param {string[]} args
+   * @param {{cwd?:string, forceLocal?:boolean, timeout?:number, env?:object}} [opts]
+   * @returns {Promise<{stdout:string, stderr:string, code:number}>}
+   */
+  async execFile(file, args, opts) {
+    const options = opts || {};
+    const argv = Array.isArray(args) ? args.map((a) => String(a)) : [];
+    const useRemote = this.isRemoteActive({ forceLocal: Boolean(options.forceLocal) });
+    if (useRemote) {
+      return this.exec(shellJoin(file, argv), options);
+    }
+    try {
+      const o = { stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 16 * 1024 * 1024 };
+      if (options.cwd) o.cwd = options.cwd;
+      if (Number.isFinite(options.timeout)) o.timeout = options.timeout;
+      if (options.env && typeof options.env === 'object') o.env = { ...process.env, ...options.env };
+      const out = execFileSync(file, argv, o);
+      return { stdout: out ? out.toString('utf8') : '', stderr: '', code: 0 };
+    } catch (err) {
+      return {
+        stdout: err && err.stdout ? err.stdout.toString('utf8') : '',
+        stderr: err && err.stderr ? err.stderr.toString('utf8') : ((err && err.message) || ''),
+        code: err && Number.isFinite(err.status) ? err.status : 1,
+      };
+    }
+  }
+
   // -------------------------------------------------------------------------
   // apiBase() — main-side helper (Task 21.2)
   // -------------------------------------------------------------------------
@@ -523,3 +561,14 @@ module.exports.NOT_ROUTED = NOT_ROUTED;
 // Expose the shell-quote helper for callers that need to build their
 // own remote commands consistently with our exec() quoting.
 module.exports.shellQuote = shellQuote;
+/**
+ * Join a program and its argv into one POSIX-sh command string, quoting every
+ * element. Used for the remote (ssh exec) leg of `execFile()`.
+ * @param {string} file
+ * @param {string[]} args
+ * @returns {string}
+ */
+function shellJoin(file, args) {
+  return [file].concat(Array.isArray(args) ? args : []).map((a) => shellQuote(String(a))).join(' ');
+}
+module.exports.shellJoin = shellJoin;

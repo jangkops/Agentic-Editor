@@ -24,3 +24,16 @@ os.environ["AE_PREFER_EDITABLE_DIAGRAM"] = "0"
 # 목차(TOC) 자동 생성은 슬라이드 수를 바꾸므로, 카운트 기반 테스트의 안정성을 위해
 # 기본 OFF. TOC 동작을 검증하는 테스트는 내부에서 AE_PPTX_TOC=1로 opt-in한다.
 os.environ["AE_PPTX_TOC"] = "0"
+
+# 리서치 SSRF 가드(ai_engine/research/backend.url_egress_allowed)는 호스트명을 DNS 로 해석해
+# 사설 주소를 차단한다. 테스트에서는 실제 DNS 를 치지 않도록 결정적 리졸버(공개 주소 고정)를
+# 주입한다. 차단 동작 자체는 test_research_ssrf_guard.py 가 자기 리졸버로 검증한다.
+try:
+    from ai_engine.research import backend as _research_backend
+
+    def _public_resolver(host, port, *args, **kwargs):
+        return [(2, 1, 6, "", ("93.184.216.34", port))]
+
+    _research_backend._RESOLVER = _public_resolver
+except Exception:  # noqa: BLE001 — 백엔드 import 불가 환경에서는 기존 동작 유지
+    pass

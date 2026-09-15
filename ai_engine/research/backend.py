@@ -60,11 +60,13 @@ Requirements: 1.1, 2.1, 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 10.2, 10.3, 10.4, 11.4, 13
 Design: "Components and Interfaces" > "1) backend.py — 단일 외부 egress"
 """
 
+import ipaddress
 import logging
 import re
+import socket
 from dataclasses import dataclass
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 from xml.etree import ElementTree as ET
 
 import httpx
@@ -809,6 +811,68 @@ async def search_academic_with_fallback(
 # 호출하지 않고 즉시 ok=False로 폴백한다(요구사항 3.1).
 _ALLOWED_FETCH_SCHEMES = frozenset({"http", "https"})
 
+# ── SSRF 방어 ─────────────────────────────────────────────────────────────────
+# fetch_url_raw 의 URL 은 검색 provider 응답과 LLM 도구 인자에서 온다. 예전에는 스킴만
+# 검사하고 follow_redirects=True 였으므로 http://127.0.0.1:8765(이 앱의 사이드카)·
+# http://169.254.169.254(클라우드 메타데이터)·사설망 주소로도 요청이 나갔다. 여기서는
+# (1) 호스트가 공개 주소로만 해석될 때만 허용하고 (2) 리다이렉트를 수동으로 따라가며
+# 매 hop 마다 다시 검사한다. DNS 조회 실패는 "알 수 없음"으로 두어 허용한다(그 경우
+# httpx 도 같은 이유로 실패하므로 가용성만 잃고 우회는 열리지 않는다).
+_FETCH_MAX_REDIRECTS = 5
+_BLOCKED_HOST_SUFFIXES = (".localhost", ".local", ".internal")
+# 테스트·오프라인 환경이 결정적 리졸버를 주입할 수 있게 모듈 전역으로 둔다.
+_RESOLVER = socket.getaddrinfo
+
+
+def _is_public_address(ip_str: str) -> bool:
+    """공개 라우팅 가능한 유니캐스트 주소만 True(사설·루프백·링크로컬·멀티캐스트·예약·미지정 제외)."""
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+        return _is_public_address(str(ip.ipv4_mapped))
+    return not (
+        ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast
+        or ip.is_reserved or ip.is_unspecified
+    )
+
+
+def url_egress_allowed(url: str, *, resolver=None) -> tuple[bool, str]:
+    """URL 이 외부 공개 호스트로만 향하는지 판정한다(순수·예외 없음).
+
+    Returns:
+        ``(allowed, reason)``. reason ∈ {"", "invalid_url", "unsupported_scheme",
+        "blocked_host", "blocked_address"}. DNS 실패는 허용(위 설명 참조).
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception:  # noqa: BLE001
+        return False, "invalid_url"
+    scheme = (parsed.scheme or "").lower()
+    host = parsed.hostname
+    if scheme not in _ALLOWED_FETCH_SCHEMES or not host:
+        return False, "unsupported_scheme"
+    host_l = host.lower().rstrip(".")
+    if host_l == "localhost" or host_l.endswith(_BLOCKED_HOST_SUFFIXES):
+        return False, "blocked_host"
+    try:
+        literal = ipaddress.ip_address(host_l)
+    except ValueError:
+        literal = None
+    if literal is not None:
+        return (True, "") if _is_public_address(str(literal)) else (False, "blocked_address")
+    port = parsed.port or (443 if scheme == "https" else 80)
+    resolve = resolver or _RESOLVER
+    try:
+        infos = resolve(host_l, port, proto=socket.IPPROTO_TCP)
+    except Exception:  # noqa: BLE001 — DNS 실패는 "알 수 없음" → 허용(httpx 도 실패한다)
+        return True, ""
+    addrs = {info[4][0] for info in infos if info and len(info) >= 5 and info[4]}
+    if addrs and not all(_is_public_address(a) for a in addrs):
+        return False, "blocked_address"
+    return True, ""
+
 # 본문이 아닌 요소(스크립트/스타일/메타/비가시 영역) — 텍스트 추출에서 제거한다.
 _HTML_NON_CONTENT_XPATH = (
     "//script | //style | //noscript | //template | //head | //svg | //iframe"
@@ -966,14 +1030,36 @@ async def fetch_url_raw(
     if parsed.scheme.lower() not in _ALLOWED_FETCH_SCHEMES or not parsed.netloc:
         return FetchResult(ok=False, url=url_str, error="unsupported_scheme")
 
+    # 2b) SSRF 방어 — 사설·루프백·메타데이터 주소로는 네트워크 미호출(위 url_egress_allowed).
+    allowed, why = url_egress_allowed(url_str)
+    if not allowed:
+        logger.warning("fetch_url_raw egress blocked reason=%s", why)
+        return FetchResult(ok=False, url=url_str, error="egress_blocked")
+
     limit = _safe_max_chars(max_chars)
     logger.debug("fetch_url_raw url=%s timeout=%ss max_chars=%s", url_str, timeout, limit)
 
     try:
         async with httpx.AsyncClient(
-            timeout=timeout, headers={"User-Agent": _UA}, follow_redirects=True
+            timeout=timeout, headers={"User-Agent": _UA}, follow_redirects=False
         ) as client:
-            resp = await client.get(url_str)
+            # 리다이렉트는 수동으로 따라가며 hop 마다 egress 검사(공개 URL → 내부 주소 우회 차단).
+            current = url_str
+            resp = None
+            for _hop in range(_FETCH_MAX_REDIRECTS + 1):
+                resp = await client.get(current)
+                location = resp.headers.get("location", "") if resp.status_code in (301, 302, 303, 307, 308) else ""
+                if not location:
+                    break
+                nxt = urljoin(current, location)
+                ok_hop, why_hop = url_egress_allowed(nxt)
+                if not ok_hop:
+                    logger.warning("fetch_url_raw redirect blocked reason=%s", why_hop)
+                    return FetchResult(ok=False, url=url_str, error="egress_blocked")
+                current = nxt
+            else:
+                logger.warning("fetch_url_raw too many redirects url=%s", url_str)
+                return FetchResult(ok=False, url=url_str, error="too_many_redirects")
             resp.raise_for_status()
             ctype = resp.headers.get("content-type", "").lower()
             if "html" in ctype:

@@ -7525,7 +7525,7 @@ async function renderSourceControlPanel() {
 
 // ===== Usage (기존 — 통계 탭에서도 사용) =====
 async function loadUsageData(){try{if(window.electronAPI?.loadUsage){const u=await window.electronAPI.loadUsage();if(u){state.usageData.inputTokens=u.used||0;state.usageData.cost=u.cost||0;}}}catch(e){console.warn('[Usage] loadUsage 실패:',e);}updateQuotaBar();}
-function trackUsage(il,ol){const it=Math.ceil(il/4),ot=Math.ceil(ol/4);state.usageData.inputTokens+=it;state.usageData.outputTokens+=ot;state.usageData.cost+=(it*0.000003)+(ot*0.000015);state.usageData.history.push({time:new Date().toLocaleTimeString(),model:state.selectedModel?.name||'?',input:it,output:ot,cost:(it*0.000003)+(ot*0.000015)});window.electronAPI?.updateUsage?.(it+ot);updateQuotaBar();}
+function trackUsage(il,ol){const it=Math.ceil(il/4),ot=Math.ceil(ol/4);state.usageData.inputTokens+=it;state.usageData.outputTokens+=ot;state.usageData.cost+=(it*0.000003)+(ot*0.000015);state.usageData.history.push({ts:Date.now(),time:new Date().toLocaleTimeString(),model:state.selectedModel?.name||'?',input:it,output:ot,cost:(it*0.000003)+(ot*0.000015)});window.electronAPI?.updateUsage?.(it+ot);updateQuotaBar();}
 function updateQuotaBar(){
   const profile = state.settings?.awsProfile || '';
   const user = state.settings?.bedrockUser || '';
@@ -8096,6 +8096,15 @@ document.addEventListener('preview-file', (e) => {
   if (!path) return;
   openMediaPreview(path, name, size);
 });
+
+// 생성 산출물 카드의 "수정" 버튼 → 채팅 첨부 등록. 실제 로직은 <file-preview-panel> 과 공유하는
+// 아래 'preview-file:edit' 리스너에 있다. 이 함수가 정의되지 않은 채 호출되어(ReferenceError)
+// 버튼이 죽어 있던 결함을 수정.
+function _attachGeneratedFileForEdit({ path, name } = {}) {
+  if (!path) return;
+  const fileName = name || String(path).split('/').pop() || 'file';
+  document.dispatchEvent(new CustomEvent('preview-file:edit', { detail: { path, name: fileName, meta: null } }));
+}
 
 // 수정 버튼: 파일을 채팅 첨부로 등록 + 컨텍스트 메시지 추가
 document.addEventListener('preview-file:edit', async (e) => {

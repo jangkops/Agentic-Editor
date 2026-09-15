@@ -282,7 +282,7 @@ START → planner ──Send×N (현재 Wave)──► coding | media | research
    venue = 저명 학회·저널 키워드 0.8 · 그 외 게재처 있으면 0.5 · 없으면 0
    cite  = log1p(인용수) / (log1p(인용수) + log1p(50))
    ```
-6. 상위 5개 소스 본문을 `fetch_url_raw`(10초, 100,000자)로 병렬 수집 → `EvidenceSource`.
+6. 상위 5개 소스 본문을 `fetch_url_raw`(10초, 100,000자)로 병렬 수집 → `EvidenceSource`. 사설망·루프백·클라우드 메타데이터 주소와 `localhost`/`.internal` 계열 호스트는 요청 전에 차단하고, 리다이렉트도 hop마다 다시 검사합니다(SSRF 방어, [backend.py `url_egress_allowed`](ai_engine/research/backend.py)).
 7. Generator가 소스별 발췌 2,000자를 받아 `[web:…]`/`[doi:…]` 인용이 포함된 리포트 작성. 실패하면 소스 목록 나열로 폴백.
 8. 인용 검증: 리포트의 `(web|doi):…` 토큰을 추출해 실제 수집 소스와 대조 → `unverified_ratio`, RAG의 `enhance_answer`로 grounding 점수.
 9. **심화 판단**: 소스 5개 미만, provider 2종 미만, 미검증 비율 0.2 초과 중 하나면 "심화 조사 N회차" 질의로 2~8을 반복(최대 3회).
@@ -350,7 +350,7 @@ START → planner ──Send×N (현재 Wave)──► coding | media | research
 - 라우팅: `sessionRouter` 싱글턴이 fs·terminal·git·project IPC와 사이드카의 파일·셸 도구(브리지 서버 경유)를 원격으로 분기합니다. 산출물은 항상 로컬에 저장합니다.
 - 프로비저닝(백그라운드): `python3 ≥ 3.11` 확인 → 로컬 `ai_engine` 트리 해시와 원격 매니페스트 비교 후 SFTP 업로드 → venv → `pip install` → `supervisor.sh`(uvicorn 재기동 루프) 기동.
 - 자격증명(패스프레이즈·2FA)은 메인 프로세스 메모리에만 두고 종료 시 지우며, 로그는 키 이름 기반 마스킹 후 0600으로 기록합니다.
-- 현재 제한은 11장을 보세요(원격 엔진 포트 포워딩·자동 재연결).
+- 원격 엔진으로의 포트 포워딩은 프로비저닝이 끝난 뒤 백그라운드로 열리며, 터널 너머 `/health`가 2xx일 때만 라우팅을 전환하고 로컬 Python을 멈춥니다(실패하면 로컬 엔진 유지, [forwarder-mount.js](electron/src/remote/forwarder-mount.js)). 자동 재연결은 아직 없습니다(11장).
 
 **관련 파일.** `electron/src/remote/`(24모듈), `electron/src/ipc-remote-handlers.js`, `src/components/remote-*.js`, `ai_engine/bridge_client.py`, `docs/REMOTE_SSH.md`, 스펙 `.kiro/specs/remote-ssh/`.
 
@@ -561,7 +561,7 @@ agentic-editor/
   pytest tests/unit -q        # ai_engine 단위 테스트
   npm run test:e2e            # Playwright(tests/e2e, 4개)
   ```
-  `scripts/test_test_hygiene_no_module_global_clobber.py`는 테스트가 import 시점에 다른 모듈의 전역을 덮어쓰는지 AST로 검사하는 위생 가드입니다. 셸 인용 회귀 테스트는 `tests/unit/remote/bridge-search-quoting.test.js`(원격 브리지)와 `scripts/test_execute_tool_search_files_quoting.py`(로컬 도구)에 있습니다.
+  `scripts/test_test_hygiene_no_module_global_clobber.py`는 테스트가 import 시점에 다른 모듈의 전역을 덮어쓰는지 AST로 검사하는 위생 가드입니다. 셸 인용 회귀 테스트는 `tests/unit/remote/bridge-search-quoting.test.js`(원격 브리지)와 `scripts/test_execute_tool_search_files_quoting.py`(로컬 도구)에, git IPC의 argv 실행은 `tests/unit/ipc-git-handlers.test.js`에, 포트포워딩 헬스 게이트는 `tests/unit/remote/forwarder-mount.test.js`에, SSRF 가드는 `scripts/test_research_ssrf_guard.py`에 있습니다.
 - **산출물 감사**: `scripts/audit_pptx_native_density.py`, `audit_pptx_textbox_overlap.py` 등이 생성된 PPTX의 밀도·겹침·경계를 기계 판정합니다. `scripts/eval_research_quality.py`는 골든 셋 대비 리서치 품질 회귀를 검사합니다.
 - **스펙 기반 개발(`.kiro/specs/`)**: 기능마다 `requirements.md`(EARS 형식) → `design.md`(Correctness Properties 포함) → `tasks.md`(체크박스, `*`는 선택 테스트) 순서로 진행합니다. 버그 수정 스펙은 `bugfix.md`와 3단 테스트(`*_bug_condition`: 수정 전 실패해야 함 → `*_fix_pbt`: 수정 후 통과 → `*_preservation_pbt`: 기존 동작 보존)를 씁니다.
 - CI(`.github/workflows/release.yml`)는 태그 `v*` 푸시 시 macOS/Windows 매트릭스에서 필수 모듈 import 게이트 → PyInstaller 동결 → electron-builder 빌드를 수행합니다(테스트 실행 스텝은 아직 없음, 11장).
@@ -588,7 +588,7 @@ DMG와 `scripts/install-mac.command`를 같은 폴더에 두고 스크립트를 
 
 정직한 상태 표시입니다. 항목별 상세와 조치 계획은 내부 분석 문서를 따릅니다.
 
-- **원격 SSH**: 파일·터미널·명령 실행은 동작하지만, 원격 `ai_engine`으로의 로컬 포트 포워딩은 현재 빌드에서 동작하지 않아 **AI 엔진은 항상 로컬에서 실행**됩니다. 자동 재연결은 미구현이며 끊김 시 로컬로 폴백합니다.
+- **원격 SSH**: 파일·터미널·명령 실행은 동작합니다. 원격 `ai_engine`으로의 포트 포워딩은 호출 규약 오류로 2026-05 이후 한 번도 열리지 않았던 것을 고쳤고, 이제 터널 너머 `/health`가 2xx일 때만 라우팅을 전환합니다(실패하면 로컬 엔진 유지). **실제 원격 호스트에서의 종단 검증은 아직 하지 않았습니다.** 자동 재연결은 미구현이며 끊김 시 로컬로 폴백합니다.
 - **effort(추론 강도) 컨트롤**: 카탈로그에 effort 계약이 선언된 모델에서만 표시됩니다. 현재 운영자 카탈로그에는 선언이 없어 UI가 나타나지 않습니다.
 - **기본 채팅 경로(graph-stream)**: `thinking`·`answerQuality` SSE는 아직 `run-stream`/`run-agent`에서만 방출됩니다.
 - **Python 버전**: 개발·검증은 3.14에서 이루어졌습니다. 3.12/3.13에서 import를 막던 `typing.Optional` 누락은 고쳤지만, 3.11~3.13에서의 실제 기동은 아직 검증하지 않았습니다.
@@ -605,7 +605,7 @@ DMG와 `scripts/install-mac.command`를 같은 폴더에 두고 스크립트를 
 - **게이트웨이 전용**: LLM 호출은 `GatewayClient`만 경유. 직접 SDK(boto3 bedrock-runtime, anthropic, openai) 사용 금지. 예외는 이미지 생성의 Vertex AI 한 곳.
 - **자격증명 비저장**: AWS 자격증명은 어떤 파일에도 쓰지 않고 런타임 주입·assume-role만. 리서치 키는 OS 키체인 암호문만 저장. 체크포인트 저장 전 키 패턴 검사.
 - **비차단 폴백**: 하위 실패는 값으로 표현하고 다음 후보로 넘어간다. 대신 요청 종료 시 "선언(설정·의도) vs 관측(실제 도구 호출)"을 대조해 조용한 무동작을 표면화한다(`effect_ledger.py`).
-- **외부 egress 가시성**: 리서치 도구는 옵트인·동의 게이트를 지키지만 셸 도구는 그 게이트 밖에 있다. 그래서 `run_command`가 외부 네트워크 신호를 보이면 차단하는 대신 신호·대상 호스트·게이트 상태만 로그에 남긴다(명령 원문 미기록). 셸을 막으면 npm·git·pip이 죽기 때문이다. 셸에 넘기는 모델 입력(검색어·경로·패턴)은 `shlex.quote`/`shellQuote`로 인용해 메타문자가 명령으로 해석되지 않게 한다.
+- **외부 egress 가시성**: 리서치 도구는 옵트인·동의 게이트를 지키지만 셸 도구는 그 게이트 밖에 있다. 그래서 `run_command`가 외부 네트워크 신호를 보이면 차단하는 대신 신호·대상 호스트·게이트 상태만 로그에 남긴다(명령 원문 미기록). 셸을 막으면 npm·git·pip이 죽기 때문이다. 셸에 넘기는 모델 입력(검색어·경로·패턴)은 `shlex.quote`/`shellQuote`로 인용하고, git IPC는 argv 배열로 실행해(로컬은 셸 미경유) 메타문자가 명령으로 해석되지 않게 한다. 리서치 본문 수집(`fetch_url_raw`)은 사설·루프백·메타데이터 주소와 내부 호스트명을 요청 전에 차단하고 리다이렉트도 hop마다 재검사한다(SSRF 방어).
 - **손실-0 · 바이트 보존**: 생성된 이미지는 어떤 분기에서도 폐기하지 않고, 새 렌더 기능은 no-op 기본값으로만 추가해 기존 산출물이 바이트 단위로 동일하게 유지되도록 한다.
 - **콘텐츠 텍스트는 이미지로 굽지 않는다**: 편집 가능성 우선. 외부 URL은 HTML 슬라이드에 절대 넣지 않는다.
 - **실측 근거를 남긴다**: 타임아웃·동시성·모델 선택 같은 수치는 재현한 사고나 벤치마크와 함께 주석에 기록한다("동시 캡처 20개 이상에서 프레임 드롭, macOS Sonoma+M2 실측" 등).

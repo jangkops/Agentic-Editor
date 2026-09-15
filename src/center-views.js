@@ -273,9 +273,12 @@ function renderStatsTokens(el) {
     dayMap[`${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`] = 0;
   }
   (ud.history || []).forEach(h => {
-    const n = new Date();
+    // 항목의 실제 시각(ts)으로 버킷팅. ts 가 없는 옛 항목은 날짜를 알 수 없어 제외한다
+    // (과거에는 모든 항목을 `new Date()` = 오늘에 누적해 7일 추이가 항상 오늘 한 칸에만 쌓였다).
+    if (!h || !Number.isFinite(h.ts)) return;
+    const n = new Date(h.ts);
     const k = `${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
-    dayMap[k] = (dayMap[k] || 0) + (h.cost || 0);
+    if (k in dayMap) dayMap[k] += (h.cost || 0);
   });
   const maxCost = Math.max(...Object.values(dayMap), 0.001);
   const costBars = Object.entries(dayMap).map(([k, v]) =>
@@ -922,34 +925,21 @@ function renderDependenciesView(container) {
 // ===== 기여자 탭 =====
 async function renderStatsContributors(el) {
   el.innerHTML = '<div style="text-align:center;padding:40px"><div class="spinner"></div><div style="margin-top:8px;color:var(--color-text-muted);font-size:12px">기여자 분석 중...</div></div>';
-  // Git shortlog로 기여자 정보 수집
+  // Git 기여자 집계 — `git shortlog -s -n -e`(IPC git:contributors). 예전 구현은 --oneline 로그에
+  // author 가 없어 최신 커밋 1건의 author 에 전체 커밋 수를 귀속시켜 항상 "기여자 1명"이었다.
   let contributors = [];
   try {
-    const log = await window.electronAPI?.gitLog(state.folderPath, 200);
-    if (log && log.length) {
-      // 커밋 수 기반 기여자 집계
-      const authorMap = {};
-      for (const c of log) {
-        // git log --oneline에서는 author 정보가 없으므로 gitShow로 보완
-        // 간단히 커밋 수만 집계
-        const key = 'contributor';
-        authorMap[key] = (authorMap[key] || 0) + 1;
-      }
-      // gitShow로 첫 커밋의 author 확인
-      if (log[0]?.hash) {
-        const detail = await window.electronAPI?.gitShow(state.folderPath, log[0].hash);
-        if (detail?.author) {
-          contributors.push({
-            name: detail.author,
-            email: detail.email || '',
-            commits: log.length,
-            activity: '활동 중',
-          });
-        }
-      }
-      if (!contributors.length) {
-        contributors.push({ name: 'Unknown', email: '', commits: log.length, activity: '활동 중' });
-      }
+    let rows = null;
+    if (window.electronAPI?.gitContributors) {
+      rows = await window.electronAPI.gitContributors(state.folderPath);
+    }
+    if (Array.isArray(rows) && rows.length) {
+      contributors = rows.map(r => ({
+        name: r.name || 'Unknown', email: r.email || '', commits: r.commits || 0, activity: '활동 중',
+      }));
+    } else {
+      const log = await window.electronAPI?.gitLog(state.folderPath, 200);
+      if (log && log.length) contributors.push({ name: 'Unknown', email: '', commits: log.length, activity: '활동 중' });
     }
   } catch {}
 
@@ -1017,9 +1007,12 @@ async function renderStatsTeam(el) {
     dayMap[`${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`] = 0;
   }
   (ud.history || []).forEach(h => {
-    const n = new Date();
+    // 항목의 실제 시각(ts)으로 버킷팅. ts 가 없는 옛 항목은 날짜를 알 수 없어 제외한다
+    // (과거에는 모든 항목을 `new Date()` = 오늘에 누적해 7일 추이가 항상 오늘 한 칸에만 쌓였다).
+    if (!h || !Number.isFinite(h.ts)) return;
+    const n = new Date(h.ts);
     const k = `${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
-    dayMap[k] = (dayMap[k] || 0) + (h.cost || 0);
+    if (k in dayMap) dayMap[k] += (h.cost || 0);
   });
   const maxCost = Math.max(...Object.values(dayMap), 0.001);
   const costBars = Object.entries(dayMap).map(([k, v]) =>

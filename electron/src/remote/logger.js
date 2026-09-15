@@ -439,6 +439,16 @@ class Logger {
   }
 
   /** Convenience wrapper. @param {string} event @param {object} [fields] */
+  /**
+   * Debug-level record. Callers (remote-file-bridge fsync / posix-rename
+   * fallbacks) already used `logger.debug(...)`; the method did not exist, so
+   * those diagnostics were swallowed by their try/catch. Recorded at info
+   * level — the events are rare and operationally useful.
+   */
+  debug(event, fields) {
+    return this.info(event, fields);
+  }
+
   warn(event, fields) {
     return this.log('warn', event, fields);
   }
