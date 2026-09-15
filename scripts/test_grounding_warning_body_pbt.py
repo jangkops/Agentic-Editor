@@ -4,25 +4,25 @@
 Feature: reasoning-perf-reliability, Property 8: 상한 소진 후 미달이면 경고를 부가하되 본문을 보존한다 (가용성)
 **Validates: Requirements 9.1, 9.2**
 
-For any AE_MAX_REFINE 소진 후에도 근거 미달인 응답에 대해(reject 모드 off),
+For any AE_MAX_GROUNDING_REFINE 소진 후에도 근거 미달인 응답에 대해(reject 모드 off),
 최종 final_text 는 원본 응답 본문을 부분 문자열로 보존하면서 근거 부족 경고 마커를
 포함한다.
 
 대상 코드(실측):
 - ai_engine/agent_system/nodes/verify.py 의
   _apply_grounding_gate(state, final_text, answer_quality, base_out):
-    · grounding_below 이 True 이고 grounding_refine_count >= AE_MAX_REFINE(상한 소진)
+    · grounding_below 이 True 이고 grounding_refine_count >= AE_MAX_GROUNDING_REFINE(상한 소진)
       이며 AE_GROUNDING_REJECT off 이면 → base_out.final_text 를
       "원문 본문 + ⚠️ 근거 부족 경고 마커" 로 확정한다(요구사항 9.1/9.2).
 
 전제(플래그):
 - AE_ENABLE_GROUNDING_GATE=1 (게이트 on — 호출자가 이미 확인했다는 precondition 충족)
 - AE_GROUNDING_REJECT=0     (reject 모드 off — Property 8 범위)
-- AE_MAX_REFINE=1           (상한 1)
+- AE_MAX_GROUNDING_REFINE=1           (상한 1)
 
 근거 미달을 강제하기 위해 answer_quality.faithfulness.score 를 임계값(0.7) 미만으로,
 degraded=False 로 구성한다(grounding_below → faithfulness_below_threshold → score < t).
-state.grounding_refine_count 를 AE_MAX_REFINE 로 설정해 상한을 소진시킨다.
+state.grounding_refine_count 를 AE_MAX_GROUNDING_REFINE 로 설정해 상한을 소진시킨다.
 
 실행: ai_engine/.venv/bin/python -m pytest scripts/test_grounding_warning_body_pbt.py -q
 Stack: Python 3.11+, hypothesis library.
@@ -59,11 +59,11 @@ _BELOW_SCORES = st.one_of(
 
 def _set_gate_env():
     """Property 8 전제 플래그를 환경변수에 주입하고, 복원용 원본 값을 반환한다."""
-    keys = ("AE_ENABLE_GROUNDING_GATE", "AE_GROUNDING_REJECT", "AE_MAX_REFINE")
+    keys = ("AE_ENABLE_GROUNDING_GATE", "AE_GROUNDING_REJECT", "AE_MAX_GROUNDING_REFINE")
     original = {k: os.environ.get(k) for k in keys}
     os.environ["AE_ENABLE_GROUNDING_GATE"] = "1"
     os.environ["AE_GROUNDING_REJECT"] = "0"
-    os.environ["AE_MAX_REFINE"] = "1"
+    os.environ["AE_MAX_GROUNDING_REFINE"] = "1"
     return original
 
 
@@ -81,8 +81,8 @@ def test_warning_appended_body_preserved(body, f_score):
     """상한 소진·미달·reject off → final_text 가 원본 본문 보존 + 근거 부족 경고 포함."""
     original = _set_gate_env()
     try:
-        max_refine = int(os.environ["AE_MAX_REFINE"])
-        # 상한 소진: grounding_refine_count == AE_MAX_REFINE (g_rc >= max_refine).
+        max_refine = int(os.environ["AE_MAX_GROUNDING_REFINE"])
+        # 상한 소진: grounding_refine_count == AE_MAX_GROUNDING_REFINE (g_rc >= max_refine).
         state = {"grounding_refine_count": max_refine}
         # 근거 미달 강제: faithfulness.score < 0.7, not degraded.
         answer_quality = {"faithfulness": {"score": f_score, "degraded": False}}

@@ -242,7 +242,7 @@ Grounding_Gate 는 **verify 경로**(통합 지점 (b))에 bounded refine 루프
 # 플래그·임계값(호출 시점 판독)
 AE_ENABLE_GROUNDING_GATE   # 기본 off
 AE_VERIFY_THRESHOLD        # 근거성 임계값, 기본 0.7 (answer_quality 와 공유)
-AE_MAX_REFINE              # 재생성 상한, 기본 1 (grounding 전용 카운터에 적용)
+AE_MAX_GROUNDING_REFINE              # 재생성 상한, 기본 1 (grounding 전용 카운터에 적용)
 AE_GROUNDING_REJECT        # reject 모드 플래그, 기본 off
 
 def grounding_below(answer_quality: dict, env=None) -> bool:
@@ -263,7 +263,7 @@ def grounding_gate_selector(state) -> str:
 answer_quality 계산(기존) 후:
   g_rc = state.get("grounding_refine_count", 0)
   if grounding_below(answer_quality):
-      if g_rc < AE_MAX_REFINE:
+      if g_rc < AE_MAX_GROUNDING_REFINE:
           # bounded refine 유도: 근거 강화 지시를 HumanMessage 로 추가, 카운터 +1
           return {..., "grounding_refine_count": g_rc + 1,
                   "messages": [HumanMessage("[근거 강화] 제공된 근거 범위 안에서만 답을 재작성하라 ...")]}
@@ -287,7 +287,7 @@ else:
 
 refine 시 model 이 refine 지시(messages 말미 HumanMessage)를 받아 답을 재작성 → verify 재평가.
 `grounding_refine_count` 는 monotonic MAX reducer(`_take_max_int`)로 echo/reset 면역이며 단조
-증가하므로 최대 `AE_MAX_REFINE` 회로 유한 종료한다(요구사항 8, 11.5).
+증가하므로 최대 `AE_MAX_GROUNDING_REFINE` 회로 유한 종료한다(요구사항 8, 11.5).
 
 **Full_Graph 최종 응답에 대한 범위 명시**: 게이트는 도메인 서브그래프 verify(각 워커/Fast_Path)의
 `final_text` 에 작용한다. Full_Graph 의 aggregate 종합 답변은 단일 evidence 컨텍스트가 없어 게이트
@@ -325,7 +325,7 @@ refine 시 model 이 refine 지시(messages 말미 HumanMessage)를 받아 답�
     "AE_ENABLE_ADAPTIVE_DEPTH": false,
     "AE_ENABLE_GROUNDING_GATE": false,
     "AE_LANGGRAPH_PARALLEL": true,
-    "AE_MAX_REFINE": 1,
+    "AE_MAX_GROUNDING_REFINE": 1,
     "AE_VERIFY_THRESHOLD": 0.7
   },
   "aggregate": {
@@ -369,7 +369,7 @@ grounding_refine_count: Annotated[int, _take_max_int]
 | `AE_DEPTH_ROUTER_LLM` | off | 휴리스틱이 simple 일 때 LLM 확인 사용 여부(옵션) |
 | `AE_ENABLE_GROUNDING_GATE` | off | 근거 강제 게이트 마스터 스위치(요구사항 10.2) |
 | `AE_VERIFY_THRESHOLD` | 0.7 | 근거성 임계값(answer_quality 와 공유, 요구사항 7.3) |
-| `AE_MAX_REFINE` | 1 | grounding refine 상한(요구사항 8.2) |
+| `AE_MAX_GROUNDING_REFINE` | 1 | grounding refine 상한(요구사항 8.2) |
 | `AE_GROUNDING_REJECT` | off | reject 모드(요구사항 9.3) |
 | `AE_EVAL_GATEWAY_MODE` | mock | Eval_Harness Gateway_Mode(요구사항 2.3) |
 
@@ -434,14 +434,14 @@ degraded 가 아니면 `grounding_below == (s < t)` 이고, 근거성 산출이 
 ### Property 7: Grounding_Gate refine 는 유한하고 단조적이다
 
 *For any* 지속적으로 근거 미달인 응답에 대해, `grounding_refine_count` 는 실행에 걸쳐 단조 비감소하며
-`AE_MAX_REFINE` 를 초과하지 않고, 게이트로 인한 model 재호출 총 횟수는 `AE_MAX_REFINE` 이하로
+`AE_MAX_GROUNDING_REFINE` 를 초과하지 않고, 게이트로 인한 model 재호출 총 횟수는 `AE_MAX_GROUNDING_REFINE` 이하로
 유한 종료한다.
 
 **Validates: Requirements 8.1, 8.2, 8.3, 11.5**
 
 ### Property 8: 상한 소진 후 미달이면 경고를 부가하되 본문을 보존한다 (가용성)
 
-*For any* `AE_MAX_REFINE` 소진 후에도 근거 미달인 응답에 대해(reject 모드 off), 최종 `final_text`
+*For any* `AE_MAX_GROUNDING_REFINE` 소진 후에도 근거 미달인 응답에 대해(reject 모드 off), 최종 `final_text`
 는 원본 응답 본문을 부분 문자열로 보존하면서 근거 부족 경고 마커를 포함한다.
 
 **Validates: Requirements 9.1, 9.2**
@@ -515,7 +515,7 @@ degraded 가 아니면 `grounding_below == (s < t)` 이고, 근거성 산출이 
 - **refine 중 model 타임아웃**: 도메인 model 노드의 기존 `MODEL_NODE_TIMEOUT` 폴백
   (`[모델 응답 시간 초과]` + tool_calls 없음)을 그대로 사용해 verify 로 진행, 이후 상한 판정으로
   유한 종료한다.
-- **상한 소진**: `grounding_refine_count >= AE_MAX_REFINE` 이면 추가 refine 을 유도하지 않고
+- **상한 소진**: `grounding_refine_count >= AE_MAX_GROUNDING_REFINE` 이면 추가 refine 을 유도하지 않고
   경고 부가(또는 reject 모드 시 사유 명시 거절)로 종료(요구사항 8.3/9).
 
 ### Eval_Harness

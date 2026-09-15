@@ -21,6 +21,7 @@
 
 const http = require('http');
 const crypto = require('crypto');
+const { shellQuote } = require('./session-router');
 
 /**
  * Start the bridge HTTP server.
@@ -192,10 +193,14 @@ async function handleRequest(url, payload, sessionRouter, extras) {
 
   if (url === '/bridge/search_files') {
     if (!isRemote) return { ok: false, error: 'no remote session' };
-    const query = String(payload.query || '').replace(/"/g, '\\"');
-    const searchPath = String(payload.path || '.').replace(/"/g, '\\"');
-    const pattern = payload.file_pattern ? `--include="${String(payload.file_pattern).replace(/"/g, '\\"')}"` : '';
-    const cmd = `grep -rn ${pattern} --color=never "${query}" "${searchPath}" 2>/dev/null | head -50`;
+    // Every model-supplied argument is quoted for POSIX sh (shellQuote). The
+    // previous version only escaped double quotes, so `$(...)`, backticks and
+    // `\` reached the remote shell verbatim. `-e`/`--` stop a leading `-` from
+    // being parsed as a grep option.
+    const query = shellQuote(String(payload.query || ''));
+    const searchPath = shellQuote(String(payload.path || '.'));
+    const pattern = payload.file_pattern ? `--include=${shellQuote(String(payload.file_pattern))}` : '';
+    const cmd = `grep -rn ${pattern} --color=never -e ${query} -- ${searchPath} 2>/dev/null | head -50`;
     const r = await sessionRouter.exec(cmd, {});
     return { ok: true, output: r.stdout || '검색 결과 없음' };
   }
@@ -222,4 +227,4 @@ async function handleRequest(url, payload, sessionRouter, extras) {
   return null; // unknown endpoint
 }
 
-module.exports = { startBridgeServer };
+module.exports = { startBridgeServer, handleRequest };

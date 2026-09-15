@@ -436,7 +436,8 @@ NO_RELOAD=1 npm run dev # 서버 auto-reload 끄기
 | | `AE_MAX_TOKENS` | 64000 | maxTokens 상한 |
 | 오케스트레이터 | `AE_LANGGRAPH` / `AE_LANGGRAPH_PARALLEL` | on / on | LangGraph 경로 / 병렬 그래프 |
 | | `AE_ENABLE_DAG_PLANNER` / `AE_ENABLE_EVALUATOR` | on / on | DAG 계획 / 평가 노드 |
-| | `AE_MAX_REFINE` | 2 (재계획) / 1 (grounding refine) | **같은 이름을 두 곳이 다른 기본값으로 읽음**: Evaluator 재계획 상한(`supervisor.py`)과 grounding refine 상한(`nodes/verify.py`). 한쪽을 바꾸면 다른 쪽도 바뀜 |
+| | `AE_MAX_REFINE` | 2 | Evaluator 재계획 상한(`supervisor.py`) |
+| | `AE_MAX_GROUNDING_REFINE` | 1 | grounding refine 상한(`nodes/verify.py`). 예전에는 `AE_MAX_REFINE`을 함께 읽어 한쪽 조정이 다른 쪽을 바꿨음 |
 | | `AE_MAX_PARALLEL_TASKS` / `AE_MAX_ROUTE_HOPS` | 4 / 4 | 동시 작업 / 순차 홉 |
 | | `AE_GRAPH_TOTAL_TIMEOUT` / `AE_MODEL_NODE_TIMEOUT` / `AE_MEDIA_TOOL_TIMEOUT` | 1800 / 300 / 600초 | |
 | | `AE_ENABLE_ADAPTIVE_DEPTH` / `AE_ENABLE_GROUNDING_GATE` / `AE_MCP_ENABLED` | off | 단순 질의 fast path / 근거 게이트 / MCP 도구 |
@@ -558,9 +559,9 @@ agentic-editor/
   source ai_engine/.venv/bin/activate
   pytest scripts/ -q          # scripts/conftest.py가 Vertex·외부 호출을 끕니다(헤르메틱)
   pytest tests/unit -q        # ai_engine 단위 테스트
-  npm run test:e2e            # Playwright(tests/e2e) — 아래 주의 참고
+  npm run test:e2e            # Playwright(tests/e2e, 4개)
   ```
-  주의: `tests/e2e/test_editor.py`·`test_startup.py`는 코드가 아닌 산문 플레이스홀더라 `pytest tests/e2e/`를 통째로 돌리면 수집 단계에서 SyntaxError로 중단됩니다. 파일 단위(`pytest tests/e2e/test_research_settings_ui.py`)로 실행하거나 두 파일을 `--ignore`하세요. `scripts/test_test_hygiene_no_module_global_clobber.py`는 테스트가 import 시점에 다른 모듈의 전역을 덮어쓰는지 AST로 검사하는 위생 가드입니다.
+  `scripts/test_test_hygiene_no_module_global_clobber.py`는 테스트가 import 시점에 다른 모듈의 전역을 덮어쓰는지 AST로 검사하는 위생 가드입니다. 셸 인용 회귀 테스트는 `tests/unit/remote/bridge-search-quoting.test.js`(원격 브리지)와 `scripts/test_execute_tool_search_files_quoting.py`(로컬 도구)에 있습니다.
 - **산출물 감사**: `scripts/audit_pptx_native_density.py`, `audit_pptx_textbox_overlap.py` 등이 생성된 PPTX의 밀도·겹침·경계를 기계 판정합니다. `scripts/eval_research_quality.py`는 골든 셋 대비 리서치 품질 회귀를 검사합니다.
 - **스펙 기반 개발(`.kiro/specs/`)**: 기능마다 `requirements.md`(EARS 형식) → `design.md`(Correctness Properties 포함) → `tasks.md`(체크박스, `*`는 선택 테스트) 순서로 진행합니다. 버그 수정 스펙은 `bugfix.md`와 3단 테스트(`*_bug_condition`: 수정 전 실패해야 함 → `*_fix_pbt`: 수정 후 통과 → `*_preservation_pbt`: 기존 동작 보존)를 씁니다.
 - CI(`.github/workflows/release.yml`)는 태그 `v*` 푸시 시 macOS/Windows 매트릭스에서 필수 모듈 import 게이트 → PyInstaller 동결 → electron-builder 빌드를 수행합니다(테스트 실행 스텝은 아직 없음, 11장).
@@ -591,7 +592,6 @@ DMG와 `scripts/install-mac.command`를 같은 폴더에 두고 스크립트를 
 - **effort(추론 강도) 컨트롤**: 카탈로그에 effort 계약이 선언된 모델에서만 표시됩니다. 현재 운영자 카탈로그에는 선언이 없어 UI가 나타나지 않습니다.
 - **기본 채팅 경로(graph-stream)**: `thinking`·`answerQuality` SSE는 아직 `run-stream`/`run-agent`에서만 방출됩니다.
 - **Python 버전**: 개발·검증은 3.14에서 이루어졌습니다. 3.12/3.13에서 import를 막던 `typing.Optional` 누락은 고쳤지만, 3.11~3.13에서의 실제 기동은 아직 검증하지 않았습니다.
-- **테스트 잔재**: `tests/e2e/test_editor.py`·`test_startup.py`는 산문 플레이스홀더라 `pytest tests/e2e/` 전체 실행이 수집 단계에서 실패하고, `tests/unit/utils.test.js`는 Jest 형식이 아니라(`process.exit` 직접 호출) suite 하나가 항상 실패로 집계됩니다. 정리 예정입니다.
 - **테스트 자동화**: `npm test`는 `tests/unit` JS만 실행하고, `scripts/test_*.py`는 수동 실행 자산입니다. 릴리스 CI에는 테스트 스텝이 없습니다.
 - **모델**: Claude Opus 계열은 게이트웨이 스트리밍 경로에서 지원되지 않아 계획·평가 노드에는 Sonnet 4.5를 사용합니다.
 - **오프라인**: Monaco 에디터는 CDN에서 로드되므로 오프라인에서는 에디터가 뜨지 않습니다.
@@ -605,7 +605,7 @@ DMG와 `scripts/install-mac.command`를 같은 폴더에 두고 스크립트를 
 - **게이트웨이 전용**: LLM 호출은 `GatewayClient`만 경유. 직접 SDK(boto3 bedrock-runtime, anthropic, openai) 사용 금지. 예외는 이미지 생성의 Vertex AI 한 곳.
 - **자격증명 비저장**: AWS 자격증명은 어떤 파일에도 쓰지 않고 런타임 주입·assume-role만. 리서치 키는 OS 키체인 암호문만 저장. 체크포인트 저장 전 키 패턴 검사.
 - **비차단 폴백**: 하위 실패는 값으로 표현하고 다음 후보로 넘어간다. 대신 요청 종료 시 "선언(설정·의도) vs 관측(실제 도구 호출)"을 대조해 조용한 무동작을 표면화한다(`effect_ledger.py`).
-- **외부 egress 가시성**: 리서치 도구는 옵트인·동의 게이트를 지키지만 셸 도구는 그 게이트 밖에 있다. 그래서 `run_command`가 외부 네트워크 신호를 보이면 차단하는 대신 신호·대상 호스트·게이트 상태만 로그에 남긴다(명령 원문 미기록). 셸을 막으면 npm·git·pip이 죽기 때문이다.
+- **외부 egress 가시성**: 리서치 도구는 옵트인·동의 게이트를 지키지만 셸 도구는 그 게이트 밖에 있다. 그래서 `run_command`가 외부 네트워크 신호를 보이면 차단하는 대신 신호·대상 호스트·게이트 상태만 로그에 남긴다(명령 원문 미기록). 셸을 막으면 npm·git·pip이 죽기 때문이다. 셸에 넘기는 모델 입력(검색어·경로·패턴)은 `shlex.quote`/`shellQuote`로 인용해 메타문자가 명령으로 해석되지 않게 한다.
 - **손실-0 · 바이트 보존**: 생성된 이미지는 어떤 분기에서도 폐기하지 않고, 새 렌더 기능은 no-op 기본값으로만 추가해 기존 산출물이 바이트 단위로 동일하게 유지되도록 한다.
 - **콘텐츠 텍스트는 이미지로 굽지 않는다**: 편집 가능성 우선. 외부 URL은 HTML 슬라이드에 절대 넣지 않는다.
 - **실측 근거를 남긴다**: 타임아웃·동시성·모델 선택 같은 수치는 재현한 사고나 벤치마크와 함께 주석에 기록한다("동시 캡처 20개 이상에서 프레임 드롭, macOS Sonoma+M2 실측" 등).

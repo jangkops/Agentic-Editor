@@ -7502,13 +7502,13 @@ def _execute_tool(tool_name: str, tool_input: dict, project_path: str = "", aws_
             return output or "(출력 없음)"
 
         elif tool_name == "search_files":
-            query = tool_input["query"]
-            path = tool_input["path"]
+            import shlex as _shlex  # 모델이 준 query/path/pattern 을 셸 메타문자에서 격리(인젝션 방지)
+            query = str(tool_input["query"]); path = tool_input["path"]
             if not os.path.isabs(path) and project_path:
                 path = os.path.join(project_path, path)
-            pattern = tool_input.get("file_pattern", "")
-            include = f"--include='{pattern}'" if pattern else ""
-            cmd = f"grep -rn {include} --color=never '{query}' '{path}' 2>/dev/null | head -50"
+            pattern = str(tool_input.get("file_pattern", "") or "")
+            include = f"--include={_shlex.quote(pattern)}" if pattern else ""
+            cmd = f"grep -rn {include} --color=never -e {_shlex.quote(query)} -- {_shlex.quote(path)} 2>/dev/null | head -50"
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
             return result.stdout or "검색 결과 없음"
 

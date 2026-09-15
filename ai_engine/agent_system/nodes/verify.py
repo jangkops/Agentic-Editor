@@ -63,9 +63,13 @@ FORCE_GENERATE_TIMEOUT: float = _env_float("AE_FORCE_GENERATE_TIMEOUT", 180.0)
 # Grounding_Gate 플래그 판독 (호출 시점 — 테스트 토글 허용, 요구사항 8.2 / 9.3)
 # ─────────────────────────────────────────────────────────────────────────────
 def _max_refine() -> int:
-    """grounding refine 상한(AE_MAX_REFINE, 기본 1). 정수 해석 실패 시 1."""
+    """grounding refine 상한(AE_MAX_GROUNDING_REFINE, 기본 1). 정수 해석 실패 시 1.
+
+    Evaluator 재계획 상한(AE_MAX_REFINE, supervisor.py 기본 2)과는 별도 카운터·별도
+    변수다. 과거에는 두 상한이 같은 이름을 읽어 한쪽을 조정하면 다른 쪽도 바뀌었다.
+    """
     try:
-        return int(os.environ.get("AE_MAX_REFINE", "1"))
+        return int(os.environ.get("AE_MAX_GROUNDING_REFINE", "1"))
     except (TypeError, ValueError):
         return 1
 
@@ -83,7 +87,7 @@ def _apply_grounding_gate(
     Precondition:  호출자가 AE_ENABLE_GROUNDING_GATE on 을 이미 확인했다.
     Postcondition:
       - 근거 통과(grounding_below False) → None (기존 경로 계속 진행).
-      - 근거 미달 & g_rc < AE_MAX_REFINE → base_out 에 refine 지시 HumanMessage 를
+      - 근거 미달 & g_rc < AE_MAX_GROUNDING_REFINE → base_out 에 refine 지시 HumanMessage 를
         append 하고 grounding_refine_count 를 g_rc+1 로 설정(단조 증가). selector 가
         'model' 로 라우팅해 재작성을 유도한다(요구사항 8).
       - 근거 미달 & 상한 소진 → AE_GROUNDING_REJECT on 이면 final_text 를 한국어 거절

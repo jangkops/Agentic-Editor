@@ -2,11 +2,11 @@
 
 server.py 채팅 경로가 최종 응답 텍스트 + 검색 컨텍스트를 넘기면, 활성화된 단계만
 수행하고 `{answer, metadata}` 를 반환한다. 모든 단계는 환경변수로 on/off 되며,
-전부 off(기본)이면 응답을 그대로 통과시킨다(무회귀). 어떤 단계 실패도 비차단 폴백.
+마스터는 기본 자동 ON(미설정/빈값이면 활성, 0/false 로 끔), 기본 모드는 deferred 라 응답을 막지 않는다. 어떤 단계 실패도 비차단 폴백.
 
 플래그(env):
-  AE_ANSWER_QUALITY   : 마스터 스위치("1"이어야 하위 단계 동작). 기본 off.
-  AE_VERIFY           : 충실도 검증 활성("1"). 마스터가 on일 때만.
+  AE_ANSWER_QUALITY   : 마스터 스위치. 미설정/빈값이면 ON, 0/false 로 끔. (AE_VERIFY_MODE: deferred 기본 | inline)
+  AE_VERIFY           : 충실도 검증. 미설정이면 ON(gw 가 있을 때만 실행), 0 으로 끔. 마스터가 on일 때만.
   AE_VERIFY_THRESHOLD : 충실도 임계값(기본 0.7).
   AE_VERIFY_MODEL     : 검증에 쓸 경량 모델 id.
   AE_VERIFY_TIMEOUT_MS: 검증 타임아웃(ms, 기본 10000).
@@ -161,9 +161,9 @@ async def enhance_answer(answer: str, context_text: str, retrieved_chunks=None,
 
 
 def verify_mode(env: Optional[dict] = None) -> str:
-    """검증 실행 모드 결정: "off"(기본) | "inline" | "deferred".
+    """검증 실행 모드 결정: "deferred"(기본) | "inline" | "off".
 
-    - off: 검증 안 함(무회귀 기본). AE_ANSWER_QUALITY 미설정 시.
+    - off: 검증 안 함. AE_ANSWER_QUALITY=0/false 로 마스터를 끈 경우.
     - inline: 응답 최종 이벤트 전에 동기 대기(빠른 게이트웨이용). AE_VERIFY_MODE=inline.
     - deferred: [DONE] 이후 백그라운드 실행 후 저장(느린 게이트웨이용). AE_VERIFY_MODE=deferred.
 

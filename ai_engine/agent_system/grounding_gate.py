@@ -15,7 +15,7 @@ Phase 2b 산출물(Task 8.1). design.md "Phase 2b — Grounding_Gate" 섹션을 
 플래그(env):
   AE_ENABLE_GROUNDING_GATE : 게이트 마스터 스위치. 기본 off.
   AE_VERIFY_THRESHOLD      : 근거성 임계값(answer_quality 와 공유). 기본 0.7.
-  AE_MAX_REFINE            : grounding refine 상한. 기본 1.
+  AE_MAX_GROUNDING_REFINE  : grounding refine 상한. 기본 1 (Evaluator 의 AE_MAX_REFINE 과 별도).
   AE_GROUNDING_REJECT      : reject 모드 플래그. 기본 off.
 
 Requirements: 7.1, 7.2, 7.3, 7.4, 7.5, 10.2

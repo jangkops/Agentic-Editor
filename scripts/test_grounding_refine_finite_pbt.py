@@ -6,16 +6,16 @@ Feature: reasoning-perf-reliability, Property 7: Grounding_Gate refine 는 유�
 
 For any 지속적으로 근거 미달인 응답(faithfulness 점수가 임계값 미만, not degraded)에 대해:
     - `grounding_refine_count` 는 실행 전 구간에서 단조 비감소(monotonic non-decreasing).
-    - 카운터는 `AE_MAX_REFINE` 를 절대 초과하지 않는다.
-    - 게이트로 인한 model 재호출(refine 유도) 총 횟수는 `AE_MAX_REFINE` 이하로 유한 종료한다.
+    - 카운터는 `AE_MAX_GROUNDING_REFINE` 를 절대 초과하지 않는다.
+    - 게이트로 인한 model 재호출(refine 유도) 총 횟수는 `AE_MAX_GROUNDING_REFINE` 이하로 유한 종료한다.
     - 루프는 유한 반복(guard = N+2) 안에서 종료한다.
 
 대상 코드(실측 — 수정하지 않음):
 - ai_engine/agent_system/nodes/verify.py 의 `_apply_grounding_gate(state, final_text,
   answer_quality, base_out)` 를 verify-gate 루프의 순수 step 함수로 사용한다.
-    · grounding_below True & g_rc < AE_MAX_REFINE
+    · grounding_below True & g_rc < AE_MAX_GROUNDING_REFINE
         → base_out 에 refine 지시 HumanMessage + grounding_refine_count = g_rc+1 (refine 유도)
-    · grounding_below True & 상한 소진(g_rc >= AE_MAX_REFINE)
+    · grounding_below True & 상한 소진(g_rc >= AE_MAX_GROUNDING_REFINE)
         → final_text 를 경고/거절로 대체하되 grounding_refine_count 는 bump 하지 않음(종료)
     · grounding_below False → None(통과, 종료)
 - ai_engine/agent_system/graph_state.py 의 `_take_max_int`(monotonic MAX reducer)로 카운터
@@ -27,7 +27,7 @@ For any 지속적으로 근거 미달인 응답(faithfulness 점수가 임계값
 model 재호출 1회로 계수, 상한 소진/통과면(카운터 bump 없음 또는 None) 정지한다.
 
 생성기(hypothesis strategies):
-    - AE_MAX_REFINE ∈ {0,1,2,3}
+    - AE_MAX_GROUNDING_REFINE ∈ {0,1,2,3}
     - faithfulness 점수: 임계값(0.7) 미만 [0.0, 0.699...] (지속 미달 보장)
 
 실행: ai_engine/.venv/bin/python -m pytest scripts/test_grounding_refine_finite_pbt.py -q
@@ -47,7 +47,7 @@ from hypothesis import given, settings, strategies as st  # noqa: E402
 from ai_engine.agent_system.graph_state import _take_max_int  # noqa: E402
 from ai_engine.agent_system.nodes.verify import _apply_grounding_gate  # noqa: E402
 
-# AE_MAX_REFINE 후보: 0(비활성)·1(기본)·2·3.
+# AE_MAX_GROUNDING_REFINE 후보: 0(비활성)·1(기본)·2·3.
 _MAX_REFINE = st.sampled_from([0, 1, 2, 3])
 
 # faithfulness 점수: 임계값 0.7 미만(경계 0.0 포함) — 지속적 근거 미달을 보장한다.
@@ -60,19 +60,19 @@ _BELOW_SCORES = st.one_of(
 @settings(max_examples=200)
 @given(max_refine=_MAX_REFINE, f_score=_BELOW_SCORES)
 def test_grounding_refine_finite_and_monotonic(max_refine, f_score):
-    """지속 미달 응답에서 grounding_refine_count 는 단조·유한하며 model 재호출 <= AE_MAX_REFINE."""
+    """지속 미달 응답에서 grounding_refine_count 는 단조·유한하며 model 재호출 <= AE_MAX_GROUNDING_REFINE."""
     # 지속적으로 근거 미달인 answer_quality(faithfulness 유효 & score < threshold(0.7)).
     answer_quality = {"faithfulness": {"score": f_score, "degraded": False}}
     final_text = "원본 응답 본문(근거 미달 시나리오)."
 
-    # 게이트 on / reject off / AE_MAX_REFINE=N 를 env 에 주입(테스트 후 원복).
+    # 게이트 on / reject off / AE_MAX_GROUNDING_REFINE=N 를 env 에 주입(테스트 후 원복).
     saved = {
         k: os.environ.get(k)
-        for k in ("AE_ENABLE_GROUNDING_GATE", "AE_GROUNDING_REJECT", "AE_MAX_REFINE")
+        for k in ("AE_ENABLE_GROUNDING_GATE", "AE_GROUNDING_REJECT", "AE_MAX_GROUNDING_REFINE")
     }
     os.environ["AE_ENABLE_GROUNDING_GATE"] = "1"
     os.environ["AE_GROUNDING_REJECT"] = "0"
-    os.environ["AE_MAX_REFINE"] = str(max_refine)
+    os.environ["AE_MAX_GROUNDING_REFINE"] = str(max_refine)
     # AE_VERIFY_THRESHOLD 는 기본 0.7 을 사용(점수를 그 미만으로 생성했으므로 지속 미달).
     try:
         state = {"grounding_refine_count": 0}
@@ -120,16 +120,16 @@ def test_grounding_refine_finite_and_monotonic(max_refine, f_score):
                 f"(history={counter_history})"
             )
 
-        # (상한 준수) 카운터는 AE_MAX_REFINE 를 초과하지 않는다.
+        # (상한 준수) 카운터는 AE_MAX_GROUNDING_REFINE 를 초과하지 않는다.
         assert max(counter_history) <= max_refine, (
-            f"grounding_refine_count 가 AE_MAX_REFINE 초과: "
+            f"grounding_refine_count 가 AE_MAX_GROUNDING_REFINE 초과: "
             f"max={max(counter_history)} > {max_refine} (history={counter_history})"
         )
 
-        # (유한·최소 왕복) 게이트로 인한 model 재호출 총 횟수 <= AE_MAX_REFINE.
+        # (유한·최소 왕복) 게이트로 인한 model 재호출 총 횟수 <= AE_MAX_GROUNDING_REFINE.
         #  지속 미달 시나리오에서는 정확히 N 회 유도된다.
         assert reinvocations <= max_refine, (
-            f"model 재호출 횟수가 AE_MAX_REFINE 초과: {reinvocations} > {max_refine}"
+            f"model 재호출 횟수가 AE_MAX_GROUNDING_REFINE 초과: {reinvocations} > {max_refine}"
         )
         assert reinvocations == max_refine, (
             f"지속 미달인데 refine 유도 횟수 불일치: {reinvocations} != {max_refine}"

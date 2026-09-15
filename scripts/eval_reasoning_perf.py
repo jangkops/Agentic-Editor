@@ -586,14 +586,14 @@ def _collect_active_flags() -> Dict[str, Any]:
     except (TypeError, ValueError):
         threshold = 0.7
     try:
-        max_refine = int(os.environ.get("AE_MAX_REFINE", "1"))
+        max_refine = int(os.environ.get("AE_MAX_GROUNDING_REFINE", "1"))
     except (TypeError, ValueError):
         max_refine = 1
     return {
         "AE_ENABLE_ADAPTIVE_DEPTH": _env_bool("AE_ENABLE_ADAPTIVE_DEPTH", False),
         "AE_ENABLE_GROUNDING_GATE": _env_bool("AE_ENABLE_GROUNDING_GATE", False),
         "AE_LANGGRAPH_PARALLEL": _env_bool("AE_LANGGRAPH_PARALLEL", True),
-        "AE_MAX_REFINE": max_refine,
+        "AE_MAX_GROUNDING_REFINE": max_refine,
         "AE_VERIFY_THRESHOLD": threshold,
     }
 
