@@ -6,7 +6,7 @@
 
 ## Overview
 
-Agentic Editor는 AWS Bedrock Gateway를 통해 70+ LLM 모델을 단일/병렬로 호출하고, 합의를 도출하며, 프로젝트 코드를 인식하는 데스크톱 코드 에디터입니다.
+Agentic Editor는 AWS Bedrock Gateway를 통해 105+ LLM 모델을 단일/병렬로 호출하고, 합의를 도출하며, 프로젝트 코드를 인식하는 데스크톱 코드 에디터입니다.
 
 **핵심 차별점:**
 - 병렬 호출로 여러 모델의 답변을 동시에 비교
