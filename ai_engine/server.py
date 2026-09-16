@@ -8385,6 +8385,11 @@ async def _refresh_and_retry_gw(gw, aws_profile, bedrock_user):
         return False
 
 
+# 프로세스 기동 식별자. 메인 프로세스(SidecarWatcher)가 /health 의 boot_id 변화를 보고 사이드카 재기동을
+# 감지해 자격증명(/api/reset-cache 주입)을 즉시 다시 보낸다. 재기동 = 새 값.
+_BOOT_ID = uuid.uuid4().hex
+
+
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
     return {
@@ -8392,6 +8397,7 @@ async def health():
         "service": "ai-editor-engine",
         "timestamp": datetime.utcnow().isoformat(),
         "version": __version__,
+        "boot_id": _BOOT_ID,
     }
 
 
@@ -8822,7 +8828,7 @@ async def reset_cache(request: Request):
                 print(f"[Cache] Vertex 자동 활성화 시도 실패(무시): {str(_ve)[:160]}")
     except Exception:
         pass
-    return {"status": "ok", "message": "cache cleared"}
+    return {"status": "ok", "message": "cache cleared", "boot_id": _BOOT_ID}
 
 
 @app.post("/api/rag/index")

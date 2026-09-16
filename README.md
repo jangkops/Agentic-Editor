@@ -126,7 +126,7 @@ Mogam Works는 사내 데스크톱 코드 에디터입니다. Monaco 에디터�
 
 **어떻게 동작하나.**
 - 인증: SSO 자격증명 → (`bedrockUser`가 있으면) `arn:aws:iam::{account}:role/BedrockUser-{이름}`을 assume → 5분 캐시. API Gateway 요청은 서비스 `execute-api`, Lambda Function URL 요청은 서비스 `lambda`로 SigV4 서명.
-- 자격증명 경로: SSO 자격증명은 **메인 프로세스**가 `sso:get-credentials` 처리 중 사이드카 `/api/reset-cache`로 직접 주입하고([ipc-sso-handlers.js](electron/src/ipc-sso-handlers.js)), 렌더러에는 `{ok, injected, profile, region}`만 돌려줍니다. 렌더러 소스에 자격증명 필드가 없다는 사실은 `tests/unit/renderer-no-secrets.test.js`가 강제합니다. 같은 자격증명·같은 사이드카에는 1분 안에 다시 주입하지 않고, 로그인·토큰 만료·프로파일 전환 시에는 `force`로 다시 주입합니다. `/api/models`는 이때 함께 보관된 SSO 자격증명으로 카탈로그를 조회하므로 렌더러가 비밀을 보낼 필요가 없습니다.
+- 자격증명 경로: SSO 자격증명은 **메인 프로세스**가 `sso:get-credentials` 처리 중 사이드카 `/api/reset-cache`로 직접 주입하고([ipc-sso-handlers.js](electron/src/ipc-sso-handlers.js)), 렌더러에는 `{ok, injected, profile, region}`만 돌려줍니다. 렌더러 소스에 자격증명 필드가 없다는 사실은 `tests/unit/renderer-no-secrets.test.js`가 강제합니다. 같은 자격증명·같은 사이드카에는 1분 안에 다시 주입하지 않고, 로그인·토큰 만료·프로파일 전환 시에는 `force`로 다시 주입합니다. 사이드카가 재기동되면 메인의 `SidecarWatcher`([sidecar-watch.js](electron/src/sidecar-watch.js))가 `/health`의 `boot_id` 변화(정상 5초·다운 1초 간격 폴링)를 보고 마지막 프로파일의 자격증명을 다시 받아 **즉시** 재주입합니다. 원격 터널로 전환돼 다른 인스턴스가 응답할 때도 같습니다(`AE_SIDECAR_WATCH_MS`, `0`이면 끔). `/api/models`는 이때 함께 보관된 SSO 자격증명으로 카탈로그를 조회하므로 렌더러가 비밀을 보낼 필요가 없습니다.
 - 라우트 4종:
 
   | 라우트 | 용도 | 핵심 규칙 |
@@ -291,7 +291,7 @@ START → planner ──Send×N (현재 Wave)──► coding | media | research
 
 경량 도구 `web_search`/`search_papers`/`fetch_content`는 딥리서치 없이 단발 검색을 제공하며, 여러 provider 결과를 RRF로 융합하고 `recency_days`가 있으면 최신성 필터를 적용합니다. 검색 시작·종료는 `searchStatus` SSE로 채팅 옆 인디케이터에 "어느 provider에 어떤 질의 요약을 보냈는지"만 표시합니다(개별 URL·키는 표시하지 않음).
 
-셸 도구 `run_command`는 이 게이트 **밖**에 있습니다. 모델이 `curl` 등으로 외부에 직접 나가면 서버는 명령을 막지 않고 신호·대상 호스트·게이트 상태만 감사 로그로 남깁니다(명령 원문은 기록하지 않음, [server.py#L10225-L10254](ai_engine/server.py#L10225-L10254)). 셸을 막으면 npm·git·pip이 함께 죽기 때문에 차단 대신 가시성을 택했습니다.
+셸 도구 `run_command`는 이 게이트 **밖**에 있습니다. 모델이 `curl` 등으로 외부에 직접 나가면 서버는 명령을 막지 않고 신호·대상 호스트·게이트 상태만 감사 로그로 남깁니다(명령 원문은 기록하지 않음, [server.py#L10231-L10260](ai_engine/server.py#L10231-L10260)). 셸을 막으면 npm·git·pip이 함께 죽기 때문에 차단 대신 가시성을 택했습니다.
 
 **관련 파일.** `ai_engine/research/{backend,providers,normalize,dedup,rank,deep_research,models,config,security,eval_harness}.py`, `agent_system/subgraphs/research.py`, `src/components/{research-settings,search-indicator,research-panel}.js`, `electron/core/research-credentials.js`, 스펙 `.kiro/specs/deep-research-engine/`.
 
@@ -465,6 +465,7 @@ NO_RELOAD=1 npm run dev # 서버 auto-reload 끄기
 | | `AE_DISABLE_MERMAID` | — | mermaid.ink 경로 차단 |
 | 경로 | `AE_GENERATED_ROOT` | Electron이 `userData/generated` 주입 | 산출물·체크포인트·템플릿 루트 |
 | | `AE_SETTINGS_PATH` / `AE_USERDATA_PATH` / `AE_CHECKPOINT_DIR` | — | 오버라이드 |
+| 운영 | `AE_SIDECAR_WATCH_MS` | 5000 | 사이드카 `/health` 감시 주기(ms). 재기동(boot_id 변화) 시 자격증명 즉시 재주입. `0`이면 끔 |
 | 보안 | `AE_FS_GUARD` | 1 | 로컬 fs IPC 경로 가드. `0`이면 해제(비상용) |
 | 개발 | `NO_RELOAD` | — | uvicorn auto-reload 끄기 |
 
@@ -476,7 +477,7 @@ NO_RELOAD=1 npm run dev # 서버 auto-reload 끄기
 
 | Method | Path | 설명 |
 |---|---|---|
-| GET/HEAD | `/health` | 헬스 체크 |
+| GET/HEAD | `/health` | 헬스 체크. `boot_id`(기동 식별자)로 메인이 재기동을 감지 |
 | GET/POST | `/api/models` | 모델 카탈로그(텍스트·이미지·비디오·임베딩·리랭크) + capability 병합. POST 바디는 `{profile, bedrockUser}`이며 카탈로그 조회에는 `/api/reset-cache`로 주입된 SSO 자격증명을 사용 |
 | POST | `/api/reset-cache` | 게이트웨이 클라이언트 캐시 초기화 + 자격증명 재주입 |
 | POST | `/api/agents/classify-intent` | 의도 분류(haiku→sonnet 후보 체인) |

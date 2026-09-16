@@ -8,6 +8,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
+const { SidecarWatcher } = require('./sidecar-watch');
 
 /**
  * `localhost` 를 `127.0.0.1` 로 바꾼다. Electron 28 의 Node 18 `fetch`(undici) 는 Happy Eyeballs 가 없어
@@ -30,7 +31,7 @@ function _resolveApiBase() {
 /**
  * 기본 주입기: 자격증명을 사이드카 `/api/reset-cache` 로 보낸다(메인 -> 사이드카 직접).
  * 예전에는 렌더러가 자격증명을 받아 같은 요청을 보냈다. 이제 렌더러는 비밀 값을 보지 않는다.
- * @returns {Promise<boolean>} 사이드카가 2xx 로 받았는지
+ * @returns {Promise<{ok: boolean, bootId: string|null}>} 사이드카가 2xx 로 받았는지와 그 인스턴스의 boot_id
  */
 async function _defaultInjector({ base, profile, bedrockUser, credentials }) {
   try {
@@ -40,25 +41,107 @@ async function _defaultInjector({ base, profile, bedrockUser, credentials }) {
       body: JSON.stringify({ profile, bedrockUser: bedrockUser || '', credentials }),
       signal: AbortSignal.timeout(8000),
     });
-    return !!(res && res.ok);
+    if (!res || !res.ok) return { ok: false, bootId: null };
+    let bootId = null;
+    try {
+      const j = await res.json();
+      if (j && typeof j.boot_id === 'string' && j.boot_id) bootId = j.boot_id;
+    } catch (_e) { /* 본문 없음 — boot_id 미지원 서버 */ }
+    return { ok: true, bootId };
   } catch (e) {
     console.warn('[sso:get-credentials] sidecar injection failed:', e && e.message);
-    return false;
+    return { ok: false, bootId: null };
   }
 }
 
-const INJECT_TTL_MS = 60 * 1000;   // 시작 직후 연속 호출만 묶는다. 사이드카가 재기동돼 주입이 사라져도 1분 안에 다시 보낸다
+const INJECT_TTL_MS = 60 * 1000;   // 시작 직후 연속 호출만 묶는다. 사이드카 재기동은 SidecarWatcher 가 boot_id 로 감지해 즉시 재주입한다
+
+/** 주입기 반환값 정규화 — 테스트용 주입기는 boolean 을 돌려줄 수 있다. */
+function _normalizeInjectResult(r) {
+  if (r && typeof r === 'object') return { ok: !!r.ok, bootId: typeof r.bootId === 'string' && r.bootId ? r.bootId : null };
+  return { ok: !!r, bootId: null };
+}
+
+/** 기본 감시자 — `AE_SIDECAR_WATCH_MS`(기본 5000ms, `0` 이면 감시 없음). */
+function _createDefaultWatcher(resolveApiBase) {
+  const raw = process.env.AE_SIDECAR_WATCH_MS;
+  if (raw !== undefined && String(raw).trim() === '0') return null;
+  const ms = parseInt(raw || '', 10);
+  return new SidecarWatcher({ resolveApiBase, intervalMs: Number.isFinite(ms) && ms > 0 ? ms : 5000 });
+}
 
 /**
  * SSO IPC 핸들러 등록
  * @param {AwsSsoManager} ssoManager - SSO 관리자 인스턴스
- * @param {{injectCredentials?: Function, resolveApiBase?: Function}} [options] - 테스트용 주입점
+ * @param {{injectCredentials?: Function, resolveApiBase?: Function, watcher?: object|null}} [options]
+ *   테스트용 주입점. `watcher: null` 이면 사이드카 감시를 하지 않는다.
+ * @returns {{watcher: SidecarWatcher|null}}
  */
 function registerSsoHandlers(ssoManager, options) {
   const opts = options || {};
   const injector = typeof opts.injectCredentials === 'function' ? opts.injectCredentials : _defaultInjector;
   const resolveApiBase = typeof opts.resolveApiBase === 'function' ? opts.resolveApiBase : _resolveApiBase;
-  const injectState = { key: null, at: 0 };
+  // 마지막 주입 상태 — 어떤 (프로파일, 사용자, 자격증명)을 어느 사이드카 인스턴스(boot_id)에 넣었는지
+  const injectState = { key: null, at: 0, bootId: null, profile: null, bedrockUser: null };
+  const watcher = opts.watcher === null ? null : (opts.watcher || _createDefaultWatcher(resolveApiBase));
+
+  function makeKey(base, profile, bedrockUser, creds) {
+    return crypto.createHash('sha256')
+      .update([base, profile, bedrockUser, creds.AWS_ACCESS_KEY_ID, creds.AWS_SESSION_TOKEN || ''].join(' '))
+      .digest('hex');
+  }
+
+  /** 주입 실행 + 상태 갱신. observedBootId 는 감시자가 본 인스턴스(응답에 boot_id 가 없을 때 대체). */
+  async function performInjection({ base, profile, bedrockUser, creds, key, observedBootId }) {
+    const r = _normalizeInjectResult(await injector({ base, profile, bedrockUser, credentials: creds }));
+    if (r.ok) {
+      injectState.key = key;
+      injectState.at = Date.now();
+      injectState.bootId = r.bootId || observedBootId || null;
+      injectState.profile = profile;
+      injectState.bedrockUser = bedrockUser;
+    }
+    return r.ok;
+  }
+
+  // 사이드카 재기동(인스턴스 교체) → 마지막으로 주입한 프로파일의 자격증명을 다시 받아 즉시 재주입.
+  // 렌더러의 다음 호출을 기다리지 않는다(그동안 게이트웨이 호출이 프로파일 폴백으로 흘러가는 것을 막는다).
+  let reinjecting = false;
+  async function reinject(reason, observedBootId) {
+    if (reinjecting || !injectState.profile) return false;
+    reinjecting = true;
+    try {
+      const profile = injectState.profile;
+      const bedrockUser = injectState.bedrockUser || '';
+      const creds = await ssoManager.getCredentials(profile);
+      if (!creds || !creds.AWS_ACCESS_KEY_ID) {
+        console.warn(`[sso] 사이드카 재기동 감지(${reason}) — ${profile} 자격증명 없음, 재주입 건너뜀`);
+        return false;
+      }
+      const base = resolveApiBase();
+      const ok = await performInjection({ base, profile, bedrockUser, creds, key: makeKey(base, profile, bedrockUser, creds), observedBootId });
+      console.log(`[sso] 사이드카 재기동 감지(${reason}) → ${profile} 자격증명 재주입 ${ok ? '성공' : '실패'}`);
+      return ok;
+    } catch (e) {
+      console.warn('[sso] 재주입 실패:', e && e.message);
+      return false;
+    } finally {
+      reinjecting = false;
+    }
+  }
+
+  if (watcher) {
+    watcher.on('healthy', ({ bootId, recovered }) => {
+      if (!injectState.profile) return;                    // 아직 주입한 적 없음 — 렌더러의 첫 요청이 처리한다
+      if (bootId) {
+        if (injectState.bootId === bootId) return;         // 우리가 주입한 그 인스턴스가 그대로 살아 있다
+        reinject(`boot ${injectState.bootId || '?'} -> ${bootId}`, bootId);
+      } else if (recovered) {
+        reinject('down -> up', null);                      // boot_id 를 모르는 사이드카는 복구 시점에만 재주입
+      }
+    });
+    if (typeof watcher.start === 'function') watcher.start();
+  }
   /**
    * SSO 프로필 목록
    */
@@ -97,14 +180,14 @@ function registerSsoHandlers(ssoManager, options) {
       const o = callOpts && typeof callOpts === 'object' ? callOpts : {};
       const bedrockUser = typeof o.bedrockUser === 'string' ? o.bedrockUser : '';
       const base = resolveApiBase();
-      const key = crypto.createHash('sha256')
-        .update([base, profile, bedrockUser, creds.AWS_ACCESS_KEY_ID, creds.AWS_SESSION_TOKEN || ''].join(' '))
-        .digest('hex');
+      const key = makeKey(base, profile, bedrockUser, creds);
+      // 감시자가 본 인스턴스가 우리가 주입한 인스턴스와 다르면(재기동) dedupe 를 건너뛴다.
+      const observed = watcher ? watcher.lastBootId : null;
+      const sameInstance = !observed || !injectState.bootId || observed === injectState.bootId;
+      const fresh = injectState.key === key && (Date.now() - injectState.at) < INJECT_TTL_MS && sameInstance;
       let injected;
-      const fresh = injectState.key === key && (Date.now() - injectState.at) < INJECT_TTL_MS;
       if (o.force || !fresh) {
-        injected = await injector({ base, profile, bedrockUser, credentials: creds });
-        if (injected) { injectState.key = key; injectState.at = Date.now(); }
+        injected = await performInjection({ base, profile, bedrockUser, creds, key, observedBootId: observed });
       } else {
         injected = true;
       }
@@ -191,6 +274,8 @@ function registerSsoHandlers(ssoManager, options) {
       return null;
     }
   });
+
+  return { watcher };
 }
 
-module.exports = { registerSsoHandlers, _toIpv4Loopback };
+module.exports = { registerSsoHandlers, _toIpv4Loopback, _normalizeInjectResult };
