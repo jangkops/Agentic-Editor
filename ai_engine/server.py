@@ -8,7 +8,7 @@ import subprocess
 import re
 from collections import deque
 from datetime import datetime
-from typing import Optional  # py3.12/3.13: render_info 어노테이션(Optional[dict])이 def 시점에 평가됨
+from typing import Any, Optional  # py3.11~3.13: 어노테이션이 def 시점에 평가된다(3.14는 지연 평가라 누락이 드러나지 않음)
 
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse

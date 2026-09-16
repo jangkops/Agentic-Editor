@@ -56,9 +56,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r ai_engine/requirements.txt
-          python -m pip install pytest hypothesis
+          python -m pip install pytest hypothesis ruff
       - name: Syntax gate (whole tree must parse on this interpreter)
         run: python -m compileall -q ai_engine scripts
+      # 3.14 개발 환경은 어노테이션을 지연 평가해 미정의 이름(예: typing.Any 누락)이 드러나지 않는다.
+      # 3.11~3.13 에서는 def 시점 NameError 로 import 가 죽으므로 정적으로 먼저 잡는다.
+      - name: Undefined-name gate (ruff F821)
+        run: python -m ruff check --select F821 --output-format concise ai_engine scripts
       - name: Release-critical imports (same gate as release.yml)
         run: python scripts/check_frozen_imports.py
       - name: Import smoke — the sidecar module must import on this interpreter
