@@ -126,7 +126,7 @@ Mogam Works는 사내 데스크톱 코드 에디터입니다. Monaco 에디터�
 
 **어떻게 동작하나.**
 - 인증: SSO 자격증명 → (`bedrockUser`가 있으면) `arn:aws:iam::{account}:role/BedrockUser-{이름}`을 assume → 5분 캐시. API Gateway 요청은 서비스 `execute-api`, Lambda Function URL 요청은 서비스 `lambda`로 SigV4 서명.
-- 자격증명 경로: SSO 자격증명은 **메인 프로세스**가 `sso:get-credentials` 처리 중 사이드카 `/api/reset-cache`로 직접 주입하고([ipc-sso-handlers.js](electron/src/ipc-sso-handlers.js)), 렌더러에는 `{ok, injected, profile, region}`만 돌려줍니다. 렌더러 소스에 자격증명 필드가 없다는 사실은 `tests/unit/renderer-no-secrets.test.js`가 강제합니다. 같은 자격증명·같은 사이드카에는 1분 안에 다시 주입하지 않고, 로그인·토큰 만료·프로파일 전환 시에는 `force`로 다시 주입합니다. 사이드카가 재기동되면 메인의 `SidecarWatcher`([sidecar-watch.js](electron/src/sidecar-watch.js))가 `/health`의 `boot_id` 변화(정상 5초·다운 1초 간격 폴링)를 보고 마지막 프로파일의 자격증명을 다시 받아 **즉시** 재주입합니다. 원격 터널로 전환돼 다른 인스턴스가 응답할 때도 같습니다(`AE_SIDECAR_WATCH_MS`, `0`이면 끔). `/api/models`는 이때 함께 보관된 SSO 자격증명으로 카탈로그를 조회하므로 렌더러가 비밀을 보낼 필요가 없습니다.
+- 자격증명 경로: SSO 자격증명은 **메인 프로세스**가 `sso:get-credentials` 처리 중 사이드카 `/api/reset-cache`로 직접 주입하고([ipc-sso-handlers.js](electron/src/ipc-sso-handlers.js)), 렌더러에는 `{ok, injected, profile, region}`만 돌려줍니다. 렌더러 소스에 자격증명 필드가 없다는 사실은 `tests/unit/renderer-no-secrets.test.js`가 강제합니다. 같은 자격증명·같은 사이드카에는 1분 안에 다시 주입하지 않고, 로그인·토큰 만료·프로파일 전환 시에는 `force`로 다시 주입합니다. 사이드카가 재기동되면 메인의 `SidecarWatcher`([sidecar-watch.js](electron/src/sidecar-watch.js))가 `/health`의 `boot_id` 변화(정상 5초·다운 1초 간격 폴링)를 보고 마지막 프로파일의 자격증명을 다시 받아 **즉시** 재주입합니다. 원격 터널로 전환돼 다른 인스턴스가 응답할 때도 같습니다(`AE_SIDECAR_WATCH_MS`, `0`이면 끔). `/api/models`는 이때 함께 보관된 SSO 자격증명으로 카탈로그를 조회하므로 렌더러가 비밀을 보낼 필요가 없습니다. 게이트웨이 SSE 스트림은 자격증명 만료(HTTP 403 본문 또는 in-band error)를 만나면 갱신 후 정확히 1회 재시도합니다(`converse` 경로와 같은 정책, 2026-09-16).
 - 라우트 4종:
 
   | 라우트 | 용도 | 핵심 규칙 |
@@ -236,7 +236,7 @@ START → planner ──Send×N (현재 Wave)──► coding | media | research
 3. **LLM faithfulness**: 근거(12,000자)와 답변(8,000자)을 게이트웨이 모델에 보내 `SCORE=`를 받음. 10초 타임아웃, 실패 시 `degraded=true`.
 게이트웨이 모델 호출이 실측 110~285초까지 걸리는 경우가 있어 기본은 **deferred**: 서버가 `{"qualityPending": id}`만 먼저 보내고 백그라운드로 계산한 뒤 클라이언트가 `GET /api/answer-quality`로 폴링합니다.
 
-**대화 메모리(`conversation_memory.py`).** 최근 10개 메시지를 20,000자 예산 안에서 역순 선택(메시지당 2,000자, 이미지 블록 5개)하고 Bedrock의 user/assistant 교대 규칙을 정리합니다. 12개 이상 쌓이면 Haiku 4.5로 3,000자 요약 + 핵심 사실 10개를 체크포인트로 만들어 첫 user 메시지에 주입합니다. 렌더러는 별도로 16개 메시지 또는 60,000자를 넘으면 `POST /api/conversation/handoff`로 요약을 받아 새 세션에서 이어갑니다.
+**대화 메모리(`conversation_memory.py`).** 최근 10개 메시지를 20,000자 예산 안에서 역순 선택(메시지당 2,000자, 이미지 블록 5개)하고 Bedrock의 user/assistant 교대 규칙을 정리합니다. 12개 이상 쌓이면 Haiku 4.5로 3,000자 요약 + 핵심 사실 10개를 체크포인트로 만들어 첫 user 메시지에 주입합니다. 체크포인트는 `userData/memory/conv_<session>.json`(dev: `~/.agentic-editor/memory`, `AE_MEMORY_DIR`로 변경)에 0600 권한으로 원자적으로 저장되며 저장 전 자격증명 형태의 문자열은 `[REDACTED]`로 지웁니다 — 2026-09-16 이전에는 프로세스 메모리에만 있어 사이드카 재기동 때 사라졌습니다. 렌더러는 별도로 16개 메시지 또는 60,000자를 넘으면 `POST /api/conversation/handoff`로 요약을 받아 새 세션에서 이어갑니다.
 
 **판정 알고리즘 상세 (코드 링크).**
 
@@ -291,7 +291,7 @@ START → planner ──Send×N (현재 Wave)──► coding | media | research
 
 경량 도구 `web_search`/`search_papers`/`fetch_content`는 딥리서치 없이 단발 검색을 제공하며, 여러 provider 결과를 RRF로 융합하고 `recency_days`가 있으면 최신성 필터를 적용합니다. 검색 시작·종료는 `searchStatus` SSE로 채팅 옆 인디케이터에 "어느 provider에 어떤 질의 요약을 보냈는지"만 표시합니다(개별 URL·키는 표시하지 않음).
 
-셸 도구 `run_command`는 이 게이트 **밖**에 있습니다. 모델이 `curl` 등으로 외부에 직접 나가면 서버는 명령을 막지 않고 신호·대상 호스트·게이트 상태만 감사 로그로 남깁니다(명령 원문은 기록하지 않음, [server.py#L10231-L10260](ai_engine/server.py#L10231-L10260)). 셸을 막으면 npm·git·pip이 함께 죽기 때문에 차단 대신 가시성을 택했습니다.
+셸 도구 `run_command`는 이 게이트 **밖**에 있습니다. 모델이 `curl` 등으로 외부에 직접 나가면 서버는 명령을 막지 않고 신호·대상 호스트·게이트 상태만 감사 로그로 남깁니다(명령 원문은 기록하지 않음, [server.py#L10246-L10275](ai_engine/server.py#L10246-L10275)). 셸을 막으면 npm·git·pip이 함께 죽기 때문에 차단 대신 가시성을 택했습니다.
 
 **관련 파일.** `ai_engine/research/{backend,providers,normalize,dedup,rank,deep_research,models,config,security,eval_harness}.py`, `agent_system/subgraphs/research.py`, `src/components/{research-settings,search-indicator,research-panel}.js`, `electron/core/research-credentials.js`, 스펙 `.kiro/specs/deep-research-engine/`.
 
@@ -465,6 +465,7 @@ NO_RELOAD=1 npm run dev # 서버 auto-reload 끄기
 | | `AE_DISABLE_MERMAID` | — | mermaid.ink 경로 차단 |
 | 경로 | `AE_GENERATED_ROOT` | Electron이 `userData/generated` 주입 | 산출물·체크포인트·템플릿 루트 |
 | | `AE_SETTINGS_PATH` / `AE_USERDATA_PATH` / `AE_CHECKPOINT_DIR` | — | 오버라이드 |
+| 운영 | `AE_MEMORY_DIR` | — | 대화 요약 체크포인트 저장 폴더. 기본 `dirname(AE_GENERATED_ROOT)/memory` → `~/.agentic-editor/memory` |
 | 운영 | `AE_SIDECAR_WATCH_MS` | 5000 | 사이드카 `/health` 감시 주기(ms). 재기동(boot_id 변화) 시 자격증명 즉시 재주입. `0`이면 끔 |
 | 보안 | `AE_FS_GUARD` | 1 | 로컬 fs IPC 경로 가드. `0`이면 해제(비상용) |
 | 개발 | `NO_RELOAD` | — | uvicorn auto-reload 끄기 |
@@ -569,7 +570,8 @@ agentic-editor/
   `scripts/test_test_hygiene_no_module_global_clobber.py`는 테스트가 import 시점에 다른 모듈의 전역을 덮어쓰는지 AST로 검사하는 위생 가드입니다. 셸 인용 회귀 테스트는 `tests/unit/remote/bridge-search-quoting.test.js`(원격 브리지)와 `scripts/test_execute_tool_search_files_quoting.py`(로컬 도구)에, git IPC의 argv 실행은 `tests/unit/ipc-git-handlers.test.js`에, 포트포워딩 헬스 게이트는 `tests/unit/remote/forwarder-mount.test.js`에, SSRF 가드는 `scripts/test_research_ssrf_guard.py`에, 파일 접근 가드는 `tests/unit/path-guard.test.js`·`tests/unit/ipc-fs-handlers-guard.test.js`에, 자격증명 비노출은 `tests/unit/ipc-sso-credentials.test.js`·`tests/unit/renderer-no-secrets.test.js`·`scripts/test_api_models_catalog_creds.py`에 있습니다.
 - **산출물 감사**: `scripts/audit_pptx_native_density.py`, `audit_pptx_textbox_overlap.py` 등이 생성된 PPTX의 밀도·겹침·경계를 기계 판정합니다. `scripts/eval_research_quality.py`는 골든 셋 대비 리서치 품질 회귀를 검사합니다.
 - **스펙 기반 개발(`.kiro/specs/`)**: 기능마다 `requirements.md`(EARS 형식) → `design.md`(Correctness Properties 포함) → `tasks.md`(체크박스, `*`는 선택 테스트) 순서로 진행합니다. 버그 수정 스펙은 `bugfix.md`와 3단 테스트(`*_bug_condition`: 수정 전 실패해야 함 → `*_fix_pbt`: 수정 후 통과 → `*_preservation_pbt`: 기존 동작 보존)를 씁니다.
-- CI(`.github/workflows/release.yml`)는 태그 `v*` 푸시 시 macOS/Windows 매트릭스에서 필수 모듈 import 게이트 → PyInstaller 동결 → electron-builder 빌드를 수행합니다(테스트 실행 스텝은 아직 없음, 11장).
+- 테스트 CI(`.github/workflows/test.yml`, 2026-09-16 신설)는 `gamma`/`main` push와 PR마다 Jest 전체와, 릴리스 인터프리터와 같은 Python 3.11(및 3.12)에서 `compileall` → `ruff F821`(미정의 이름) → `check_frozen_imports` → `import ai_engine.server` 스모크 → `scripts/ci_offline_tests.txt`의 오프라인 pytest 집합을 실행합니다. 네트워크(fastembed 모델)·Chrome·저장소 venv를 전제하는 테스트는 목록에서 제외돼 있습니다.
+- 릴리스 CI(`.github/workflows/release.yml`)는 태그 `v*` 푸시 시 macOS/Windows 매트릭스에서 필수 모듈 import 게이트 → PyInstaller 동결 → electron-builder 빌드를 수행합니다(자체 테스트 스텝은 없음 — 위 테스트 CI가 선행 게이트).
 
 ---
 
@@ -598,8 +600,8 @@ DMG와 `scripts/install-mac.command`를 같은 폴더에 두고 스크립트를 
 - **원격 SSH**: 파일·터미널·명령 실행은 동작합니다. 원격 `ai_engine`으로의 포트 포워딩은 호출 규약 오류로 2026-05 이후 한 번도 열리지 않았던 것을 고쳤고, 이제 터널 너머 `/health`가 2xx일 때만 라우팅을 전환합니다(실패하면 로컬 엔진 유지). **실제 원격 호스트에서의 종단 검증은 아직 하지 않았습니다.** 자동 재연결은 미구현이며 끊김 시 로컬로 폴백합니다.
 - **effort(추론 강도) 컨트롤**: 카탈로그에 effort 계약이 선언된 모델에서만 표시됩니다. 현재 운영자 카탈로그에는 선언이 없어 UI가 나타나지 않습니다.
 - **기본 채팅 경로(graph-stream)**: `thinking`·`answerQuality` SSE는 아직 `run-stream`/`run-agent`에서만 방출됩니다.
-- **Python 버전**: 개발·검증은 3.14에서 이루어졌습니다. 3.12/3.13에서 import를 막던 `typing.Optional` 누락은 고쳤지만, 3.11~3.13에서의 실제 기동은 아직 검증하지 않았습니다.
-- **테스트 자동화**: `npm test`는 `tests/unit` JS만 실행하고, `scripts/test_*.py`는 수동 실행 자산입니다. 릴리스 CI에는 테스트 스텝이 없습니다.
+- **Python 버전**: 개발 환경은 3.14입니다. 릴리스 CI가 쓰는 3.11에서 import를 막던 3.12 전용 f-string 문법 2곳과 `typing.Any`·`Optional` 누락은 2026-09-16까지 모두 고쳤고, 테스트 CI가 3.11·3.12에서 파싱·미정의 이름·import 스모크를 매 push 확인합니다. 3.14는 어노테이션을 지연 평가해 이런 누락이 로컬에서 드러나지 않으므로 CI 게이트가 유일한 방어선입니다. 실제 PyInstaller 동결 빌드(릴리스 CI)는 아직 실행된 적이 없습니다.
+- **테스트 자동화**: 테스트 CI(`test.yml`)가 Jest 전체와 오프라인 pytest 집합을 매 push 실행합니다. `scripts/test_*.py` 전체(261파일)는 한 번에 돌리면 네트워크 대기로 멈춰 파일별 실행이 필요하고, PPTX 레이아웃 계열 13파일 30건은 현재 엔진과 기대값이 어긋나 판정 대기 중입니다. 릴리스 CI 자체에는 테스트 스텝이 없습니다.
 - **모델**: Claude Opus 계열은 게이트웨이 스트리밍 경로에서 지원되지 않아 계획·평가 노드에는 Sonnet 4.5를 사용합니다.
 - **오프라인**: Monaco 에디터는 CDN에서 로드되므로 오프라인에서는 에디터가 뜨지 않습니다.
 
