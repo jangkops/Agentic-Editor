@@ -587,6 +587,8 @@ npm run dist                                        # build:python + electron-bu
 ### macOS 설치(수신자)
 DMG와 `scripts/install-mac.command`를 같은 폴더에 두고 스크립트를 실행하면 마운트 → `/Applications` 복사 → ad-hoc 서명 → quarantine 제거를 수행합니다. 미서명 빌드라 첫 실행 시 Gatekeeper 경고가 있을 수 있어 스크립트로 우회합니다. 메신저 전달 시 DMG를 zip으로 재압축하지 마세요.
 
+상세 절차 — 릴리스 CI(태그 `v*`), 서명·공증, 수신자 패키지 구성, 로그인 전제조건, 문제 해결, 롤백 — 는 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)에 있습니다.
+
 ---
 
 ## 11. 현재 상태와 알려진 제한
