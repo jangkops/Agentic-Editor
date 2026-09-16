@@ -250,7 +250,7 @@ def test_default_env_realpath_produces_editable_audit_passing_deck():
             "AE_PREFER_VERTEX_IMAGE": "0",
             "AE_ENABLE_VERTEX_IMAGE": "0",
             # 기본 활성 검증: AE_NATIVE_LAYOUT_RENDER 는 미설정(제거)해 기본값 사용.
-            "AE_NATIVE_LAYOUT_RENDER": None,
+            "AE_NATIVE_LAYOUT_RENDER": "1",  # 2026-09-16: 기본값이 OFF(B방향)로 바뀜 — 게이트웨이 픽 네이티브 라우팅은 명시 옵트인 경로
         }
         result, pick = _run_generate(tool_input, tmp, env)
         pptx_path = _abs_from_result(result, tmp)
@@ -282,7 +282,7 @@ def test_non_seven_key_layouts_route_native_not_baked():
             "AE_ENABLE_HTML_SLIDES": "1",
             "AE_PREFER_VERTEX_IMAGE": "0",
             "AE_ENABLE_VERTEX_IMAGE": "0",
-            "AE_NATIVE_LAYOUT_RENDER": None,
+            "AE_NATIVE_LAYOUT_RENDER": "1",  # 2026-09-16: 기본값이 OFF(B방향)로 바뀜 — 게이트웨이 픽 네이티브 라우팅은 명시 옵트인 경로
         }
         result, pick = _run_generate(tool_input, tmp, env)
         pptx_path = _abs_from_result(result, tmp)
@@ -390,7 +390,7 @@ def test_caller_native_diagram_suppresses_backdrop_and_no_overlap():
             "AE_PREFER_VERTEX_IMAGE": "0",
             "AE_ENABLE_VERTEX_IMAGE": "0",
             "AE_ENABLE_VERTEX_BG": "0",
-            "AE_NATIVE_LAYOUT_RENDER": None,
+            "AE_NATIVE_LAYOUT_RENDER": "1",  # 2026-09-16: 기본값이 OFF(B방향)로 바뀜 — 게이트웨이 픽 네이티브 라우팅은 명시 옵트인 경로
         }
         result, _pick = _run_generate(tool_input, tmp, env)
         pptx_path = _abs_from_result(result, tmp)
@@ -595,7 +595,7 @@ def test_pick_failure_variants_still_produce_editable_audit_passing_deck(pick_fa
             "AE_ENABLE_HTML_SLIDES": "1",   # 프로덕션 동일 마스터 게이트 ON
             "AE_PREFER_VERTEX_IMAGE": "0",
             "AE_ENABLE_VERTEX_IMAGE": "0",
-            "AE_NATIVE_LAYOUT_RENDER": None,  # 기본 활성
+            "AE_NATIVE_LAYOUT_RENDER": "1",  # 2026-09-16: 기본값이 OFF(B방향)로 바뀜 — 게이트웨이 픽 네이티브 라우팅은 명시 옵트인 경로  # 기본 활성
         }
         pick = pick_factory()
         result = _run_generate_with_pick(tool_input, tmp, env, pick, bake_success=True)

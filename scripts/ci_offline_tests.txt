@@ -20,6 +20,17 @@ scripts/test_health_boot_id.py
 scripts/test_model_id_resolution_and_hide.py
 scripts/test_openai_security_structure.py
 scripts/test_openai_sync_body_no_modelid_pbt.py
+# PPTX 하이브리드 렌더(pptx-ultra-quality-hybrid-render) — 순수 결정 함수 PBT + 실경로 헤르메틱 통합(네트워크·Chrome mock)
+scripts/test_pptx_hybrid_render_flag_pbt.py
+scripts/test_pptx_hybrid_render_plan_pbt.py
+scripts/test_pptx_hybrid_render_prompt_pbt.py
+scripts/test_pptx_hybrid_render_content_editable_pbt.py
+scripts/test_pptx_hybrid_render_wiring_pbt.py
+scripts/test_pptx_quality_vertex_images_render_report.py
+scripts/test_pptx_quality_vertex_images_integration.py
+scripts/test_pptx_direct_native_diagram.py
+scripts/test_pptx_cover_toc.py
+scripts/test_native_density_realpath_nochrome.py
 scripts/test_research_ssrf_guard.py
 scripts/test_shell_egress_audit.py
 scripts/test_test_hygiene_no_module_global_clobber.py

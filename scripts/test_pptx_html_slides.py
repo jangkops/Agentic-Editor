@@ -36,6 +36,19 @@ _PNG = bytes.fromhex(
     "890000000a49444154789c6360000002000154a24f9f0000000049454e44ae426082")
 
 
+async def _img_gen_disabled(*_a, **_k):
+    """imagePrompt 가 있는 visual 슬라이드가 Bedrock 이미지 생성(네트워크)으로 빠지지 않게 한다."""
+    return json.dumps({"error": "disabled in test"})
+
+
+async def _fake_render_png(html, output_path, width=1920, height=1080, timeout=30, **_k):
+    """표지 HTML→PNG(Chrome/브리지) 대체 — 유효한 PNG 를 기록한다."""
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    with open(output_path, "wb") as f:
+        f.write(_PNG)
+    return {"ok": True}
+
+
 def _cleanup(res):
     ap = res.get("absPath")
     if ap and os.path.isfile(ap):
@@ -66,7 +79,7 @@ def test_html_slides_used_when_bridge_available(tmp_path, monkeypatch):
 
     calls = {"n": 0}
 
-    async def _fake_html(gw, model, heading, body, ctx, project_path, style_profile=None):
+    async def _fake_html(gw, model, heading, body, ctx, project_path, style_profile=None, **_k):
         calls["n"] += 1
         fn = gen / f"html-slide-{calls['n']}.png"
         fn.write_bytes(_PNG)
@@ -78,9 +91,16 @@ def test_html_slides_used_when_bridge_available(tmp_path, monkeypatch):
     monkeypatch.setattr(nd, "build_native_diagram",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("native diagram should not run")))
 
+    # 하이브리드 렌더(R1.2/R1.6): HTML 풀블리드는 Vertex 비활성 상태의 cover/section/visual 슬라이드 경로다.
+    # 구조형(아키텍처/흐름)은 편집 가능 네이티브 도형이 주 렌더러(R1.4)라 여기서는 visual 슬라이드로 검증한다.
+    monkeypatch.setattr(server, "_tool_generate_image", _img_gen_disabled)
+    monkeypatch.setattr(server, "_render_html_slide_to_png", _fake_render_png)
+    monkeypatch.setenv("AE_PREFER_VERTEX_IMAGE", "0")   # Vertex 비활성 → visual 은 HTML 풀블리드 경로(R1.6)
     slides = [
-        {"title": "아키텍처", "bullets": ["프론트 -> 백엔드 -> DB"]},
-        {"title": "데이터 흐름", "bullets": ["입력 -> 처리 -> 출력"]},
+        {"title": "브랜드 비주얼", "bullets": ["신뢰를 최우선으로"],
+         "imagePrompt": "a modern corporate office photograph, wide angle"},
+        {"title": "팀 문화", "bullets": ["함께 성장"],
+         "imagePrompt": "a bright collaborative workspace photograph"},
     ]
     out = asyncio.run(server._tool_generate_pptx({"title": "프로젝트 개요", "slides": slides}, ""))
     res = json.loads(out)
@@ -91,13 +111,18 @@ def test_html_slides_used_when_bridge_available(tmp_path, monkeypatch):
         assert len(prs.slides._sldIdLst) == 3
         slide_w, slide_h = prs.slide_width, prs.slide_height
         for i, sl in enumerate(prs.slides):
+            if i == 0:
+                # 표지: 콘텐츠를 구운 HTML 표지 풀블리드는 기본 미채택(task20 수정 B, AE_COVER_HTML_FULLBLEED=1 옵트인) —
+                # 표지는 편집 가능 네이티브로 남는다. 본문 visual 슬라이드만 HTML 풀블리드를 검증한다(2026-09-16 갱신).
+                continue
             pics = [sh for sh in sl.shapes if sh.shape_type == MSO_SHAPE_TYPE.PICTURE]
             assert pics, f"슬라이드 {i}에 HTML 풀블리드 그림 없음"
             # 풀블리드: 슬라이드 크기의 ~95% 이상 덮는 그림이 하나 이상
             full = [p for p in pics if p.width >= slide_w * 0.95 and p.height >= slide_h * 0.95]
             assert full, f"슬라이드 {i} 그림이 풀블리드가 아님"
         # 표지(1) + 콘텐츠(2) = 3회 HTML 렌더 호출
-        assert calls["n"] == 3, f"HTML 렌더 호출 수={calls['n']} (기대 3)"
+        # 표지는 별도 렌더러(_render_html_slide_to_png)를 쓰고 기본 미채택이라 섹션 렌더 호출은 본문 visual 2장에 대해서만 일어난다(2026-09-16 갱신).
+        assert calls["n"] == 2, f"HTML 렌더 호출 수={calls['n']} (기대 2: 본문 visual 슬라이드)"
     finally:
         _cleanup(res)
 
@@ -163,7 +188,7 @@ def test_template_uses_html_with_style_profile(tmp_path, monkeypatch):
 
     seen = {"n": 0, "profiles": []}
 
-    async def _fake_html(gw, model, heading, body, ctx, project_path, style_profile=None):
+    async def _fake_html(gw, model, heading, body, ctx, project_path, style_profile=None, **_k):
         seen["n"] += 1
         seen["profiles"].append(style_profile)
         fn = gen / f"h-{seen['n']}.png"
@@ -174,7 +199,12 @@ def test_template_uses_html_with_style_profile(tmp_path, monkeypatch):
 
     style_profile = {"primaryColor": "#0B5394", "textColor": "#1A1A1A",
                      "headingFont": "Pretendard", "bodyFont": "Pretendard"}
-    slides = [{"title": "흐름", "bullets": ["A -> B"]}, {"title": "구조", "bullets": ["X"]}]
+    # 구조형 슬라이드는 하이브리드에서 네이티브 도형(R1.4)이므로 HTML 렌더 검증에는 visual 슬라이드를 쓴다.
+    monkeypatch.setattr(server, "_tool_generate_image", _img_gen_disabled)
+    monkeypatch.setattr(server, "_render_html_slide_to_png", _fake_render_png)
+    monkeypatch.setenv("AE_PREFER_VERTEX_IMAGE", "0")   # Vertex 비활성 → visual 은 HTML 풀블리드 경로(R1.6)
+    slides = [{"title": "비전", "bullets": ["신뢰"], "imagePrompt": "abstract corporate vision visual"},
+              {"title": "문화", "bullets": ["협업"], "imagePrompt": "team collaboration photograph"}]
     out = asyncio.run(server._tool_generate_pptx(
         {"title": "덱", "slides": slides,
          "templatePath": str(tpl_path), "styleProfile": style_profile}, ""))

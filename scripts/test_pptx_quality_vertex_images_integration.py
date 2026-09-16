@@ -330,11 +330,8 @@ def test_integration_mixed_deck_html_on_coexistence():
         "HTML 활성 시에도 Vertex 생성이 억제되면 안 됨(공존 게이트) — "
         f"vertex.generate 호출 {fake.calls}회")
 
-    # The Vertex hero was fed into the HTML section renderer for non-structural
-    # slides (proof the image is consumed by HTML compositing, not discarded).
-    non_empty_heroes = [h for h in captured_heroes if h]
-    assert non_empty_heroes, (
-        "비구조형 슬라이드의 Vertex 히어로 이미지가 HTML 섹션 렌더러로 전달돼야 함(합성)")
+    # 하이브리드 렌더(2026-09-16 갱신): content 슬라이드의 Vertex 히어로는 HTML 섹션 렌더러가 아니라
+    # 편집 가능 네이티브 경로의 바운디드 슬롯에 합성/보존된다(R2.2/R2.4). 소비 여부는 아래 손실-0 검사가 증명한다.
 
     # Loss-zero under HTML: every generated Vertex image surfaces in media — the
     # compositing fake bakes hero bytes into the slideBackground PNG.
@@ -343,12 +340,16 @@ def test_integration_mixed_deck_html_on_coexistence():
         f"손실-0 위반(HTML 경로): 생성된 Vertex 이미지가 최종 덱에 없음 "
         f"(generated={generated}, embedded={embedded}, unused={unused})")
 
-    # High-density HTML path: content slides carry a (0,0) full-bleed background.
+    # 하이브리드 R1.3/R2: content 슬라이드는 풀블리드 배경 없이 편집 가능 텍스트 + 바운디드 히어로(그림)로 렌더된다.
     slides = _slides(pptx)
     assert len(slides) == 4, f"슬라이드 수 기대 4(표지+3) — 실제 {len(slides)}"
-    content_fb = _fullbleed_pictures(slides[2])  # index 2 == content slide
-    assert content_fb, (
-        "고밀도 콘텐츠 슬라이드는 HTML 풀블리드 슬라이드배경을 가져야 함")
+    content = slides[2]  # index 2 == content slide
+    assert not _fullbleed_pictures(content), "content 슬라이드에 풀블리드 배경이 있음(편집 불가 — 하이브리드 R1.3 위반)"
+    from pptx.enum.shapes import MSO_SHAPE_TYPE as _MST
+    pics = [sh for sh in content.shapes if sh.shape_type == _MST.PICTURE]
+    assert pics, "content 슬라이드에 바운디드 Vertex 히어로 그림이 없음(R2.2)"
+    editable = [sh for sh in content.shapes if getattr(sh, "has_text_frame", False) and (sh.text_frame.text or "").strip()]
+    assert editable, "content 슬라이드에 편집 가능 텍스트가 없음"
 
 
 if __name__ == "__main__":

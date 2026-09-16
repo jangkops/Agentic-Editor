@@ -184,11 +184,13 @@ def test_vertex_prompt_is_content_faithful(tmp_path, monkeypatch):
     res = json.loads(out)
     try:
         assert "error" not in res, res
-        # 콘텐츠 슬라이드(2번째)에 대한 프롬프트 확인
+        # 하이브리드 렌더(R3.2/R3.3, 2026-09-16 갱신): 구조는 편집 가능 네이티브 도형이 그리고, Vertex 는
+        # 슬라이드 제목/맥락을 담은 *텍스트 없는* 보조 비주얼만 만든다. 옛 기대(flowchart 지시 + 라벨 verbatim)는
+        # 이미지에 텍스트를 굽는 방식이라 폐기됐다.
         joined = "\n".join(_FakeVertex.last_prompts)
-        assert "flowchart" in joined, "흐름 섹션인데 flowchart 지시가 없음"
-        # 실제 한글 라벨이 프롬프트에 verbatim 포함
-        assert "수집 단계" in joined and "적재 단계" in joined, "실제 라벨이 프롬프트에 없음"
+        assert joined, "Vertex 프롬프트가 생성되지 않음"
+        assert "데이터 처리 흐름" in joined, "슬라이드 제목/맥락이 프롬프트에 없음"
+        assert "NO embedded text" in joined or "no text" in joined.lower(), "텍스트 없는 배경 지시(negative)가 없음"
         assert "NO watermark" in joined and "16:9" in joined
     finally:
         _cleanup(res)

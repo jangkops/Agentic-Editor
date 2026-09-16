@@ -151,8 +151,9 @@ _REQUIRED_SLIDE_KEYS = {"index", "role", "path", "vertexEmbedded"}
 _VALID_PATHS = {
     "html-fullbleed", "vertex-visual", "vertex-hero",
     "native-backdrop", "native-shapes", "caller-image", "text-only",
+    "content-editable",   # pptx-ultra-quality-hybrid-render: content 슬라이드 편집 가능 네이티브(+바운디드 히어로)
 }
-_NATIVE_OR_TEXT = {"native-backdrop", "native-shapes", "caller-image", "text-only"}
+_NATIVE_OR_TEXT = {"native-backdrop", "native-shapes", "caller-image", "text-only", "content-editable"}
 
 
 def _deck():

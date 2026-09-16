@@ -39,7 +39,8 @@ import parity_scorer  # noqa: E402
 import visual_comparator as vc  # noqa: E402
 
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-_HAS_CHROME = os.path.isfile(CHROME)
+# AE_SKIP_CHROME_TESTS=1 이면 바이너리가 있어도 건너뛴다(Chrome 을 띄울 수 없는 샌드박스/CI 환경용).
+_HAS_CHROME = os.path.isfile(CHROME) and os.environ.get("AE_SKIP_CHROME_TESTS", "") != "1"
 _RENDER_W, _RENDER_H = 1920, 1080
 
 

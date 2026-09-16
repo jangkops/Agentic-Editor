@@ -55,10 +55,14 @@ def test_flow_boxes_left_aligned_vertical():
     prs, slide = _new_slide()
     content = " -> ".join([f"S{i}" for i in range(1, 6)])
     ndp.build_native_diagram(slide, "flow", content, region=(0.6, 1.7, 12.1, 5.2))
-    lefts = [s.left for s in slide.shapes if s.shape_type == MSO_SHAPE_TYPE.AUTO_SHAPE]
-    assert lefts, "박스 없음"
-    # 모든 좌측 좌표가 동일(세로 정렬)
-    assert max(lefts) - min(lefts) <= Inches(0.02), "세로 흐름 박스 x정렬 어긋남"
+    boxes = [s for s in slide.shapes if s.shape_type == MSO_SHAPE_TYPE.AUTO_SHAPE]
+    assert boxes, "박스 없음"
+    # 세로 흐름(5+단계)은 "좌측 번호 배지 + 넓은 카드" 구성이라 배지와 카드의 x 가 다르다 —
+    # 카드(가장 넓은 도형의 60% 이상)만 골라 정렬을 검사한다(2026-09-16 갱신).
+    wmax = max(s.width for s in boxes)
+    lefts = [s.left for s in boxes if s.width >= wmax * 0.6]
+    assert len(lefts) >= 5, f"카드 수 부족 {len(lefts)}"
+    assert max(lefts) - min(lefts) <= Inches(0.02), "세로 흐름 카드 x정렬 어긋남"
 
 
 def test_image_fits_within_slide_bounds():

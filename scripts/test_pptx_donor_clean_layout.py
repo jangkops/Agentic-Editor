@@ -148,7 +148,17 @@ def test_text_slide_on_donor_is_clean(tmp_path):
         st = _slide_stats(content)
         assert st["has_bg"]
         assert st["pics"] >= 1
-        assert st["empty_text_shapes"] == 0, f"빈 텍스트 도형 잔존: {st['empty_text_shapes']}"
+        # 도너의 빈 샘플 카드/자리표시자가 그대로 남지 않아야 한다. 네이티브 고밀도 렌더러가 그리는
+        # 장식 도형(링크 칩·공지 탭·푸터 바·액센트 바)은 텍스트 프레임이 비어 있어도 정상이라, 도너 원본과
+        # 기하(위치·크기)가 같은 빈 도형만 "잔존"으로 본다(2026-09-16 갱신).
+        donor_empty = set()
+        for sh in list(Presentation(str(tpl)).slides)[0].shapes:
+            if getattr(sh, "has_text_frame", False) and not (sh.text_frame.text or "").strip():
+                donor_empty.add((sh.left, sh.top, sh.width, sh.height))
+        leftover = [sh for sh in content.shapes
+                    if getattr(sh, "has_text_frame", False) and not (sh.text_frame.text or "").strip()
+                    and (sh.left, sh.top, sh.width, sh.height) in donor_empty]
+        assert not leftover, f"도너 빈 도형 잔존: {len(leftover)}"
         assert "SAMPLE" not in st["text"]
         assert "항목 가" in st["text"] and "개요" in st["text"]
     finally:

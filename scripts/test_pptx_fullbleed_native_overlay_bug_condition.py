@@ -109,6 +109,10 @@ _CONTENT_SLIDES = [
      "bullets": ["ai_engine 서버", "electron 브리지", "src 프론트엔드"]},
     {"title": "Depth 2 — 데이터 흐름",
      "bullets": ["입력 수집", "정제 및 적재", "분석 파이프라인", "결과 시각화"]},
+    # 하이브리드 렌더(2026-09-16): content 는 편집 경로, structural 은 네이티브 도형이라 본문 HTML 베이크는
+    # Vertex 비활성 visual 슬라이드에서만 일어난다 — 검증 대상(구운 풀블리드 + 네이티브 텍스트 공존) 재현용.
+    {"title": "브랜드 비주얼", "bullets": ["신뢰를 최우선으로", "고객과 함께"],
+     "imagePrompt": "a modern corporate office photograph, wide angle, natural light"},
 ]
 
 

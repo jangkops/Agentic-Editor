@@ -5807,7 +5807,8 @@ async def _tool_generate_pptx(tool_input: dict, project_path: str, aws_profile: 
 
         # === 목차(TOC) 자동 생성 — 슬라이드 덱의 기본. 편집 가능 네이티브 카드로. ===
         # 콘텐츠 제목이 3개 이상이면 표지 다음에 목차를 넣는다. AE_PPTX_TOC=0으로 비활성.
-        if (not _html_enabled) and os.environ.get("AE_PPTX_TOC", "1") != "0":
+        # 하이브리드(content 편집 가능 덱)에서는 HTML 활성 여부와 무관하게 목차를 넣는다 — 목차 자체가 편집 가능 네이티브다.
+        if (_hybrid_on or not _html_enabled) and os.environ.get("AE_PPTX_TOC", "1") != "0":
             _toc_titles = []
             for _sd in slides_data:
                 if isinstance(_sd, dict):
@@ -5887,6 +5888,10 @@ async def _tool_generate_pptx(tool_input: dict, project_path: str, aws_profile: 
             # True면 (a) HTML 풀블리드 바이크를 우회했고 (b) 아래 Vertex 임베드 블록이
             # 히어로를 풀블리드로 재임베드하지 않도록 스킵해 content 풀블리드 PICTURE 0을 보존한다.
             _hybrid_content_routed = False
+            # 하이브리드 R1.4/R4.5 — structural 슬라이드는 NATIVE_SHAPES 가 주 렌더러다. True 면 아래
+            # HTML 풀블리드 베이크 블록을 건너뛰고 기존 네이티브 다이어그램 추론(→ 편집 가능 도형)에 맡긴다.
+            # (2026-09-16 실측: Chrome/브리지가 있으면 구조형 슬라이드가 통짜 PNG 로 구워져 R4.5 위반)
+            _hybrid_structural_routed = False
             # Genspark급 HTML 디자인 슬라이드 — 활성 시 이 슬라이드를 풀블리드 배경으로 렌더.
             # 성공하면 slideBackground가 설정되어 네이티브 다이어그램 추론이 자동 skip된다.
             # === task 9.1 — 네이티브 라우팅 게이트 (design §Components §2, Property 3/6) ===
@@ -6046,7 +6051,18 @@ async def _tool_generate_pptx(tool_input: dict, project_path: str, aws_profile: 
                     _hc_bullets = [str(_b).strip() for _b in (bullets or []) if str(_b).strip()]
                     _hc_data = {"title": str(sd.get("title", "") or ""), "bullets": _hc_bullets}
                     # 히어로 = 이 슬라이드의 Vertex 사전생성 이미지(_vertex_pre[i]) 있으면 사용.
+                    # `_vertex_pre` 는 `.generated/...` 상대 경로다 — add_picture 는 CWD 기준으로 열기 때문에
+                    # 실제 저장 루트로 절대화해 넘긴다(미절대화 시 합성·보존 모두 실패 → 이미지 폐기, 손실-0 위반).
                     _hc_hero = _vertex_pre.get(i, "") or ""
+                    if _hc_hero and not os.path.isabs(_hc_hero):
+                        try:
+                            _hc_hero = _resolve_relative_for_verify(_hc_hero, project_path) or _hc_hero
+                        except Exception:
+                            pass
+                    # 도너 템플릿 슬라이드에서 넘어온 기존 도형(빈 샘플 카드/자리표시자) 후보 — 렌더 뒤 정리 대상.
+                    _hc_pre_shapes = list(s.shapes)
+                    # 도너 템플릿 슬라이드에서 넘어온 기존 도형(빈 샘플 카드/자리표시자) 후보 — 렌더 뒤 정리 대상.
+                    _hc_pre_shapes = list(s.shapes)
                     try:
                         _hc_res = _render_content_editable(
                             s, prs, _hc_data, _hc_tokens, _hc_hero, _hc_palette) or {}
@@ -6070,6 +6086,48 @@ async def _tool_generate_pptx(tool_input: dict, project_path: str, aws_profile: 
                                     _hc_tph._element.getparent().remove(_hc_tph._element)
                         except Exception:
                             pass
+                        # 도너 템플릿의 빈 샘플 도형 정리 — 우리가 방금 그린 도형은 건드리지 않고(_hc_pre_shapes 에만 적용),
+                        # 제목·그림은 보존한다. (전역 _remove_empty_text_shapes 는 네이티브 장식 도형 보존을 위해
+                        # 빈 AUTO_SHAPE 를 남기므로 도너 잔존 카드가 그대로 남던 문제 — 2026-09-16)
+                        try:
+                            from pptx.enum.shapes import MSO_SHAPE_TYPE as _MST_hc
+                            try:
+                                _hc_title_el = s.shapes.title._element if s.shapes.title is not None else None
+                            except Exception:
+                                _hc_title_el = None
+                            for _psp in _hc_pre_shapes:
+                                try:
+                                    if _hc_title_el is not None and _psp._element is _hc_title_el:
+                                        continue
+                                    if _psp.shape_type == _MST_hc.PICTURE:
+                                        continue
+                                    if getattr(_psp, "has_text_frame", False) and not (_psp.text_frame.text or "").strip():
+                                        _psp._element.getparent().remove(_psp._element)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                        # 도너 템플릿의 빈 샘플 도형 정리 — 우리가 방금 그린 도형은 건드리지 않고(_hc_pre_shapes 에만 적용),
+                        # 제목·그림은 보존한다. (전역 _remove_empty_text_shapes 는 네이티브 장식 도형 보존을 위해
+                        # 빈 AUTO_SHAPE 를 남기므로 도너 잔존 카드가 그대로 남던 문제 — 2026-09-16)
+                        try:
+                            from pptx.enum.shapes import MSO_SHAPE_TYPE as _MST_hc
+                            try:
+                                _hc_title_el = s.shapes.title._element if s.shapes.title is not None else None
+                            except Exception:
+                                _hc_title_el = None
+                            for _psp in _hc_pre_shapes:
+                                try:
+                                    if _hc_title_el is not None and _psp._element is _hc_title_el:
+                                        continue
+                                    if _psp.shape_type == _MST_hc.PICTURE:
+                                        continue
+                                    if getattr(_psp, "has_text_frame", False) and not (_psp.text_frame.text or "").strip():
+                                        _psp._element.getparent().remove(_psp._element)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
                         print(f"[generate_pptx] 슬라이드 {i + 2} -> 하이브리드 content 편집 경로"
                               f"(layout={_hc_res.get('layout')}, "
                               f"image_placed={_hc_res.get('image_placed')}, "
@@ -6078,7 +6136,16 @@ async def _tool_generate_pptx(tool_input: dict, project_path: str, aws_profile: 
                         # content 편집 렌더 예외 — 콘텐츠 손실 0을 위해 기존 경로로 폴백(no-op).
                         print(f"[generate_pptx] 하이브리드 content 편집 실패(기존 경로 폴백) "
                               f"slide {i + 2}: {str(_hce)[:160]}")
-            if (_html_enabled and not _native_routed
+                elif _hc_role == "structural":
+                    # R1.4/R4.5: 구조형(flow/tree/architecture)은 편집 가능 네이티브 도형이 주 렌더러다.
+                    # HTML 풀블리드 베이크를 우회하고 아래 `_classify_section_diagram` 추론 → nativeDiagram
+                    # → 네이티브 도형 렌더에 맡긴다. Vertex 사전생성 이미지는 backdrop 으로만 보존(플랜 결정).
+                    _hybrid_structural_routed = True
+                    _rr_hybrid_primary = "NATIVE_SHAPES"
+                    _rr_hybrid_slot = "backdrop" if _vertex_pre.get(i) else "none"
+                    _rr_hybrid_editable = True
+                    print(f"[generate_pptx] 슬라이드 {i + 2} -> 하이브리드 structural 경로(HTML 베이크 우회, 네이티브 도형)")
+            if (_html_enabled and not _native_routed and not _hybrid_structural_routed
                     and not sd.get("slideBackground") and not sd.get("imageFile")
                     and not sd.get("nativeDiagram")):
                 # 본문 주 렌더러 = HTML 고밀도 레이아웃(task 3.4). 성공 시 slideBackground가

@@ -115,7 +115,8 @@ def test_orgchart_children_even_no_overlap():
 
 
 def test_long_label_widens_card():
-    """Q5 — 긴 라벨 카드가 짧은 라벨 카드보다 넓다(텍스트 비례 폭)."""
+    """Q5(갱신) — 가로 흐름 카드는 균등 컬럼 그리드로 그려지고(현 디자인, 긴 라벨은 카드 안에서 줄바꿈),
+    모든 카드가 영역 안에 있다. (예전 '텍스트 비례 폭' 기대는 균등 그리드 도입으로 폐기, 2026-09-16)"""
     prs, slide = _blank_slide()
     ok = nd.build_native_diagram(
         slide, "flow", "A -> 매우 긴 단계 이름 데이터 정제 및 검증 처리 -> B",
@@ -124,8 +125,11 @@ def test_long_label_widens_card():
     boxes, ovals, _ = _shapes(slide)
     cards = sorted(boxes, key=lambda s: s.width, reverse=True)[:3]
     widths = sorted(c.width for c in cards)
-    # 가장 넓은 카드가 가장 좁은 카드의 1.3배 이상 (텍스트 비례 반영)
-    assert widths[-1] >= widths[0] * 1.3, f"텍스트 비례 폭 미반영: {widths}"
+    assert len(widths) == 3, f"카드 수 부족: {widths}"
+    assert widths[-1] - widths[0] <= 9144 * 2, f"균등 컬럼 폭이 아님: {widths}"
+    rl, rt, rr, rb = _emu_region()
+    for c in cards:
+        assert c.left >= rl - 9144 and c.left + c.width <= rr + 9144, "카드가 영역 가로 경계 초과"
 
 
 def test_block_has_accent_bars_and_badges():
@@ -154,9 +158,12 @@ def test_cards_grid_editable_high_quality():
     autoshapes = [s for s in slide.shapes if s.shape_type == MSO_SHAPE_TYPE.AUTO_SHAPE]
     texts = "\n".join(s.text_frame.text for s in slide.shapes if s.has_text_frame)
     pics = [s for s in slide.shapes if s.shape_type == MSO_SHAPE_TYPE.PICTURE]
-    # 카드(흰 사각형) 5개 + 칩/마크 → autoshape 다수, 통짜 PNG 없음
+    # 카드(흰 사각형) 5개 + 칩/마크 → autoshape 다수. 카드 안의 작은 아이콘 PNG 는 허용하되
+    # 슬라이드/영역을 덮는 통짜 PNG 는 금지한다(편집 가능성 유지, 2026-09-16 갱신).
     assert len(autoshapes) >= 5, f"카드 도형 부족 {len(autoshapes)}"
-    assert not pics, "통짜 PNG가 포함됨(편집 불가)"
+    from pptx.util import Inches as _In
+    big_pics = [p for p in pics if p.width >= _In(REGION[2]) * 0.4]
+    assert not big_pics, "통짜 PNG가 포함됨(편집 불가)"
     # 제목/설명이 편집 가능 텍스트로 들어감
     for t in ("체계적인 구조", "효율적인 분류", "DevOps 중심", "93개 디렉토리"):
         assert t in texts, f"카드 텍스트 누락: {t}"

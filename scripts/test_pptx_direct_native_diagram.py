@@ -87,9 +87,10 @@ def test_disable_flag_falls_back():
         try:
             path = _gen(td, [dict(s) for s in _DIAGRAM_SLIDES])
             autoshapes, _pic, _conn = _count_shapes(path)
-            # 비활성 시 분류기 추론 경로를 타지 않으므로 다이어그램 도형이 생기지 않는다
-            # (본문 placeholder 텍스트만). autoshape가 0이거나 매우 적어야 한다.
-            assert autoshapes == 0
+            # 비활성 시 분류기 추론 경로를 타지 않으므로 *다이어그램*(화살표/커넥터)은 생기지 않는다.
+            # 본문은 HTML 미적용 시 카드 폴백(둥근 사각형 autoshape)으로 채워질 수 있어 autoshape 0 을
+            # 요구하지 않는다(task 3.4 "HTML > 카드" 우선순위, 2026-09-16 갱신).
+            assert _conn == 0, f"네이티브 비활성인데 다이어그램 커넥터 {_conn}개"
         finally:
             os.environ.pop("AE_DISABLE_NATIVE_DIAGRAM", None)
 
