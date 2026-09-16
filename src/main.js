@@ -5094,7 +5094,7 @@ function renderMessages(){
                 btn.textContent = '복원 중...'; btn.disabled = true;
                 try {
                   // 에이전트가 수정한 파일을 먼저 버리고 stash pop (충돌 방지)
-                  await window.electronAPI.gitDiscardAll(state.folderPath);
+                  await window.electronAPI.gitDiscardAll(state.folderPath, { confirm: true });   // 위 confirm() 통과 후에만
                   const r = await window.electronAPI.gitStashPop(state.folderPath);
                   if (r.ok) {
                     // 이 assistant 메시지의 인덱스를 찾아서, 바로 위 user 메시지와 함께 삭제

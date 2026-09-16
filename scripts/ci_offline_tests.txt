@@ -35,3 +35,4 @@ scripts/test_research_ssrf_guard.py
 scripts/test_shell_egress_audit.py
 scripts/test_test_hygiene_no_module_global_clobber.py
 scripts/test_token_mask_property.py
+scripts/test_tool_sandbox_guards.py

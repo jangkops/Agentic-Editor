@@ -101,7 +101,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   gitStashPush: (dirPath, message) => ipcRenderer.invoke('git:stash-push', dirPath, message),
   gitStashPop: (dirPath) => ipcRenderer.invoke('git:stash-pop', dirPath),
   gitStashList: (dirPath) => ipcRenderer.invoke('git:stash-list', dirPath),
-  gitDiscardAll: (dirPath) => ipcRenderer.invoke('git:discard-all', dirPath),
+  gitDiscardAll: (dirPath, opts) => ipcRenderer.invoke('git:discard-all', dirPath, opts),
   // 저장소 clone — 종료코드/stderr로 성패 판정 (GitHub 가져오기). url/branch/dest/token.
   // token은 private 저장소용(선택) — 메인 프로세스에서 1회 사용, 저장/로깅 안 함.
   gitClone: (url, branch, dest, token) => ipcRenderer.invoke('git:clone', url, branch, dest, token),

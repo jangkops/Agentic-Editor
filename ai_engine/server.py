@@ -17,7 +17,73 @@ from fastapi.middleware.cors import CORSMiddleware
 __version__ = "0.5.4"
 
 app = FastAPI(title="AI Editor Engine", version=__version__)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+# CORS — 렌더러(file:// → Origin: null)와 로컬 개발 페이지(localhost/127.0.0.1)만 허용한다. 예전 "*" 는 임의 사이트의
+# 브라우저 스크립트가 로컬 사이드카를 호출할 수 있게 했다(원장 #17). AE_CORS_ORIGINS="https://a,https://b" 로 추가 허용.
+_cors_extra = [o.strip() for o in os.environ.get("AE_CORS_ORIGINS", "").split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["null", *_cors_extra],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+def _debug_endpoints_enabled() -> bool:
+    """/api/debug/* 진단 엔드포인트 게이트(원장 #16). 렌더러가 쓰는 /api/debug/cwd 는 예외."""
+    return os.environ.get("AE_DEBUG_ENDPOINTS", "").strip() == "1"
+
+
+def _require_debug_enabled() -> None:
+    if not _debug_endpoints_enabled():
+        from fastapi import HTTPException as _HTTPExc
+        raise _HTTPExc(status_code=404, detail="Not Found")
+
+
+# run_command 자식 프로세스에 상속하지 않을 env 이름 패턴(원장 #8) — 브리지 토큰·비밀류.
+_TOOL_ENV_DENY = re.compile(
+    r"(^AE_BRIDGE_(TOKEN|URL)$)|TOKEN$|_SECRET|SECRET_|API_KEY|PASSWORD|PASSWD|PRIVATE_KEY|GOOGLE_APPLICATION_CREDENTIALS",
+    re.I,
+)
+
+
+def _tool_subprocess_env() -> dict:
+    """모델이 고른 셸 명령(run_command)의 env — 브리지 토큰·비밀류 변수는 넘기지 않는다. AE_TOOL_ENV_PASSTHROUGH=1 이면 전부 상속."""
+    if os.environ.get("AE_TOOL_ENV_PASSTHROUGH", "") == "1":
+        return {**os.environ}
+    return {k: v for k, v in os.environ.items() if not _TOOL_ENV_DENY.search(k)}
+
+
+# read_file 이 열지 않는 자격증명 파일 형태(원장 #16 list_directory .env 노출의 후속) — AE_TOOL_READ_SECRETS=1 로 해제.
+_SECRET_FILE_RE = re.compile(r"(^|/)(\.env(\..*)?|[^/]*\.pem|id_rsa[^/]*|id_ed25519[^/]*|[^/]*\.key|credentials|\.netrc|\.pypirc)$")
+
+
+def _tool_write_allowed(path: str, project_path: str) -> bool:
+    """write_file 대상이 허용 루트(프로젝트 폴더·생성 루트·AE_GENERATED_ROOT·임시 디렉터리·~/.agentic-editor) 안인지(원장 #8).
+    AE_TOOL_WRITE_ANYWHERE=1 이면 해제. 심볼릭 링크는 realpath 로 푼다."""
+    if os.environ.get("AE_TOOL_WRITE_ANYWHERE", "") == "1":
+        return True
+    import tempfile as _tf
+    real = os.path.realpath(path)
+    roots = []
+    if project_path:
+        roots.append(project_path)
+    try:
+        roots.append(_resolve_local_root(project_path))
+    except Exception:  # noqa: BLE001
+        pass
+    if os.environ.get("AE_GENERATED_ROOT", "").strip():
+        roots.append(os.environ["AE_GENERATED_ROOT"].strip())
+    roots.append(_tf.gettempdir())
+    roots.append(os.path.expanduser("~/.agentic-editor"))
+    for r in roots:
+        try:
+            rr = os.path.realpath(r)
+            if real == rr or real.startswith(rr.rstrip(os.sep) + os.sep):
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+    return False
 
 # Startup banner — 서버가 새 코드로 실행 중인지 사용자가 즉시 확인 가능
 print(f"[AI Editor Engine] v{__version__} loaded — deterministic merger + forced fallback active")
@@ -7514,6 +7580,9 @@ def _execute_tool(tool_name: str, tool_input: dict, project_path: str = "", aws_
             path = tool_input["path"]
             if not os.path.isabs(path) and project_path:
                 path = os.path.join(project_path, path)
+            if (_SECRET_FILE_RE.search(path.replace(os.sep, "/"))
+                    and os.environ.get("AE_TOOL_READ_SECRETS", "") != "1"):
+                return f"읽기 거부: 자격증명 파일로 보이는 경로입니다: {path}"
             if not os.path.exists(path):
                 return f"파일 없음: {path}"
             with open(path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -7527,6 +7596,8 @@ def _execute_tool(tool_name: str, tool_input: dict, project_path: str = "", aws_
             path = tool_input["path"]
             if not os.path.isabs(path) and project_path:
                 path = os.path.join(project_path, path)
+            if not _tool_write_allowed(path, project_path):
+                return f"쓰기 거부: 허용 루트(프로젝트 폴더·생성 폴더) 밖 경로입니다: {path}"
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(tool_input["content"])
@@ -7560,7 +7631,7 @@ def _execute_tool(tool_name: str, tool_input: dict, project_path: str = "", aws_
             result = subprocess.run(
                 cmd, shell=True, capture_output=True, text=True,
                 timeout=30, cwd=cwd,
-                env={**os.environ, "PATH": os.environ.get("PATH", "")},
+                env=_tool_subprocess_env(),   # 브리지 토큰·비밀류 미상속(원장 #8)
             )
             output = result.stdout + result.stderr
             _rc_max = int(os.environ.get("AE_RUN_CMD_MAX", "40000"))
@@ -8513,6 +8584,7 @@ async def debug_image_gen_status():
 
     Spec: media-output-quality (bugfix) — Property 4 / Req 1.4, 2.4.
     """
+    _require_debug_enabled()
     import time as _t
     now = _t.time()
     disabled_at = _IMAGE_GEN_CIRCUIT.get("disabled_at", 0) or 0
@@ -8566,6 +8638,7 @@ async def debug_image_gen_status():
 @app.get("/api/debug/bridge")
 async def debug_bridge():
     """Debug: show bridge state."""
+    _require_debug_enabled()
     _refresh_bridge_discovery()
     return {
         "bridge_url": _BRIDGE_URL,
@@ -8584,6 +8657,7 @@ async def debug_openai_test(request: Request):
 
     사용: GET /api/debug/openai-test?model=openai.gpt-5.5&profile=<프로파일>
     """
+    _require_debug_enabled()
     qp = request.query_params
     model = qp.get("model", "openai.gpt-5.5")
     profile = qp.get("profile", os.environ.get("AWS_PROFILE", "default"))

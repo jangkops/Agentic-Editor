@@ -413,11 +413,13 @@ function registerGitHandlers() {
     }
   });
 
-  ipcMain.handle('git:discard-all', async (_, dirPath) => {
+  ipcMain.handle('git:discard-all', async (_, dirPath, opts) => {
     try {
       if (!dirPath) return { ok: false, error: 'dirPath required' };
-      await run('git checkout -- . 2>&1', { cwd: dirPath, timeout: 10000 });
-      await run('git clean -fd 2>&1', { cwd: dirPath, timeout: 10000 });
+      // `git clean -fd` 는 미추적 파일을 되돌릴 수 없게 지운다 — 렌더러가 사용자 확인을 받았다는 명시 플래그 없이는 실행하지 않는다.
+      if (!(opts && opts.confirm === true)) return { ok: false, error: 'confirm_required' };
+      await runFile('git', ['checkout', '--', '.'], { cwd: dirPath, timeout: 10000 });
+      await runFile('git', ['clean', '-fd'], { cwd: dirPath, timeout: 10000 });
       return { ok: true };
     } catch (error) {
       const msg = String(error.stdout || error.stderr || error.message || error);

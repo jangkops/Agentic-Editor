@@ -6,7 +6,7 @@
  * 각 IPC 카테고리를 별도 파일로 분리
  */
 
-const { app, ipcMain } = require('electron');
+const { app, ipcMain, dialog } = require('electron');
 const path = require('path');
 
 // Core managers
@@ -19,6 +19,7 @@ const { WindowManager } = require('./src/window-manager');
 
 // IPC handlers (modularized)
 const { registerFsHandlers } = require('./src/ipc-fs-handlers');
+const { probeBackend } = require('./src/backend-guard');
 const { registerStoreHandlers } = require('./src/ipc-store-handlers');
 const { registerSsoHandlers } = require('./src/ipc-sso-handlers');
 const { registerTerminalHandlers } = require('./src/ipc-terminal-handlers');
@@ -53,6 +54,60 @@ const sessionRouter = require('./src/remote/session-router');
 
 const windowManager = new WindowManager();
 const processManager = new ProcessManager();
+
+// 단일 인스턴스 — 두 번째 실행은 기존 창을 앞으로 가져오고 종료한다(원장 #29: 락 없음 → 사이드카 포트 경합).
+if (typeof app.requestSingleInstanceLock === 'function' && !app.requestSingleInstanceLock()) {
+  console.log('[App] 이미 실행 중인 인스턴스가 있어 종료합니다');
+  app.exit(0);
+} else if (typeof app.on === 'function') {
+  app.on('second-instance', () => {
+    const w = windowManager.mainWindow;
+    if (w && !w.isDestroyed()) {
+      if (w.isMinimized()) w.restore();
+      w.show();
+      w.focus();
+    }
+  });
+}
+
+// 개발 모드 — dev:python 이 사이드카를 띄운다.
+const isDev =
+  process.argv.includes('--dev') ||
+  process.env.NODE_ENV === 'development' ||
+  process.env.npm_lifecycle_event === 'dev:electron';
+
+/**
+ * 사이드카 보장: 8765 점유자를 GET /health 본문으로 판정한다(원장 #29).
+ *  - 우리 사이드카(service=ai-editor-engine) → 시작 생략
+ *  - 다른 프로세스 → 시작 불가, 로그 + 오류 대화상자(예전에는 응답만 있으면 우리 것으로 오판)
+ *  - 없음 → startPython
+ * 앱 시작 때와, macOS 에서 창을 모두 닫아 사이드카가 종료된 뒤 activate 로 창을 다시 만들 때 호출한다.
+ */
+let _foreignPortWarned = false;
+async function ensureBackend(reason) {
+  if (isDev) {
+    console.log(`[ProcessManager] Dev mode — skipping Python start (${reason}; dev:python handles it)`);
+    return;
+  }
+  const state = await probeBackend();
+  if (state === 'ours') {
+    console.log(`[ProcessManager] Python backend already running (${reason}), skipping start`);
+    return;
+  }
+  if (state === 'foreign') {
+    console.error('[ProcessManager] 127.0.0.1:8765 를 다른 프로세스가 점유 — 백엔드를 시작할 수 없습니다');
+    if (!_foreignPortWarned) {
+      _foreignPortWarned = true;
+      try {
+        dialog.showErrorBox('백엔드 포트 충돌',
+          '127.0.0.1:8765 를 Mogam Works 사이드카가 아닌 다른 프로세스가 사용 중입니다.\n해당 프로세스를 종료한 뒤 앱을 다시 실행하세요.');
+      } catch (_e) { /* headless */ }
+    }
+    return;
+  }
+  console.log(`[ProcessManager] Starting Python backend (${reason})...`);
+  processManager.startPython();
+}
 const dataStore = new DataStore();
 const ssoManager = new AwsSsoManager();
 
@@ -111,37 +166,8 @@ app.whenReady().then(() => {
     console.error('[bridge] failed to start:', err && err.message);
   });
 
-  // Python 백엔드 시작 (개발 모드 확인)
-  const isDev =
-    process.argv.includes('--dev') ||
-    process.env.NODE_ENV === 'development' ||
-    process.env.npm_lifecycle_event === 'dev:electron';
-
-  if (!isDev) {
-    // 포트 확인: 이미 실행 중인지 확인
-    const http = require('http');
-    const checkReq = http.request(
-      {
-        host: '127.0.0.1',
-        port: 8765,
-        method: 'HEAD',
-        path: '/health',
-        timeout: 2000,
-      },
-      (res) => {
-        console.log('[ProcessManager] Python backend already running, skipping start');
-      }
-    );
-
-    checkReq.on('error', () => {
-      console.log('[ProcessManager] Starting Python backend...');
-      processManager.startPython();
-    });
-
-    checkReq.end();
-  } else {
-    console.log('[ProcessManager] Dev mode — skipping Python start (dev:python handles it)');
-  }
+  // Python 백엔드 시작 — 점유자 판정 후(원장 #29). isDev/ensureBackend 는 모듈 스코프.
+  ensureBackend('startup');
 
   // 저장된 리서치 제공자 키를 사이드카 env 로 주입한다.
   // 키는 OS 키체인에만 있고 사이드카는 os.environ 만 읽으므로(research/security.py),
@@ -187,6 +213,8 @@ app.on('before-quit', () => {
 app.on('activate', () => {
   if (windowManager.allWindowsClosed()) {
     windowManager.createWindow();
+    // window-all-closed 가 사이드카를 SIGTERM 했으므로 창만 다시 만들면 백엔드 없는 앱이 된다(원장 #29).
+    ensureBackend('activate');
   }
 });
 

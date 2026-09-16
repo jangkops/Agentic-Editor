@@ -77,6 +77,16 @@ describe('git IPC handlers use argv, never shell strings', () => {
     expect(clone.opts.env.GIT_TERMINAL_PROMPT).toBe('0');
   });
 
+  test('git:discard-all refuses without an explicit confirm flag and uses argv when confirmed', async () => {
+    const refused = await handler('git:discard-all')(null, '/repo');
+    expect(refused).toEqual({ ok: false, error: 'confirm_required' });
+    expect(calls).toHaveLength(0);
+    const ok = await handler('git:discard-all')(null, '/repo', { confirm: true });
+    expect(ok).toEqual({ ok: true });
+    expect(calls.map((c) => c.args)).toEqual([['checkout', '--', '.'], ['clean', '-fd']]);
+    expect(calls.every((c) => c.file === 'git' && c.opts.cwd === '/repo')).toBe(true);
+  });
+
   test('git:contributors parses shortlog into {name,email,commits}', async () => {
     const rows = await handler('git:contributors')(null, '/repo');
     expect(rows).toEqual([
