@@ -1,6 +1,6 @@
 // sso:get-credentials — 메인이 사이드카에 자격증명을 직접 주입하고 렌더러에는 비밀 값을 돌려주지 않는다.
 const { ipcMain } = require('electron');
-const { registerSsoHandlers } = require('../../electron/src/ipc-sso-handlers');
+const { registerSsoHandlers, _toIpv4Loopback } = require('../../electron/src/ipc-sso-handlers');
 
 const CREDS = { AWS_ACCESS_KEY_ID: 'AKIAEXAMPLE1234567', AWS_SECRET_ACCESS_KEY: 'sk-very-secret', AWS_SESSION_TOKEN: 'st-token', AWS_DEFAULT_REGION: 'us-west-2' };
 const fakeManager = (creds) => ({
@@ -65,5 +65,18 @@ describe('sso:get-credentials keeps secrets in the main process', () => {
     registerSsoHandlers(fakeManager(null), { injectCredentials: injector });
     expect(await handler('sso:get-credentials')(null, 'p', {})).toBeNull();
     expect(injector).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('main-process sidecar base uses the IPv4 loopback', () => {
+  // Node 18(Electron 28) fetch 는 localhost -> ::1 실패 시 IPv4 로 폴백하지 않는다(런타임 검증에서 "fetch failed" 재현).
+  test('localhost is rewritten to 127.0.0.1, other hosts untouched', () => {
+    expect(_toIpv4Loopback('http://localhost:8765')).toBe('http://127.0.0.1:8765');
+    expect(_toIpv4Loopback('http://localhost:8765/api')).toBe('http://127.0.0.1:8765/api');
+    expect(_toIpv4Loopback('http://LOCALHOST:8765')).toBe('http://127.0.0.1:8765');
+    expect(_toIpv4Loopback('http://127.0.0.1:18765')).toBe('http://127.0.0.1:18765');   // 원격 터널
+    expect(_toIpv4Loopback('http://localhost.example:8765')).toBe('http://localhost.example:8765');
+    expect(_toIpv4Loopback('')).toBe('');
   });
 });

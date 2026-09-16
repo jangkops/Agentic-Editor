@@ -9,13 +9,22 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 
-/** 사이드카 베이스 URL — 원격 세션이 포트포워딩 중이면 그 터널, 아니면 로컬. */
+/**
+ * `localhost` 를 `127.0.0.1` 로 바꾼다. Electron 28 의 Node 18 `fetch`(undici) 는 Happy Eyeballs 가 없어
+ * `localhost` 가 `::1` 로 먼저 풀리면 IPv4 로 재시도하지 않는데, 사이드카(uvicorn)는 127.0.0.1 에만 바인딩한다.
+ * 렌더러(Chromium)는 자동 폴백하므로 이 문제는 메인 프로세스 쪽에서만 난다(2026-09-16 런타임 검증에서 발견).
+ */
+function _toIpv4Loopback(base) {
+  return String(base || '').replace(/^(https?:\/\/)localhost(?=[:/]|$)/i, '$1127.0.0.1');
+}
+
+/** 사이드카 베이스 URL — 원격 세션이 포트포워딩 중이면 그 터널, 아니면 로컬(IPv4 루프백). */
 function _resolveApiBase() {
   try {
     const router = require('./remote/session-router');
-    if (router && typeof router.apiBase === 'function') return router.apiBase();
+    if (router && typeof router.apiBase === 'function') return _toIpv4Loopback(router.apiBase());
   } catch (_e) { /* router unavailable -> local */ }
-  return 'http://localhost:8765';
+  return 'http://127.0.0.1:8765';
 }
 
 /**
@@ -184,4 +193,4 @@ function registerSsoHandlers(ssoManager, options) {
   });
 }
 
-module.exports = { registerSsoHandlers };
+module.exports = { registerSsoHandlers, _toIpv4Loopback };
