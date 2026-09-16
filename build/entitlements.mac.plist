@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Electron(V8)/PyInstaller 동결 백엔드 실행에 필요한 Hardened Runtime 예외 -->
+	<!-- JIT 컴파일 허용 (V8 엔진) -->
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<!-- 비서명 실행 메모리 허용 (V8 / PyInstaller 부트로더) -->
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+	<!-- 라이브러리 검증 비활성화 (동결 백엔드의 비서명 .so/.dylib 로드) -->
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+	<!-- dyld 환경변수 허용 (PyInstaller 런타임 로더 경로 주입) -->
+	<key>com.apple.security.cs.allow-dyld-environment-variables</key>
+	<true/>
+	<!-- 아웃바운드 네트워크 클라이언트 허용 (Bedrock Gateway/로컬 백엔드 HTTP 호출) -->
+	<key>com.apple.security.network.client</key>
+	<true/>
+</dict>
+</plist>

@@ -4,7 +4,10 @@ ai_engine/__pycache__/
 .DS_Store
 *.pyc
 dist/
-build/
+# electron-builder 리소스: 디렉터리 전체 제외 대신 산출물만 제외하고, 서명·공증에 필요한 entitlements 는 추적한다
+# (CI fresh checkout 에 없으면 서명 빌드가 실패 — 분석 원장 #35, 2026-09-17).
+build/*
+!build/entitlements.mac.plist
 스크린샷 복원/
 스크린샷_resized/
 node_modules

@@ -105,7 +105,15 @@ jobs:
           # 입력은 choice(never|always)로 제한되지만 셸에는 env 로만 전달한다(인젝션 방지 관례).
           PUBLISH_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.publish || 'always' }}
         shell: bash
-        run: npx electron-builder --${{ matrix.artifact }} --publish "$PUBLISH_MODE"
+        run: |
+          # 시크릿이 없으면 `${{ secrets.X }}` 는 빈 문자열로 주입되는데, electron-builder 는 "정의된" CSC_LINK 를
+          # 파일 경로로 해석해 "not a file" 로 빌드를 중단한다(2026-09-17 검증 빌드 실측, mac·win 모두).
+          # 값이 없는 서명·공증 변수는 unset 해 진짜 "미서명 빌드"가 되게 하고, macOS 는 키체인 identity 자동 탐색도 끈다.
+          for v in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!v}" ]; then unset "$v"; fi
+          done
+          if [ -z "${CSC_LINK:-}" ]; then export CSC_IDENTITY_AUTO_DISCOVERY=false; fi
+          npx electron-builder --${{ matrix.artifact }} --publish "$PUBLISH_MODE"
 
       - name: Upload build artifacts (백업)
         if: always()
