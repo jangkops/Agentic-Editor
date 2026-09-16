@@ -291,7 +291,7 @@ START → planner ──Send×N (현재 Wave)──► coding | media | research
 
 경량 도구 `web_search`/`search_papers`/`fetch_content`는 딥리서치 없이 단발 검색을 제공하며, 여러 provider 결과를 RRF로 융합하고 `recency_days`가 있으면 최신성 필터를 적용합니다. 검색 시작·종료는 `searchStatus` SSE로 채팅 옆 인디케이터에 "어느 provider에 어떤 질의 요약을 보냈는지"만 표시합니다(개별 URL·키는 표시하지 않음).
 
-셸 도구 `run_command`는 이 게이트 **밖**에 있습니다. 모델이 `curl` 등으로 외부에 직접 나가면 서버는 명령을 막지 않고 신호·대상 호스트·게이트 상태만 감사 로그로 남깁니다(명령 원문은 기록하지 않음, [server.py#L10246-L10275](ai_engine/server.py#L10246-L10275)). 셸을 막으면 npm·git·pip이 함께 죽기 때문에 차단 대신 가시성을 택했습니다.
+셸 도구 `run_command`는 이 게이트 **밖**에 있습니다. 모델이 `curl` 등으로 외부에 직접 나가면 서버는 명령을 막지 않고 신호·대상 호스트·게이트 상태만 감사 로그로 남깁니다(명령 원문은 기록하지 않음, [server.py#L10387-L10416](ai_engine/server.py#L10387-L10416)). 셸을 막으면 npm·git·pip이 함께 죽기 때문에 차단 대신 가시성을 택했습니다.
 
 **관련 파일.** `ai_engine/research/{backend,providers,normalize,dedup,rank,deep_research,models,config,security,eval_harness}.py`, `agent_system/subgraphs/research.py`, `src/components/{research-settings,search-indicator,research-panel}.js`, `electron/core/research-credentials.js`, 스펙 `.kiro/specs/deep-research-engine/`.
 
@@ -320,7 +320,7 @@ START → planner ──Send×N (현재 Wave)──► coding | media | research
 3. 표지: `build_native_cover`(KPI 카드·아이콘 배지·스텝 그리드 등 밀도 항목 7개 중 6개 이상) → 제목 길이에 따라 폰트를 단계적으로 자동 축소 → 풀블리드 배경이면 위의 텍스트 제거.
 4. 본문 슬라이드 사다리(위에서부터 성공하는 첫 경로 채택):
    - 네이티브 레이아웃 라우팅(`AE_NATIVE_LAYOUT_RENDER=1`일 때): LLM이 11종 중 레이아웃을 고르면 7종 네이티브로 매핑 → 후보 사다리(픽 → feature_grid → two_column → section_divider) → 폴백 → 제목만.
-   - **하이브리드 content 편집 경로(기본 ON)**: 역할이 `content`인 슬라이드는 네이티브 레이아웃으로 그리고 히어로 이미지를 우측 슬롯에 배치.
+   - **하이브리드 렌더(기본 ON, `AE_HYBRID_RENDER=0`으로 끔)**: 슬라이드 역할별로 주 렌더러를 정합니다. `content`는 네이티브 레이아웃 + 우측 슬롯의 히어로 이미지(슬롯 없는 레이아웃이면 바운디드 보존), `structural`(흐름·트리·아키텍처)은 편집 가능 네이티브 도형(HTML 베이크를 타지 않음), `cover/section/visual`은 Vertex가 켜져 있으면 풀블리드 이미지, 꺼져 있으면 HTML 베이크(켜짐)·네이티브(꺼짐) 폴백. 2026-09-16에 구조형 슬라이드가 Chrome/브리지 활성 시 통짜 PNG로 구워지던 것, 히어로 상대 경로가 열리지 않아 이미지가 폐기되던 것, 도너 템플릿의 빈 샘플 도형이 남던 것, 목차가 HTML 활성 시 빠지던 것을 고쳐 PPTX 계열 62파일 336 tests가 전부 통과합니다.
    - HTML 베이크: `render_layout` → hidden BrowserWindow(`data:` URL, 외부 URL 정규식 5종 사전 차단, sandbox) → PNG → 풀블리드 배경.
    - 네이티브 다이어그램: 슬라이드당 풀블리드 1장 보장(`fullbleed_guard`), 구운 텍스트 배경과 본문 분리(`body_safe_area`).
    - 이미지 임베드: 슬롯에 맞지 않으면 콘텐츠 영역으로 승격(`slot_image_fits`), 종횡비 보존, 경계 클램프.
@@ -364,6 +364,8 @@ START → planner ──Send×N (현재 Wave)──► coding | media | research
 - **로컬 파일 접근 가드**([path-guard.js](electron/src/path-guard.js)): `fs:*` IPC 19채널의 로컬 분기는 사용자가 대화상자로 연 폴더·파일과 앱 데이터(userData, 임시 디렉터리, `~/.agentic-editor`, `AE_GENERATED_ROOT`) 안의 경로만 허용합니다. 허용 목록은 메인 프로세스 메모리에만 있으며(앱은 마지막 폴더를 자동 복원하지 않고 항상 대화상자로 열기 때문에 충분), 렌더러가 늘릴 수 있는 IPC는 없습니다. 심볼릭 링크는 실경로로 풀어 폴더 밖을 가리키면 거부하며, 원격(SFTP) 경로는 브리지가 먼저 처리해 가드를 거치지 않습니다. `AE_FS_GUARD=0`으로 끌 수 있습니다(비상용). 경로를 받는 다른 채널인 `slides:render-html-to-png`(PNG 출력 경로)과 `project:analyze`·`project:dependencies`(분석 대상 폴더)도 같은 가드를 거칩니다.
 - **CSP**: `script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net`. `'unsafe-eval'`은 2026-09-15에 제거했습니다(렌더러·xterm·Monaco 본체에 `eval`이 없고, Monaco AMD 로더는 eval 가능 여부를 탐지해 `<script>` 로딩으로 폴백). `connect-src`는 로컬 사이드카(`localhost`, 원격 터널용 `127.0.0.1`)와 CDN·GitHub만 허용합니다.
 - **HTML→PNG 렌더 창**: `sandbox: true`, `data:` URL만 로드, 외부 URL 정규식 차단, 동시 4개.
+- **단일 인스턴스·백엔드 점유 판정**(2026-09-17): 두 번째 실행은 기존 창을 앞으로 가져오고 종료합니다. 사이드카 시작 전에 `127.0.0.1:8765`의 `/health` 본문(`service`)으로 우리 사이드카인지 판정해, 다른 프로세스가 점유하면 오판 대신 오류 대화상자를 띄웁니다([backend-guard.js](electron/src/backend-guard.js)). macOS에서 창을 모두 닫아 사이드카가 종료된 뒤 다시 열면 백엔드도 다시 띄웁니다. `git:discard-all`(미추적 파일 삭제)은 렌더러의 확인을 거친 `{confirm:true}` 없이는 실행되지 않습니다.
+- **사이드카 API 경계**(2026-09-17): CORS는 렌더러 원본(`null`)과 `localhost`/`127.0.0.1`만 허용합니다(`AE_CORS_ORIGINS`로 추가). `/api/debug/bridge`·`image-gen-status`·`openai-test`는 `AE_DEBUG_ENDPOINTS=1`일 때만 열립니다. 모델이 고르는 도구는 경계를 지킵니다 — `run_command`의 자식 프로세스에는 브리지 토큰·`*_TOKEN`·`*SECRET*`·`API_KEY`·`PASSWORD` 류 env를 넘기지 않고, `write_file`은 프로젝트·생성 루트·임시 디렉터리 밖을 거부하며, `read_file`은 `.env`·`*.pem`·`id_rsa` 같은 자격증명 파일을 거부합니다(각각 `AE_TOOL_ENV_PASSTHROUGH`·`AE_TOOL_WRITE_ANYWHERE`·`AE_TOOL_READ_SECRETS`=1로 해제).
 
 ---
 ## 4. 기술 스택
@@ -468,6 +470,12 @@ NO_RELOAD=1 npm run dev # 서버 auto-reload 끄기
 | 운영 | `AE_MEMORY_DIR` | — | 대화 요약 체크포인트 저장 폴더. 기본 `dirname(AE_GENERATED_ROOT)/memory` → `~/.agentic-editor/memory` |
 | 운영 | `AE_SIDECAR_WATCH_MS` | 5000 | 사이드카 `/health` 감시 주기(ms). 재기동(boot_id 변화) 시 자격증명 즉시 재주입. `0`이면 끔 |
 | 보안 | `AE_FS_GUARD` | 1 | 로컬 fs IPC 경로 가드. `0`이면 해제(비상용) |
+| 보안 | `AE_CORS_ORIGINS` | — | 사이드카 CORS 추가 허용 원본(쉼표 구분). 기본은 `null`(렌더러)·localhost·127.0.0.1 |
+| 보안 | `AE_DEBUG_ENDPOINTS` | — | `1`이면 `/api/debug/bridge`·`image-gen-status`·`openai-test` 개방 |
+| 보안 | `AE_TOOL_ENV_PASSTHROUGH` | — | `1`이면 `run_command` 자식에 브리지 토큰·비밀류 env도 상속 |
+| 보안 | `AE_TOOL_WRITE_ANYWHERE` | — | `1`이면 `write_file`의 허용 루트 제한 해제 |
+| 보안 | `AE_TOOL_READ_SECRETS` | — | `1`이면 `read_file`이 `.env`·`*.pem`·`id_rsa` 등도 읽음 |
+| 테스트 | `AE_SKIP_CHROME_TESTS` | — | `1`이면 Chrome 헤드리스 픽셀 테스트를 건너뜀(Chrome을 띄울 수 없는 샌드박스) |
 | 개발 | `NO_RELOAD` | — | uvicorn auto-reload 끄기 |
 
 ---
@@ -601,7 +609,7 @@ DMG와 `scripts/install-mac.command`를 같은 폴더에 두고 스크립트를 
 - **effort(추론 강도) 컨트롤**: 카탈로그에 effort 계약이 선언된 모델에서만 표시됩니다. 현재 운영자 카탈로그에는 선언이 없어 UI가 나타나지 않습니다.
 - **기본 채팅 경로(graph-stream)**: `thinking`·`answerQuality` SSE는 아직 `run-stream`/`run-agent`에서만 방출됩니다.
 - **Python 버전**: 개발 환경은 3.14입니다. 릴리스 CI가 쓰는 3.11에서 import를 막던 3.12 전용 f-string 문법 2곳과 `typing.Any`·`Optional` 누락은 2026-09-16까지 모두 고쳤고, 테스트 CI가 3.11·3.12에서 파싱·미정의 이름·import 스모크를 매 push 확인합니다. 3.14는 어노테이션을 지연 평가해 이런 누락이 로컬에서 드러나지 않으므로 CI 게이트가 유일한 방어선입니다. 실제 PyInstaller 동결 빌드(릴리스 CI)는 아직 실행된 적이 없습니다.
-- **테스트 자동화**: 테스트 CI(`test.yml`)가 Jest 전체와 오프라인 pytest 집합을 매 push 실행합니다. `scripts/test_*.py` 전체(261파일)는 한 번에 돌리면 네트워크 대기로 멈춰 파일별 실행이 필요하고, PPTX 레이아웃 계열 13파일 30건은 현재 엔진과 기대값이 어긋나 판정 대기 중입니다. 릴리스 CI 자체에는 테스트 스텝이 없습니다.
+- **테스트 자동화**: 테스트 CI(`test.yml`)가 Jest 전체와 오프라인 pytest 집합을 매 push 실행합니다. `scripts/test_*.py` 전체(261파일)는 한 번에 돌리면 네트워크 대기로 멈춰 파일별 실행이 필요하고, PPTX 계열 62파일 336건은 2026-09-16 하이브리드 계약 기준으로 판정·갱신되어 전부 통과합니다(엔진 결함 4건 수정, 이전 세대 기대값 26건 갱신). 릴리스 CI 자체에는 테스트 스텝이 없고 테스트 CI가 선행 게이트입니다.
 - **모델**: Claude Opus 계열은 게이트웨이 스트리밍 경로에서 지원되지 않아 계획·평가 노드에는 Sonnet 4.5를 사용합니다.
 - **오프라인**: Monaco 에디터는 CDN에서 로드되므로 오프라인에서는 에디터가 뜨지 않습니다.
 
@@ -617,6 +625,7 @@ DMG와 `scripts/install-mac.command`를 같은 폴더에 두고 스크립트를 
 - **외부 egress 가시성**: 리서치 도구는 옵트인·동의 게이트를 지키지만 셸 도구는 그 게이트 밖에 있다. 그래서 `run_command`가 외부 네트워크 신호를 보이면 차단하는 대신 신호·대상 호스트·게이트 상태만 로그에 남긴다(명령 원문 미기록). 셸을 막으면 npm·git·pip이 죽기 때문이다. 셸에 넘기는 모델 입력(검색어·경로·패턴)은 `shlex.quote`/`shellQuote`로 인용하고, git IPC는 argv 배열로 실행해(로컬은 셸 미경유) 메타문자가 명령으로 해석되지 않게 한다. 리서치 본문 수집(`fetch_url_raw`)은 사설·루프백·메타데이터 주소와 내부 호스트명을 요청 전에 차단하고 리다이렉트도 hop마다 재검사한다(SSRF 방어).
 - **손실-0 · 바이트 보존**: 생성된 이미지는 어떤 분기에서도 폐기하지 않고, 새 렌더 기능은 no-op 기본값으로만 추가해 기존 산출물이 바이트 단위로 동일하게 유지되도록 한다.
 - **콘텐츠 텍스트는 이미지로 굽지 않는다**: 편집 가능성 우선. 외부 URL은 HTML 슬라이드에 절대 넣지 않는다.
+- **도구 실행 경계**: 모델이 고르는 셸·파일 도구는 프로젝트·생성 루트 안에서만 쓰고, 브리지 토큰·비밀류 env와 자격증명 파일은 도구에 노출하지 않는다. 해제는 명시적 env로만.
 - **실측 근거를 남긴다**: 타임아웃·동시성·모델 선택 같은 수치는 재현한 사고나 벤치마크와 함께 주석에 기록한다("동시 캡처 20개 이상에서 프레임 드롭, macOS Sonoma+M2 실측" 등).
 - **스펙 먼저**: requirements → design(Correctness Properties) → tasks, 버그는 bug_condition 테스트로 재현한 뒤 수정한다.
 

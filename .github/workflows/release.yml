@@ -6,7 +6,15 @@ on:
   push:
     tags:
       - "v*"
-  workflow_dispatch: {}
+  # 수동 실행은 기본적으로 "빌드만"(publish=never) — 릴리스를 만들지 않고 PyInstaller 동결 + electron-builder
+  # 파이프라인 자체를 검증한다(산출물은 워크플로 아티팩트로만). 태그 푸시는 항상 GitHub Releases 에 올린다.
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "electron-builder --publish 모드 (never=빌드·아티팩트만, always=GitHub Releases 업로드)"
+        type: choice
+        default: "never"
+        options: ["never", "always"]
 
 permissions:
   contents: write   # 릴리스 자산 업로드에 필요
@@ -93,7 +101,11 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: npx electron-builder --${{ matrix.artifact }} --publish always
+          # 태그 푸시 = always(릴리스 업로드). 수동 실행 = inputs.publish(기본 never: 빌드 검증만).
+          # 입력은 choice(never|always)로 제한되지만 셸에는 env 로만 전달한다(인젝션 방지 관례).
+          PUBLISH_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.publish || 'always' }}
+        shell: bash
+        run: npx electron-builder --${{ matrix.artifact }} --publish "$PUBLISH_MODE"
 
       - name: Upload build artifacts (백업)
         if: always()

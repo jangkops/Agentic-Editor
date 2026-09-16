@@ -130,7 +130,10 @@ const ALLOWED_TRANSITIONS = Object.freeze({
  * @returns {boolean}
  */
 function isValidTransition(from, to) {
-  const allowed = ALLOWED_TRANSITIONS[from];
+  // 비문자열 입력은 그대로 false — 객체 키 조회는 ToPropertyKey 로 `toString` 을 호출하므로
+  // `{toString: {}}` 같은 값이 들어오면 TypeError 가 났다(Property 29, CI fast-check 반례 2026-09-17).
+  if (typeof from !== 'string' || typeof to !== 'string') return false;
+  const allowed = Object.prototype.hasOwnProperty.call(ALLOWED_TRANSITIONS, from) ? ALLOWED_TRANSITIONS[from] : undefined;
   return Array.isArray(allowed) && allowed.includes(to);
 }
 

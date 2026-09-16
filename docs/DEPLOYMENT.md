@@ -64,7 +64,7 @@ npm run dist                                        # build:python + electron-bu
 
 ## 5. 릴리스 (GitHub Actions)
 
-`.github/workflows/release.yml`은 `v*` 태그 푸시 또는 수동 실행(workflow_dispatch)으로 돌며, `macos-latest`와 `windows-latest`
+`.github/workflows/release.yml`은 `v*` 태그 푸시(GitHub Releases 업로드) 또는 수동 실행(workflow_dispatch — 기본 `publish=never`로 **빌드·아티팩트만 만들어 파이프라인을 검증**, `always`를 고르면 업로드)으로 돌며, `macos-latest`와 `windows-latest`
 두 러너에서 각각 Node 20 + Python 3.11로 `npm ci` → 의존성 설치 + `check_frozen_imports.py` → `npm run build:python` →
 `npx electron-builder --mac|--win --publish always`(`GITHUB_TOKEN`) 순으로 실행하고, 산출물을 GitHub Releases와 워크플로
 아티팩트(`ai-editor-mac`, `ai-editor-win`)에 올립니다. **CI에는 테스트 스텝이 없습니다**(README 11장) — 태그 전에 로컬에서 돌립니다.
