@@ -959,6 +959,7 @@ class GatewayClient:
         max_retries = 2
         attempt = 0
         _prefix_fallback_used = False  # 양방향 prefix 폴백은 정확히 1회
+        _expiry_retry_used = False     # 자격증명 만료 → 갱신 후 재시도는 정확히 1회(converse 경로와 같은 정책)
         # 시작점 — 모델별 사전 한계
         current_max = _resolve_model_max_tokens(model_id)
         # env_cap
@@ -981,6 +982,7 @@ class GatewayClient:
             had_data = False
             _output_seen = False   # 모델 출력 프레임을 방출했는지
             _prefix_retry = False  # in-band prefix 폴백 재시도가 예약됐는지
+            _expiry_retry = False  # in-band 자격증명 만료 재시도가 예약됐는지
             try:
                 async with httpx.AsyncClient(
                     # SSE 스트림 — Lambda 응답 시간 제한 없음 (1시간), connect 30초, read 5분
@@ -1045,6 +1047,12 @@ class GatewayClient:
                                                 _prefix_retry = True
                                                 # 오류를 방출하지 않고 while 루프 재시작
                                                 break
+                                        # 자격증명 만료가 in-band error(HTTP 200)로 오는 경우 — 출력 전이면
+                                        # 오류를 방출하지 않고 갱신 후 1회 재시도한다(아래 공통 블록).
+                                        if (not _output_seen) and (not _expiry_retry_used) \
+                                                and self._is_expired_error(msg):
+                                            _expiry_retry = True
+                                            break
                                     if evt.get("type") not in _SSE_NON_OUTPUT_EVENT_TYPES:
                                         _output_seen = True
                                     had_data = True
@@ -1067,6 +1075,21 @@ class GatewayClient:
             # in-band prefix 폴백 예약 → 교정된 model_id로 같은 while 루프에서 재시도
             if _prefix_retry:
                 continue
+            # 자격증명 만료(HTTP 403 본문 / in-band error) → 강제 갱신 후 1회 재시도.
+            # 예전에는 이 경로(주 채팅 경로)에만 재시도가 없어 만료 순간의 요청이 그대로 실패했다.
+            if not _expiry_retry_used and not had_data:
+                _emsg_exp = "" if error_event is None else str(error_event.get("message") or error_event.get("error") or "")
+                if _expiry_retry or (error_event is not None and self._is_expired_error(_emsg_exp)):
+                    _expiry_retry_used = True
+                    print("[GW SSE] 자격증명 만료 감지 → 갱신 후 재시도")
+                    self.force_refresh_creds()
+                    try:
+                        self._get_creds()   # 갱신 실패(프로파일·주입 모두 없음)면 여기서 드러난다
+                    except Exception as _e:  # noqa: BLE001
+                        yield {"type": "error", "message": f"자격증명 만료 후 갱신 실패: {_e}"}
+                        return
+                    error_event = None
+                    continue
             # prefix 형태 불일치로 거부 → 반대 형태로 1회 폴백 (양방향, 데이터 미방출 시에만)
             if error_event is not None and not had_data and not _prefix_fallback_used:
                 _emsg = str(error_event.get("message") or error_event.get("error") or "")

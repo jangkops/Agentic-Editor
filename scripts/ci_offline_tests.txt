@@ -9,7 +9,10 @@ scripts/test_capability_activation_subset_pbt.py
 scripts/test_capability_api_models_baseline.py
 scripts/test_capability_baseline_inspector.py
 scripts/test_capability_managed_segment_merge.py
-scripts/test_capability_validation_runner.py
+scripts/test_conversation_memory_persistence.py
+scripts/test_gateway_sse_expiry_retry.py
+# scripts/test_capability_validation_runner.py — 러너의 "인터프리터 판정"이 저장소 venv(ai_engine/.venv) 실행을 전제해
+#   CI 인터프리터(/opt/hostedtoolcache)에서는 12건이 'blocked' 로 나온다(1차 CI 실측). 로컬 파일별 러너로만 검증.
 scripts/test_deep_research_answer_quality_metadata.py
 scripts/test_effort_injection_exact_once_pbt.py
 scripts/test_execute_tool_search_files_quoting.py

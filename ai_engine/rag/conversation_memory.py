@@ -6,9 +6,32 @@ LLM에는 [요약 체크포인트] + [최근 원본 메시지]를 전달.
 """
 import json
 import os
+import re
 import time
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass, field, asdict
+
+
+# 체크포인트는 디스크에 남으므로 요약 본문에 섞여 들어온 자격증명 형태의 문자열은 저장 전에 지운다.
+# (AWS access key, GitHub/OpenAI/Slack 토큰, PEM 개인키 블록, "sk-…" 류 긴 토큰)
+_SECRET_PATTERNS = [
+    re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{16}"),
+    re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
+    re.compile(r"xox[abprs]-[A-Za-z0-9-]{10,}"),
+    re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S),
+    re.compile(r"(?i)(aws_secret_access_key|aws_session_token|api[_-]?key|secret|token)\s*[:=]\s*['\"]?[A-Za-z0-9/+_=-]{16,}"),
+]
+
+
+def scrub_secrets(text: str) -> str:
+    """요약/핵심 사실에서 자격증명 형태 문자열을 `[REDACTED]` 로 바꾼다(저장 전 호출)."""
+    if not text:
+        return text
+    out = text
+    for pat in _SECRET_PATTERNS:
+        out = pat.sub("[REDACTED]", out)
+    return out
 
 
 @dataclass
@@ -56,15 +79,20 @@ class ConversationMemory:
         return None
 
     def save_checkpoint(self, cp: ConversationCheckpoint):
-        """체크포인트 저장."""
+        """체크포인트 저장 — 비밀 패턴 제거 후 사용자 전용 권한(0600)으로 원자적 기록."""
+        cp.summary = scrub_secrets(cp.summary)
+        cp.key_facts = [scrub_secrets(f) for f in (cp.key_facts or [])]
         self._checkpoints[cp.session_id] = cp
         path = self._checkpoint_path(cp.session_id)
         if path:
             try:
-                with open(path, 'w') as f:
+                tmp = f"{path}.tmp"
+                with open(tmp, 'w', encoding='utf-8') as f:
                     json.dump(asdict(cp), f, ensure_ascii=False, indent=2)
-            except Exception:
-                pass
+                os.chmod(tmp, 0o600)
+                os.replace(tmp, path)
+            except Exception as e:  # noqa: BLE001 — 저장 실패는 대화를 막지 않는다
+                print(f"[Memory] 체크포인트 저장 실패({path}): {e}")
 
     def build_messages(
         self,

@@ -3,8 +3,9 @@ const path = require('path');
 const fs = require('fs');
 
 class DataStore {
-  constructor() {
-    this.basePath = app ? app.getPath('userData') : path.join(require('os').homedir(), '.ai-editor');
+  /** @param {string} [basePath] 테스트·도구용 저장 루트 오버라이드(기본: Electron userData) */
+  constructor(basePath) {
+    this.basePath = basePath || (app ? app.getPath('userData') : path.join(require('os').homedir(), '.ai-editor'));
     this._ensureDirs();
   }
 
@@ -38,10 +39,18 @@ class DataStore {
     const p = path.join(this.basePath, 'history', `${date}.json`);
     let existing = [];
     if (fs.existsSync(p)) {
-      try { existing = JSON.parse(fs.readFileSync(p, 'utf-8')); } catch {}
+      try {
+        const parsed = JSON.parse(fs.readFileSync(p, 'utf-8'));
+        existing = Array.isArray(parsed) ? parsed : [];
+      } catch {
+        // 손상된 그날 이력을 빈 배열로 덮어쓰면 하루치가 사라진다 — 원본을 옆에 보존한 뒤 새로 시작한다.
+        try { fs.copyFileSync(p, `${p}.corrupt-${Date.now()}`); } catch { /* 백업 실패는 저장을 막지 않는다 */ }
+      }
     }
     existing.push(...messages);
-    fs.writeFileSync(p, JSON.stringify(existing, null, 2), 'utf-8');
+    const tmp = `${p}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(existing, null, 2), 'utf-8');
+    fs.renameSync(tmp, p);
   }
 
   // Usage

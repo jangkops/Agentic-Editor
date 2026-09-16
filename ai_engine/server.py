@@ -7568,10 +7568,25 @@ def _is_code_related(prompt: str) -> bool:
     return False
 
 
+def _conversation_memory_dir() -> str:
+    """대화 요약 체크포인트 저장 위치.
+
+    AE_MEMORY_DIR > dirname(AE_GENERATED_ROOT)/memory (Electron: userData/memory) > ~/.agentic-editor/memory.
+    (예전에는 get_memory() 를 인자 없이 불러 storage_dir="" → 요약이 프로세스 메모리에만 있었고
+    사이드카 재기동 때 사라졌다.)
+    """
+    env = os.environ.get("AE_MEMORY_DIR", "").strip()
+    if env:
+        return env
+    gen = os.environ.get("AE_GENERATED_ROOT", "").strip()
+    base = os.path.dirname(gen.rstrip("/\\")) if gen else os.path.expanduser("~/.agentic-editor")
+    return os.path.join(base, "memory")
+
+
 def _build_messages(chat_history: list, current_prompt: str, session_id: str = "") -> list:
     """ConversationMemory를 통해 messages 구성."""
     from ai_engine.rag.conversation_memory import get_memory
-    mem = get_memory()
+    mem = get_memory(_conversation_memory_dir())
     messages, _ = mem.build_messages(session_id or "default", chat_history, current_prompt)
     return messages
 
@@ -7627,7 +7642,7 @@ async def _maybe_summarize(session_id: str, chat_history: list, gw):
     """대화가 길어지면 비동기로 요약 체크포인트 생성."""
     try:
         from ai_engine.rag.conversation_memory import get_memory
-        mem = get_memory()
+        mem = get_memory(_conversation_memory_dir())
         _, needs = mem.build_messages(session_id, chat_history, "")
         if needs:
             await mem.summarize_and_checkpoint(session_id, chat_history, gw)
