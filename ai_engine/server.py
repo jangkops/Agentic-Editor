@@ -10951,7 +10951,7 @@ async def run_agent_with_tools(request: Request):
                     if "internalserverexception" in err_lower or "internal server" in err_lower or "tool" in err_lower:
                         tool_unsupported_fallback_tried = True
                         print(f"[Agent] tool-use 미지원 모델 감지 — toolConfig 없이 재시도")
-                        yield f"data: {json.dumps({"info": "tool-unsupported, retrying without tools"}, ensure_ascii=False)}\n\n"
+                        yield f"data: {json.dumps({'info': 'tool-unsupported, retrying without tools'}, ensure_ascii=False)}\n\n"
                         continue
 
                 # content_blocks 조합
@@ -12651,11 +12651,16 @@ async def _enrich_content_via_gateway(
     # === 약점 2 개선: 실제 디스크 데이터 주입 ===
     # 폴더 구조/파일 목록 같은 사실 기반 작업은 LLM이 추측하지 않도록 실제 데이터 첨부.
     real_context = _gather_real_context(description, project_path)
+    # Python 3.11 호환: f-string 표현식 안의 백슬래시·중첩 f-string 은 3.12+(PEP 701) 전용이라 먼저 조립한다.
+    real_block = (
+        f"### 실제 프로젝트 데이터 (디스크에서 직접 수집)\n\n{real_context}\n\n위 실제 데이터를 그대로 인용해서 작성하세요. 추측이나 가공 금지.\n"
+        if real_context else ""
+    )
 
     user_msg_base = f"""작업: {title}
 지시사항: {description}
 
-{f'### 실제 프로젝트 데이터 (디스크에서 직접 수집)\n\n{real_context}\n\n위 실제 데이터를 그대로 인용해서 작성하세요. 추측이나 가공 금지.\n' if real_context else ''}
+{real_block}
 이전 응답 일부 (참고):
 {(final_text or '')[:1500]}
 

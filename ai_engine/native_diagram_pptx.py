@@ -16,6 +16,8 @@
 """
 from __future__ import annotations
 
+import os
+
 
 def _hex_to_rgb(h: str):
     """'#RRGGBB' 또는 'RRGGBB' → (r,g,b). 실패 시 None."""

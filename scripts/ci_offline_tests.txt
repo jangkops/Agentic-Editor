@@ -1,0 +1,23 @@
+# CI(.github/workflows/test.yml)에서 Linux 러너 · 네트워크 없이 · Chrome 없이 돌아가는 pytest 파일 목록.
+# 한 줄에 파일 하나, '#' 은 주석. 로컬 전체 실행은 scripts/test_*.py 를 파일별로 돌리는 러너를 쓴다(README 9장).
+# 제외 이유: fastembed 모델 다운로드 대기(answer_quality_orchestrator_pbt, context_builder_*, quality_store_deferred_pbt,
+#   verify_e2e_harness), Chrome 헤드리스(density_parity_integration), PPTX 레이아웃 기대값 불일치 판정 전(pptx_*, native_*).
+scripts/test_aggregate_node.py
+scripts/test_aggregate_preservation_pbt.py
+scripts/test_api_models_catalog_creds.py
+scripts/test_capability_activation_subset_pbt.py
+scripts/test_capability_api_models_baseline.py
+scripts/test_capability_baseline_inspector.py
+scripts/test_capability_managed_segment_merge.py
+scripts/test_capability_validation_runner.py
+scripts/test_deep_research_answer_quality_metadata.py
+scripts/test_effort_injection_exact_once_pbt.py
+scripts/test_execute_tool_search_files_quoting.py
+scripts/test_health_boot_id.py
+scripts/test_model_id_resolution_and_hide.py
+scripts/test_openai_security_structure.py
+scripts/test_openai_sync_body_no_modelid_pbt.py
+scripts/test_research_ssrf_guard.py
+scripts/test_shell_egress_audit.py
+scripts/test_test_hygiene_no_module_global_clobber.py
+scripts/test_token_mask_property.py

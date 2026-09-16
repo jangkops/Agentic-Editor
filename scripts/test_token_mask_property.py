@@ -29,12 +29,11 @@ def test_property11_long_token_not_exposed(token):
     masked = mask_token(token)
     # 앞 4자 + "****" 형태
     assert masked == token[:4] + "****"
-    # 5자 이상 토큰의 5번째 글자 이후 원문이 마스킹 결과에 통째로 포함되면 안 됨
-    tail = token[4:]
-    if tail:
-        assert tail not in masked
-    # 전체 원문이 그대로 노출되지 않음
-    assert token not in masked
+    # 5번째 글자 이후는 무조건 별표 4개 — 접두 4자 밖의 원문은 어떤 형태로도 남지 않는다.
+    # (예전 속성 "tail not in masked" 는 꼬리가 접두와 겹치는 토큰(예: "00000" → "0000****")에서
+    #  성립할 수 없어 구현이 아니라 속성이 틀렸던 것이다.)
+    assert masked[4:] == "****"
+    assert len(masked) == 8
 
 
 @_HSET

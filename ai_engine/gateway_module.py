@@ -502,7 +502,7 @@ class GatewayClient:
         self._injected_creds = Credentials(access_key, secret_key, session_token)
         self._creds = self._injected_creds
         self._cred_time = __import__("time").time()
-        print(f"[GW] 자격증명 주입 완료: {access_key[:8]}...")
+        print("[GW] 자격증명 주입 완료")
 
     def _sign(self, method, url, body_bytes):
         """botocore SigV4로 서명된 헤더 반환."""
