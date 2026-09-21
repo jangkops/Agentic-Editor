@@ -411,10 +411,10 @@ aws sso login --profile bedrock-gw
 
 ### 실행
 ```bash
-npm run dev            # uvicorn(8765) + Electron 동시 실행
-NO_RELOAD=1 npm run dev # 서버 auto-reload 끄기
+npm run dev                # uvicorn(8765) + Electron 동시 실행 (사이드카는 auto-reload 없음)
+npm run dev:python:reload  # Python 변경을 자동 반영하려면 사이드카만 이 스크립트로 따로 기동
 ```
-프론트엔드(`src/`, `electron/`) 변경은 Cmd+R, 메인/Python 변경은 재시작이 필요합니다. `dev:python`을 단독으로 띄울 때는 Electron이 주입하는 `AE_GENERATED_ROOT`가 없으므로 설정 파일을 못 찾을 수 있습니다. 이 경우 `AE_SETTINGS_PATH`로 `settings.json` 경로를 지정하세요.
+프론트엔드(`src/`, `electron/`) 변경은 Cmd+R, 메인/Python 변경은 재시작이 필요합니다(사이드카를 `dev:python:reload`로 띄웠다면 Python 변경은 자동 재기동). `dev:python`을 단독으로 띄울 때는 Electron이 주입하는 `AE_GENERATED_ROOT`가 없으므로 설정 파일을 못 찾을 수 있습니다. 이 경우 `AE_SETTINGS_PATH`로 `settings.json` 경로를 지정하세요.
 
 ### 단축키
 | 단축키 | 동작 |
@@ -476,7 +476,7 @@ NO_RELOAD=1 npm run dev # 서버 auto-reload 끄기
 | 보안 | `AE_TOOL_WRITE_ANYWHERE` | — | `1`이면 `write_file`의 허용 루트 제한 해제 |
 | 보안 | `AE_TOOL_READ_SECRETS` | — | `1`이면 `read_file`이 `.env`·`*.pem`·`id_rsa` 등도 읽음 |
 | 테스트 | `AE_SKIP_CHROME_TESTS` | — | `1`이면 Chrome 헤드리스 픽셀 테스트를 건너뜀(Chrome을 띄울 수 없는 샌드박스) |
-| 개발 | `NO_RELOAD` | — | uvicorn auto-reload 끄기 |
+| 개발 | `AE_DEV_RELOAD` / `NO_RELOAD` | — | `scripts/start_server.py`로 사이드카를 띄울 때만 읽힘. `AE_DEV_RELOAD=1`이면 auto-reload, `NO_RELOAD=1`이면 그래도 끔. `npm run dev`(=`dev:python`)는 원래 reload 없이 뜨므로 이 변수들의 영향을 받지 않음 |
 
 ---
 
@@ -608,7 +608,7 @@ DMG와 `scripts/install-mac.command`를 같은 폴더에 두고 스크립트를 
 - **원격 SSH**: 파일·터미널·명령 실행은 동작합니다. 원격 `ai_engine`으로의 포트 포워딩은 호출 규약 오류로 2026-05 이후 한 번도 열리지 않았던 것을 고쳤고, 이제 터널 너머 `/health`가 2xx일 때만 라우팅을 전환합니다(실패하면 로컬 엔진 유지). **실제 원격 호스트에서의 종단 검증은 아직 하지 않았습니다.** 자동 재연결은 미구현이며 끊김 시 로컬로 폴백합니다.
 - **effort(추론 강도) 컨트롤**: 카탈로그에 effort 계약이 선언된 모델에서만 표시됩니다. 현재 운영자 카탈로그에는 선언이 없어 UI가 나타나지 않습니다.
 - **기본 채팅 경로(graph-stream)**: `thinking`·`answerQuality` SSE는 아직 `run-stream`/`run-agent`에서만 방출됩니다.
-- **Python 버전**: 개발 환경은 3.14입니다. 릴리스 CI가 쓰는 3.11에서 import를 막던 3.12 전용 f-string 문법 2곳과 `typing.Any`·`Optional` 누락은 2026-09-16까지 모두 고쳤고, 테스트 CI가 3.11·3.12에서 파싱·미정의 이름·import 스모크를 매 push 확인합니다. 3.14는 어노테이션을 지연 평가해 이런 누락이 로컬에서 드러나지 않으므로 CI 게이트가 유일한 방어선입니다. 실제 PyInstaller 동결 빌드(릴리스 CI)는 아직 실행된 적이 없습니다.
+- **Python 버전**: 개발 환경은 3.14입니다. 릴리스 CI가 쓰는 3.11에서 import를 막던 3.12 전용 f-string 문법 2곳과 `typing.Any`·`Optional` 누락은 2026-09-16까지 모두 고쳤고, 테스트 CI가 3.11·3.12에서 파싱·미정의 이름·import 스모크를 매 push 확인합니다. 3.14는 어노테이션을 지연 평가해 이런 누락이 로컬에서 드러나지 않으므로 CI 게이트가 유일한 방어선입니다. 2026-09-17 릴리스 워크플로 수동 실행(`publish=never`)에서 **macOS 러너의 PyInstaller 동결 + electron-builder 빌드가 처음으로 끝까지 성공**했습니다(아티팩트 `ai-editor-mac`). Windows 러너는 번들된 fastembed 모델 캐시가 심볼릭 링크라 7-Zip 패키징 단계에서 실패하며, `scripts/build-python.js`에서 링크를 실제 파일로 풀어 주는 수정이 남아 있습니다.
 - **테스트 자동화**: 테스트 CI(`test.yml`)가 Jest 전체와 오프라인 pytest 집합을 매 push 실행합니다. `scripts/test_*.py` 전체(261파일)는 한 번에 돌리면 네트워크 대기로 멈춰 파일별 실행이 필요하고, PPTX 계열 62파일 336건은 2026-09-16 하이브리드 계약 기준으로 판정·갱신되어 전부 통과합니다(엔진 결함 4건 수정, 이전 세대 기대값 26건 갱신). 릴리스 CI 자체에는 테스트 스텝이 없고 테스트 CI가 선행 게이트입니다.
 - **모델**: Claude Opus 계열은 게이트웨이 스트리밍 경로에서 지원되지 않아 계획·평가 노드에는 Sonnet 4.5를 사용합니다.
 - **오프라인**: Monaco 에디터는 CDN에서 로드되므로 오프라인에서는 에디터가 뜨지 않습니다.
