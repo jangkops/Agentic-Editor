@@ -69,6 +69,20 @@ jobs:
           AE_REQUIRE_EMBED_BUNDLE: "1"
         run: npm run build:python
 
+      # R1.4/R1.5 — 동결 백엔드 기동 스모크(스펙 app-deployment-readiness 태스크 12.4). 동결 바이너리를 실제로 띄워
+      # 30초 안에 /health 200 을 받고 기능 경로 대표 호출(PPTX 파서·이미지 라우팅·브리지 상태)을 확인한다.
+      # 자격증명이 없는 러너라 LLM·다이어그램 경로는 skipped 로 기록되고 판정에 영향이 없다. 진단 엔드포인트
+      # 프로브를 위해 AE_DEBUG_ENDPOINTS=1 을 스모크 프로세스에만 준다(배포본 기본값은 잠김). 실패 = 빌드 실패:
+      # "동결은 됐는데 기동이 안 되는 산출물"을 패키징 단계로 넘기지 않는다.
+      - name: Smoke-test frozen backend (boot ≤30s + feature-path probes)
+        shell: bash
+        env:
+          AE_DEBUG_ENDPOINTS: "1"
+        run: |
+          BIN=ai_engine_dist/ai-engine-server/ai-engine-server
+          if [ "$RUNNER_OS" = "Windows" ]; then BIN="$BIN.exe"; fi
+          python scripts/smoke_frozen_backend.py --target frozen --binary "$BIN"
+
       # R3.5 — 미서명 폴백 체크(비차단). 서명·공증에 필요한 시크릿이 설정돼 있는지
       # 빌드 스텝 앞에서 확인만 한다. 서명 자산이 없으면 "⚠️ 미서명 빌드" 경고를 남기고
       # 빌드를 그대로 진행한다(실패 아님 — R3.5). 있으면 서명·공증이 활성화됨을 로그로 알린다.
