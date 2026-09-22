@@ -12,7 +12,9 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { materializeSymlinks, countSymlinks, dirSizeBytes } = require('../../scripts/build-python');
+const {
+  materializeSymlinks, countSymlinks, dirSizeBytes, removeOrphanBlobDirs, verifyBundledModelOffline,
+} = require('../../scripts/build-python');
 
 function canSymlink() {
   const probe = fs.mkdtempSync(path.join(os.tmpdir(), 'ae-symlink-probe-'));
@@ -128,16 +130,85 @@ describeIfSymlink('build-python materializeSymlinks — HF 캐시 심볼릭 링�
     expect(countSymlinks(cacheRoot)).toBe(0);
   });
 
-  test('blobs/ 는 모델 디렉터리에 링크가 남아 있으면 지우지 않는다 (models-- 밖의 링크는 무관)', () => {
-    // models-- 접두어가 없는 디렉터리는 blobs 정리 대상이 아님을 겸해 확인
-    const other = path.join(cacheRoot, 'not-a-model');
-    fs.mkdirSync(path.join(other, 'blobs'), { recursive: true });
-    fs.writeFileSync(path.join(other, 'blobs', 'x'), 'x');
-    makeHfCache(cacheRoot);
+  test('huggingface_hub 1.32 레이아웃: 캐시 루트 blobs/<샤드>/<hash> 도 고아로 제거된다 (CI 481MB 중복의 원인)', () => {
+    // 2026-09-22 릴리스 검증 빌드 실측: models--*/ 안에는 blobs 가 없고 캐시 루트에 blobs/e2, blobs/18 …
+    // snapshots 링크는 세 단계 위의 루트 blobs 를 가리킨다.
+    const modelName = 'models--qdrant--paraphrase-multilingual-MiniLM-L12-v2-onnx-Q';
+    const model = path.join(cacheRoot, modelName);
+    const snap = path.join(model, 'snapshots', 'faf4aa4225822f3bc6376869cb1164e8e3feedd0');
+    fs.mkdirSync(snap, { recursive: true });
+    fs.mkdirSync(path.join(model, 'refs'), { recursive: true });
+    fs.mkdirSync(path.join(model, 'trees'), { recursive: true });
+    fs.writeFileSync(path.join(model, 'refs', 'main'), 'faf4aa4225822f3bc6376869cb1164e8e3feedd0');
+    fs.writeFileSync(path.join(model, 'trees', 'faf4aa4225822f3bc6376869cb1164e8e3feedd0.json'), '{}');
+    fs.writeFileSync(path.join(model, 'files_metadata.json'), '{}');
+    const files = {
+      'model_optimized.onnx': ['e2ab7f00c29dc934c8fa72b8a4fe91dd4d420a22f1d82a241058d4316e659a99', 'ONNX-ROOT-BLOB-0123456789'],
+      'config.json': ['18cd6dbbbe502a10e2d64525481c6f444d125403aa', '{"model_type":"bert"}'],
+      'tokenizer.json': ['e2ff5fc160bbdbab64058d4fc91b60e62d207e8dc60b9af5c002c5ab946ded00', '{"version":"1.0"}'],
+    };
+    let payload = 0;
+    for (const [name, [hash, content]] of Object.entries(files)) {
+      const shard = path.join(cacheRoot, 'blobs', hash.slice(0, 2));
+      fs.mkdirSync(shard, { recursive: true });
+      fs.writeFileSync(path.join(shard, hash), content);
+      fs.symlinkSync(path.join('..', '..', '..', 'blobs', hash.slice(0, 2), hash), path.join(snap, name));
+      payload += Buffer.byteLength(content);
+    }
+    expect(countSymlinks(cacheRoot)).toBe(3);
 
-    materializeSymlinks(cacheRoot);
+    const n = materializeSymlinks(cacheRoot);
 
-    expect(fs.existsSync(path.join(other, 'blobs', 'x'))).toBe(true);
+    expect(n).toBe(3);
+    expect(countSymlinks(cacheRoot)).toBe(0);
+    expect(fs.existsSync(path.join(cacheRoot, 'blobs'))).toBe(false);
+    for (const [name, [, content]] of Object.entries(files)) {
+      expect(fs.lstatSync(path.join(snap, name)).isFile()).toBe(true);
+      expect(fs.readFileSync(path.join(snap, name), 'utf8')).toBe(content);
+    }
+    // 두 배가 아니어야 한다: payload 한 벌 + 작은 메타 파일들
+    const after = dirSizeBytes(cacheRoot);
+    expect(after).toBeGreaterThanOrEqual(payload);
+    expect(after).toBeLessThan(payload * 2);
+    expect(fs.existsSync(path.join(model, 'refs', 'main'))).toBe(true);
+  });
+
+  test('removeOrphanBlobDirs: 링크가 하나라도 남아 있으면 어떤 blobs 도 지우지 않고, 0개면 깊이 무관하게 모두 지운다', () => {
+    fs.mkdirSync(path.join(cacheRoot, 'blobs', 'e2'), { recursive: true });
+    fs.writeFileSync(path.join(cacheRoot, 'blobs', 'e2', 'e2aa'), 'root-blob');
+    fs.mkdirSync(path.join(cacheRoot, 'models--x', 'blobs'), { recursive: true });
+    fs.writeFileSync(path.join(cacheRoot, 'models--x', 'blobs', 'sha'), 'model-blob');
+    fs.mkdirSync(path.join(cacheRoot, 'models--x', 'snapshots', 'r'), { recursive: true });
+    fs.symlinkSync(path.join('..', '..', 'blobs', 'sha'), path.join(cacheRoot, 'models--x', 'snapshots', 'r', 'f'));
+
+    expect(removeOrphanBlobDirs(cacheRoot)).toBe(0);
+    expect(fs.existsSync(path.join(cacheRoot, 'blobs', 'e2', 'e2aa'))).toBe(true);
+    expect(fs.existsSync(path.join(cacheRoot, 'models--x', 'blobs', 'sha'))).toBe(true);
+
+    fs.unlinkSync(path.join(cacheRoot, 'models--x', 'snapshots', 'r', 'f'));
+
+    expect(removeOrphanBlobDirs(cacheRoot)).toBe(2);
+    expect(fs.existsSync(path.join(cacheRoot, 'blobs'))).toBe(false);
+    expect(fs.existsSync(path.join(cacheRoot, 'models--x', 'blobs'))).toBe(false);
+    expect(removeOrphanBlobDirs(path.join(cacheRoot, 'nope'))).toBe(0);
+  });
+
+  test('verifyBundledModelOffline: 오프라인 env 를 강제하고 cache_dir·모델명을 그대로 파이썬에 넘기며, 실패는 전파한다', () => {
+    const calls = [];
+    verifyBundledModelOffline('/py/bin/python', 'org/model-name', '/tmp/cache dir', (cmd, opts) => calls.push({ cmd, opts }));
+
+    expect(calls).toHaveLength(1);
+    const { cmd, opts } = calls[0];
+    expect(opts.env.HF_HUB_OFFLINE).toBe('1');
+    expect(opts.env.TRANSFORMERS_OFFLINE).toBe('1');
+    expect(opts.env.PATH).toBe(process.env.PATH); // 기존 env 는 보존
+    expect(cmd.startsWith('"/py/bin/python" -c ')).toBe(true);
+    const code = JSON.parse(cmd.slice(cmd.indexOf(' -c ') + 4));
+    expect(code).toContain('from fastembed import TextEmbedding');
+    expect(code).toContain('model_name="org/model-name"');
+    expect(code).toContain('cache_dir="/tmp/cache dir"');
+
+    expect(() => verifyBundledModelOffline('py', 'm', '/c', () => { throw new Error('boom'); })).toThrow('boom');
   });
 
   test('실체화 전후 총 바이트가 같다 — blobs 제거로 번들이 두 배가 되지 않음을 크기로 고정', () => {

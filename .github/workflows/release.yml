@@ -61,7 +61,12 @@ jobs:
           python -m pip install -r ai_engine/requirements.txt
           python scripts/check_frozen_imports.py
 
+      # AE_REQUIRE_EMBED_BUNDLE=1: fastembed 모델 사전 번들(다운로드 → 심볼릭 링크 실체화 → 고아 blobs 제거 →
+      # HF_HUB_OFFLINE=1 실로드 프로브)이 하나라도 실패하면 빌드를 실패시킨다. 로컬 빌드의 "경고 후 LSA 폴백"을
+      # 릴리스에 허용하면 사내망 배포본이 조용히 저품질 검색으로 떨어지고 아무도 모른다(2026-09-22).
       - name: Build Python backend (PyInstaller, frozen onedir)
+        env:
+          AE_REQUIRE_EMBED_BUNDLE: "1"
         run: npm run build:python
 
       # R3.5 — 미서명 폴백 체크(비차단). 서명·공증에 필요한 시크릿이 설정돼 있는지

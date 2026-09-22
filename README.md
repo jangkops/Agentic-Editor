@@ -476,6 +476,8 @@ npm run dev:python:reload  # Python 변경을 자동 반영하려면 사이드�
 | 보안 | `AE_TOOL_WRITE_ANYWHERE` | — | `1`이면 `write_file`의 허용 루트 제한 해제 |
 | 보안 | `AE_TOOL_READ_SECRETS` | — | `1`이면 `read_file`이 `.env`·`*.pem`·`id_rsa` 등도 읽음 |
 | 테스트 | `AE_SKIP_CHROME_TESTS` | — | `1`이면 Chrome 헤드리스 픽셀 테스트를 건너뜀(Chrome을 띄울 수 없는 샌드박스) |
+| 빌드 | `AE_BUNDLE_EMBED_MODEL` | MiniLM-L12-v2 | `build:python`이 실행파일 옆에 사전 번들할 fastembed 모델 |
+| 빌드 | `AE_REQUIRE_EMBED_BUNDLE` | — | `1`이면 모델 번들(다운로드·링크 실체화·오프라인 실로드) 실패를 빌드 실패로 승격. 릴리스 CI가 설정 |
 | 개발 | `AE_DEV_RELOAD` / `NO_RELOAD` | — | `scripts/start_server.py`로 사이드카를 띄울 때만 읽힘. `AE_DEV_RELOAD=1`이면 auto-reload, `NO_RELOAD=1`이면 그래도 끔. `npm run dev`(=`dev:python`)는 원래 reload 없이 뜨므로 이 변수들의 영향을 받지 않음 |
 
 ---
@@ -591,6 +593,7 @@ npm run build:python                                # PyInstaller onedir + faste
 npx electron-builder --mac --arm64 --publish never  # arm64 DMG (무서명 사내 배포)
 npm run dist                                        # build:python + electron-builder
 ```
+- `build:python`은 모델을 내려받은 뒤 Hugging Face 캐시의 심볼릭 링크를 실제 파일로 풀고(Windows 7-Zip 패키징과 링크 미지원 PC 대비), 링크가 남지 않은 캐시의 고아 `blobs/`를 어느 깊이든 지워 번들이 두 배가 되지 않게 하고, 마지막에 `HF_HUB_OFFLINE=1`로 실제 로드를 확인합니다. 릴리스 CI는 `AE_REQUIRE_EMBED_BUNDLE=1`이라 이 중 하나라도 실패하면 빌드가 실패합니다(로컬 빌드는 경고 후 LSA 폴백). huggingface_hub 1.32부터 blobs가 캐시 루트 `blobs/<샤드>/`로 옮겨 가 처음 구현이 놓쳤던 것을 2026-09-22 검증 빌드의 크기 로그로 잡았습니다.
 - `node-pty`는 대상 아키텍처로 리빌드되어야 하며 asar 밖으로 풀립니다(`asarUnpack`).
 - PyInstaller spec은 `ai_engine` 서브모듈 전체와 서드파티 33개를 수집합니다. 필수 4모듈(matplotlib, scipy, langgraph, pptx)은 `scripts/check_frozen_imports.py`가 동결 전에 검사합니다.
 

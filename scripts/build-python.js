@@ -112,17 +112,59 @@ function materializeSymlinks(cacheRoot) {
     }
   };
   walk(cacheRoot);
-
-  for (const name of fs.readdirSync(cacheRoot)) {
-    if (!name.startsWith('models--')) continue;
-    const modelDir = path.join(cacheRoot, name);
-    if (!fs.lstatSync(modelDir).isDirectory()) continue;
-    const blobs = path.join(modelDir, 'blobs');
-    if (fs.existsSync(blobs) && countSymlinks(modelDir) === 0) {
-      fs.rmSync(blobs, { recursive: true, force: true });
-    }
-  }
+  removeOrphanBlobDirs(cacheRoot);
   return count;
+}
+
+/**
+ * 링크가 하나도 남지 않은 캐시에서 `blobs` 디렉터리를 모두 지운다(깊이 무관).
+ *
+ * blobs 의 유일한 용도는 snapshots 링크의 대상이므로, 링크가 0개면 어느 blobs 도 고아다.
+ * 위치는 huggingface_hub 버전에 따라 다르다 — 구 레이아웃은 `models--<이름>/blobs/<sha>`,
+ * 1.32(2026-09-22 CI 실측)는 캐시 루트의 `blobs/<2자리 샤드>/<hash>`. 처음 구현이 모델 디렉터리 안만
+ * 지워서 루트 blobs 240MB 가 살아남아 번들이 481MB 로 두 배가 됐다(검증 빌드 #35692905769).
+ * 링크가 남아 있으면 참조 가능성이 있으므로 아무것도 지우지 않는다.
+ *
+ * @returns {number} 지운 blobs 디렉터리 수
+ */
+function removeOrphanBlobDirs(cacheRoot) {
+  if (!fs.existsSync(cacheRoot) || countSymlinks(cacheRoot) !== 0) return 0;
+  let removed = 0;
+  const walk = (dir) => {
+    for (const name of fs.readdirSync(dir)) {
+      const p = path.join(dir, name);
+      if (!fs.lstatSync(p).isDirectory()) continue;
+      if (name === 'blobs') {
+        fs.rmSync(p, { recursive: true, force: true });
+        removed++;
+      } else {
+        walk(p);
+      }
+    }
+  };
+  walk(cacheRoot);
+  return removed;
+}
+
+/**
+ * 번들된 모델이 네트워크 없이 로드되는지 실제로 확인한다. 실체화·blobs 제거 뒤에 돌려야 의미가 있다.
+ * HF_HUB_OFFLINE=1 로 huggingface_hub 의 원격 조회를 막고 cache_dir 만으로 TextEmbedding 을 만들어
+ * 임베딩 1건을 뽑는다. 실패하면 throw — 호출자가 번들을 지우고(반쯤 깨진 번들을 배포하지 않기 위해)
+ * AE_REQUIRE_EMBED_BUNDLE 정책에 따라 빌드를 실패시킨다. 이 검사가 없으면 배포본은 조용히 LSA 폴백으로
+ * 떨어지고 아무도 모른다.
+ *
+ * @param {(cmd: string, opts: object) => any} run 테스트 주입용(기본 execSync)
+ */
+function verifyBundledModelOffline(py, modelName, cacheDir, run = execSync) {
+  const code = [
+    'import sys',
+    'from fastembed import TextEmbedding',
+    `m = TextEmbedding(model_name=${JSON.stringify(modelName)}, cache_dir=${JSON.stringify(cacheDir)})`,
+    'v = list(m.embed(["passage: offline probe"]))[0]',
+    'print("[build-python] offline load OK, dim=", len(v))',
+  ].join('; ');
+  const env = { ...process.env, HF_HUB_OFFLINE: '1', TRANSFORMERS_OFFLINE: '1', HF_HUB_DISABLE_TELEMETRY: '1' };
+  run(`"${py}" -c ${JSON.stringify(code)}`, { cwd: root, stdio: 'inherit', env });
 }
 
 function main() {
@@ -163,6 +205,9 @@ function main() {
     const bundleModel = process.env.AE_BUNDLE_EMBED_MODEL
       || 'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2';
     const modelCacheDir = path.join(outDir, 'ai-engine-server', 'fastembed_models');
+    // 릴리스 CI 는 AE_REQUIRE_EMBED_BUNDLE=1 — 번들 실패를 빌드 실패로 승격한다(사내망 오프라인 동작이 배포 전제).
+    // 로컬 빌드는 기본 관대: 경고만 남기고 런타임 LSA 폴백에 맡긴다.
+    const requireBundle = process.env.AE_REQUIRE_EMBED_BUNDLE === '1';
     try {
       console.log(`[build-python] pre-downloading embed model → ${modelCacheDir}`);
       fs.mkdirSync(modelCacheDir, { recursive: true });
@@ -189,11 +234,23 @@ function main() {
       const entries = fs.readdirSync(modelCacheDir);
       const blobsLeft = entries.filter((n) => n.startsWith('models--') && fs.existsSync(path.join(modelCacheDir, n, 'blobs')));
       const sizeMb = (dirSizeBytes(modelCacheDir) / 1048576).toFixed(1);
-      console.log(`[build-python] ✓ embed model bundled (offline-ready); symlinks materialized: ${materialized}, `
+      console.log(`[build-python] ✓ embed model materialized; symlinks: ${materialized}, `
         + `remaining: ${countSymlinks(modelCacheDir)}, blobs dirs left: ${blobsLeft.length}, size: ${sizeMb} MB, `
         + `entries: ${entries.join(', ')}`);
+
+      // 실제 오프라인 로드 확인 — 실패한 번들은 배포하지 않는다.
+      try {
+        verifyBundledModelOffline(py, bundleModel, modelCacheDir);
+      } catch (e) {
+        fs.rmSync(modelCacheDir, { recursive: true, force: true });
+        throw new Error(`offline load check failed, bundle removed: ${e.message}`);
+      }
+      console.log('[build-python] ✓ embed model bundled (offline-ready, verified without network)');
     } catch (e) {
-      // 모델 번들 실패는 치명적이지 않다 — 런타임에 LSA/TF-IDF로 폴백(무회귀).
+      if (requireBundle) {
+        throw new Error(`embed model bundle is required (AE_REQUIRE_EMBED_BUNDLE=1) but failed: ${e.message}`);
+      }
+      // 로컬 빌드: 치명적이지 않다 — 런타임에 LSA/TF-IDF 로 폴백(무회귀).
       console.warn('[build-python] ⚠ embed model bundle skipped (runtime LSA fallback):', e.message);
     }
 
@@ -206,4 +263,6 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { resolvePython, countSymlinks, dirSizeBytes, materializeSymlinks };
+module.exports = {
+  resolvePython, countSymlinks, dirSizeBytes, materializeSymlinks, removeOrphanBlobDirs, verifyBundledModelOffline,
+};
