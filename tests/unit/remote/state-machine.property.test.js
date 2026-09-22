@@ -19,12 +19,17 @@
  */
 
 const fc = require('fast-check');
+const { STATES, ALLOWED_TRANSITIONS, isValidTransition } = require('../../../electron/src/remote/remote-session');
 
 /**
- * 원본 remote-session.js에서 추출한 상태 및 전이 규칙
- * (테스트 독립성: 실제 모듈 임포트 대신 스펙 정의 복사)
+ * design.md 에 적힌 상태·전이 규칙의 사본.
+ *
+ * 예전에는 이 사본으로 만든 로컬 isValidTransition 을 검사해 실제 모듈은 한 줄도 테스트되지 않았고,
+ * 그 로컬 복사본이 fc.object() 가 만든 `{toString: 0}` 입력에 TypeError 를 내며 Property 29 가
+ * CI 에서 간헐 실패했다(2026-09-17 — 모듈 쪽은 이미 견고화돼 있었음). 지금은 동작 검증은 전부
+ * 실제 모듈 함수·테이블로 하고, 이 사본은 아래 "스펙-코드 정합" 테스트에서만 쓴다.
  */
-const STATES = Object.freeze({
+const SPEC_STATES = Object.freeze({
   DISCONNECTED: 'disconnected',
   CONNECTING: 'connecting',
   AUTHENTICATING: 'authenticating',
@@ -35,21 +40,29 @@ const STATES = Object.freeze({
   FAILED: 'failed',
 });
 
-const ALLOWED_TRANSITIONS = Object.freeze({
-  [STATES.DISCONNECTED]: Object.freeze([STATES.CONNECTING]),
-  [STATES.CONNECTING]: Object.freeze([STATES.AUTHENTICATING, STATES.FAILED, STATES.DISCONNECTED]),
-  [STATES.AUTHENTICATING]: Object.freeze([STATES.PROVISIONING, STATES.FAILED, STATES.DISCONNECTED]),
-  [STATES.PROVISIONING]: Object.freeze([STATES.FORWARDING, STATES.FAILED]),
-  [STATES.FORWARDING]: Object.freeze([STATES.CONNECTED, STATES.FAILED]),
-  [STATES.CONNECTED]: Object.freeze([STATES.RECONNECTING, STATES.DISCONNECTED, STATES.FAILED]),
-  [STATES.RECONNECTING]: Object.freeze([STATES.AUTHENTICATING, STATES.FAILED, STATES.DISCONNECTED]),
-  [STATES.FAILED]: Object.freeze([STATES.DISCONNECTED]),
+const SPEC_ALLOWED_TRANSITIONS = Object.freeze({
+  [SPEC_STATES.DISCONNECTED]: Object.freeze([SPEC_STATES.CONNECTING]),
+  [SPEC_STATES.CONNECTING]: Object.freeze([SPEC_STATES.AUTHENTICATING, SPEC_STATES.FAILED, SPEC_STATES.DISCONNECTED]),
+  [SPEC_STATES.AUTHENTICATING]: Object.freeze([SPEC_STATES.PROVISIONING, SPEC_STATES.FAILED, SPEC_STATES.DISCONNECTED]),
+  [SPEC_STATES.PROVISIONING]: Object.freeze([SPEC_STATES.FORWARDING, SPEC_STATES.FAILED]),
+  [SPEC_STATES.FORWARDING]: Object.freeze([SPEC_STATES.CONNECTED, SPEC_STATES.FAILED]),
+  [SPEC_STATES.CONNECTED]: Object.freeze([SPEC_STATES.RECONNECTING, SPEC_STATES.DISCONNECTED, SPEC_STATES.FAILED]),
+  [SPEC_STATES.RECONNECTING]: Object.freeze([SPEC_STATES.AUTHENTICATING, SPEC_STATES.FAILED, SPEC_STATES.DISCONNECTED]),
+  [SPEC_STATES.FAILED]: Object.freeze([SPEC_STATES.DISCONNECTED]),
 });
 
-function isValidTransition(from, to) {
-  const allowed = ALLOWED_TRANSITIONS[from];
-  return Array.isArray(allowed) && allowed.includes(to);
-}
+// ===========================================================================
+// 스펙-코드 정합: 모듈이 export 하는 테이블은 design.md 사본과 같아야 한다
+// ===========================================================================
+describe('스펙-코드 정합 — remote-session.js 테이블 == design.md 사본', () => {
+  test('STATES 가 스펙과 같다', () => {
+    expect(STATES).toEqual(SPEC_STATES);
+  });
+
+  test('ALLOWED_TRANSITIONS 가 스펙과 같다', () => {
+    expect(ALLOWED_TRANSITIONS).toEqual(SPEC_ALLOWED_TRANSITIONS);
+  });
+});
 
 // ── 생성기 ────────────────────────────────────────────────────
 const stateArbitrary = () => fc.constantFrom(...Object.values(STATES));
@@ -373,6 +386,19 @@ describe('Property 29: 비정상 입력 견고성 — Validates Requirements', (
       }),
       { numRuns: 50 }
     );
+  });
+
+  test('CI 반례 고정: toString 이 함수가 아닌 객체·비문자열 키도 throw 없이 false', () => {
+    // 2026-09-17 gamma 러너 fast-check 반례 [{"toString":0}, 0] — 객체 키 조회가 ToPropertyKey 로
+    // toString 을 호출하다 TypeError. 모듈은 typeof 가드로 막는다.
+    expect(isValidTransition({ toString: 0 }, 0)).toBe(false);
+    expect(isValidTransition({ toString: {} }, 'connected')).toBe(false);
+    expect(isValidTransition('disconnected', { toString: 0 })).toBe(false);
+    expect(isValidTransition(Object.create(null), Object.create(null))).toBe(false);
+    expect(isValidTransition(Symbol('x'), 'connected')).toBe(false);
+    // 프로토타입 체인의 키는 전이로 인정하지 않는다
+    expect(isValidTransition('constructor', 'connected')).toBe(false);
+    expect(isValidTransition('__proto__', 'connected')).toBe(false);
   });
 
   test('isValidTransition() 절대 throw하지 않음', () => {
