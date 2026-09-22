@@ -38,6 +38,18 @@ function resolvePython() {
   return isWin ? 'python' : 'python3';
 }
 
+/** dir 아래(재귀) 일반 파일 바이트 합. 링크는 lstat 크기(대상 미포함) — 번들 크기 실측 로그용. */
+function dirSizeBytes(dir) {
+  let total = 0;
+  for (const name of fs.readdirSync(dir)) {
+    const p = path.join(dir, name);
+    const st = fs.lstatSync(p);
+    if (st.isDirectory()) total += dirSizeBytes(p);
+    else total += st.size;
+  }
+  return total;
+}
+
 /** dir 아래(재귀)의 심볼릭 링크 개수. Dirent 타입은 파일시스템에 따라 UNKNOWN 일 수 있어 lstat 로 판정. */
 function countSymlinks(dir) {
   let n = 0;
@@ -172,7 +184,14 @@ function main() {
         fs.rmSync(modelCacheDir, { recursive: true, force: true });
         throw new Error(`symlink materialization failed, bundle removed: ${e.message}`);
       }
-      console.log(`[build-python] ✓ embed model bundled (offline-ready); symlinks materialized: ${materialized}`);
+      // 실측 근거를 로그에 남긴다 — 2026-09-22 검증 빌드에서 mac 아티팩트가 이전보다 약 880MB 커져
+      // "blobs 가 안 지워졌나 / 이전 빌드에 모델이 빠졌었나"를 로그로 판별할 수 없었다. 이 한 줄이 그 답이다.
+      const entries = fs.readdirSync(modelCacheDir);
+      const blobsLeft = entries.filter((n) => n.startsWith('models--') && fs.existsSync(path.join(modelCacheDir, n, 'blobs')));
+      const sizeMb = (dirSizeBytes(modelCacheDir) / 1048576).toFixed(1);
+      console.log(`[build-python] ✓ embed model bundled (offline-ready); symlinks materialized: ${materialized}, `
+        + `remaining: ${countSymlinks(modelCacheDir)}, blobs dirs left: ${blobsLeft.length}, size: ${sizeMb} MB, `
+        + `entries: ${entries.join(', ')}`);
     } catch (e) {
       // 모델 번들 실패는 치명적이지 않다 — 런타임에 LSA/TF-IDF로 폴백(무회귀).
       console.warn('[build-python] ⚠ embed model bundle skipped (runtime LSA fallback):', e.message);
@@ -187,4 +206,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { resolvePython, countSymlinks, materializeSymlinks };
+module.exports = { resolvePython, countSymlinks, dirSizeBytes, materializeSymlinks };

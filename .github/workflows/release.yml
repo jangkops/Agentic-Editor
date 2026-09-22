@@ -115,6 +115,20 @@ jobs:
           if [ -z "${CSC_LINK:-}" ]; then export CSC_IDENTITY_AUTO_DISCOVERY=false; fi
           npx electron-builder --${{ matrix.artifact }} --publish "$PUBLISH_MODE"
 
+      # 실측 근거 — 번들된 모델 캐시와 산출물 크기를 로그에 남긴다. 2026-09-22 검증 빌드에서 mac 아티팩트가
+      # 이전보다 약 880MB 커졌는데 로그에 크기가 없어 원인(blobs 잔존 vs 이전 빌드의 모델 누락)을 판별하지 못했다.
+      - name: Report bundle sizes (model cache · dist_electron)
+        if: always()
+        shell: bash
+        run: |
+          echo "== ai_engine_dist/ai-engine-server/fastembed_models =="
+          du -sh ai_engine_dist/ai-engine-server/fastembed_models 2>/dev/null || echo "(없음)"
+          find ai_engine_dist/ai-engine-server/fastembed_models -mindepth 1 -maxdepth 3 -type d -exec du -sh {} + 2>/dev/null || true
+          echo "== ai_engine_dist (전체) =="
+          du -sh ai_engine_dist 2>/dev/null || echo "(없음)"
+          echo "== dist_electron =="
+          ls -la dist_electron 2>/dev/null || echo "(없음)"
+
       - name: Upload build artifacts (백업)
         if: always()
         uses: actions/upload-artifact@v4

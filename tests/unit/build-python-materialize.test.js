@@ -12,7 +12,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { materializeSymlinks, countSymlinks } = require('../../scripts/build-python');
+const { materializeSymlinks, countSymlinks, dirSizeBytes } = require('../../scripts/build-python');
 
 function canSymlink() {
   const probe = fs.mkdtempSync(path.join(os.tmpdir(), 'ae-symlink-probe-'));
@@ -138,6 +138,23 @@ describeIfSymlink('build-python materializeSymlinks — HF 캐시 심볼릭 링�
     materializeSymlinks(cacheRoot);
 
     expect(fs.existsSync(path.join(other, 'blobs', 'x'))).toBe(true);
+  });
+
+  test('실체화 전후 총 바이트가 같다 — blobs 제거로 번들이 두 배가 되지 않음을 크기로 고정', () => {
+    const { files } = makeHfCache(cacheRoot);
+    const payload = Object.values(files).reduce((s, [, content]) => s + Buffer.byteLength(content), 0);
+    const before = dirSizeBytes(cacheRoot);
+    // 전: blobs 실파일(payload) + 링크(lstat 크기) + 비링크 파일들
+    expect(before).toBeGreaterThanOrEqual(payload);
+
+    materializeSymlinks(cacheRoot);
+
+    const after = dirSizeBytes(cacheRoot);
+    // 후: snapshots 실파일(payload) + 비링크 파일들. 링크 바이트가 사라지므로 전보다 작거나 같아야 하고,
+    // blobs 가 남아 중복됐다면 payload 만큼 커져 이 부등식이 깨진다.
+    expect(after).toBeLessThanOrEqual(before);
+    expect(after).toBeLessThan(before + payload);
+    expect(after).toBeGreaterThanOrEqual(payload);
   });
 
   test('존재하지 않는 디렉터리는 0 (모델 다운로드가 실패한 빌드에서도 안전)', () => {
