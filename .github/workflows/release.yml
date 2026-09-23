@@ -78,6 +78,9 @@ jobs:
         shell: bash
         env:
           AE_DEBUG_ENDPOINTS: "1"
+          # Windows 러너 콘솔은 cp1252 — 한국어 리포트 출력이 UnicodeEncodeError 로 죽어 통과한 스모크가 exit 1 이
+          # 됐다(2026-09-22 첫 실행). 스크립트가 스트림을 UTF-8 로 재설정하고, 인터프리터 단에서도 같은 것을 보장한다.
+          PYTHONUTF8: "1"
         run: |
           BIN=ai_engine_dist/ai-engine-server/ai-engine-server
           if [ "$RUNNER_OS" = "Windows" ]; then BIN="$BIN.exe"; fi

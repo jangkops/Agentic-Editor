@@ -63,6 +63,36 @@ import time
 import urllib.error
 import urllib.request
 
+
+def force_utf8_stdio(streams=None) -> list[str]:
+    """표준 출력·오류 스트림을 UTF-8 로 강제한다. 재설정한 스트림 이름을 돌려준다(테스트용).
+
+    Windows 러너의 콘솔 기본 인코딩은 cp1252 라 한국어 리포트(``[PASS] 부팅/모듈`` 등)를 print 하는
+    순간 ``UnicodeEncodeError`` 로 죽고, 스모크가 통과했어도 exit 1 이 된다(2026-09-22 릴리스 CI 실측:
+    동결 바이너리 기동·프로브는 전부 성공, 리포트 출력에서 crash). 판정 결과가 콘솔 인코딩에 좌우되면
+    안 되므로 스트림 자체를 재설정한다. ``reconfigure`` 가 없는 스트림(pytest 캡처 객체 등)은 건너뛴다.
+    """
+    if streams is None:
+        streams = [("stdout", sys.stdout), ("stderr", sys.stderr)]
+    reconfigured: list[str] = []
+    for name, stream in streams:
+        current = (getattr(stream, "encoding", "") or "").lower().replace("-", "")
+        if current == "utf8":
+            continue  # 이미 UTF-8(pytest 캡처, PYTHONUTF8=1 등) — 건드리지 않는다
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+            reconfigured.append(name)
+        except (ValueError, OSError):
+            # 이미 닫혔거나 재설정을 지원하지 않는 스트림 — 판정에는 영향 없음
+            continue
+    return reconfigured
+
+
+force_utf8_stdio()
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
