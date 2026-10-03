@@ -32,6 +32,7 @@ scripts/test_pptx_quality_vertex_images_render_report.py
 scripts/test_pptx_quality_vertex_images_integration.py
 scripts/test_pptx_direct_native_diagram.py
 scripts/test_pptx_cover_toc.py
+scripts/test_pptx_render_preview_tmp_cleanup.py
 scripts/test_native_density_realpath_nochrome.py
 scripts/test_research_ssrf_guard.py
 scripts/test_shell_egress_audit.py

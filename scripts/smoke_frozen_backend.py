@@ -349,28 +349,69 @@ def probe_llm_chat(base: str, creds: bool) -> dict:
         return _result(path, ok=False, error=str(e))
 
 
+SMOKE_PPTX_TITLE = "SMOKE-PPTX-ROUNDTRIP"
+
+
+def build_sample_pptx_b64(title: str = SMOKE_PPTX_TITLE) -> str | None:
+    """제목 슬라이드 1장짜리 .pptx 를 메모리에서 만들어 base64 로 돌려준다. python-pptx 가 없으면 None.
+
+    예전 프로브는 레포 루트·.generated 에서 아무 .pptx 나 골랐다. CI 러너에는 그런 파일이 없어 PPTX 경로가
+    항상 skip 됐고(2026-09-22 macOS 릴리스 로그), 로컬에서는 사용자의 임의 파일을 파싱해 결과를 검증할 수
+    없었다. 입력을 우리가 만들면 CI 에서도 동결 바이너리의 python-pptx 파서를 실제로 태우고 제목 왕복까지
+    확인할 수 있다. 입력 생성에 쓰는 python-pptx(러너 인터프리터)와 검증 대상(동결 번들)은 별개 프로세스다.
+    """
+    try:
+        from pptx import Presentation
+    except Exception:  # noqa: BLE001
+        return None
+    import base64
+    import io
+
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[0])  # Title Slide
+    slide.shapes.title.text = title
+    buf = io.BytesIO()
+    prs.save(buf)
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
 def probe_pptx(base: str, creds: bool) -> dict:
-    """PPTX — POST /api/media/pptx-render against an existing .pptx (creds-free).
+    """PPTX — POST /api/media/pptx-render 로 .pptx 파싱 왕복 (creds-free).
 
     Doubles as a python-pptx bundling check (Req 1.3): the route imports and
-    parses with python-pptx, so a 200 with a ``slides`` array proves the
-    dependency is present in the (frozen) build.
+    parses with python-pptx, so a 200 whose first slide carries the title we
+    wrote proves the dependency is present and working in the (frozen) build.
+
+    입력 우선순위: (1) 메모리에서 만든 샘플을 base64 로 전송하고 제목 왕복을 검사
+    (2) python-pptx 가 없는 인터프리터면 기존처럼 디스크의 샘플 파일 (3) 둘 다 없으면 skip.
     """
     path = "PPTX"
-    sample = _find_sample_pptx()
-    if not sample:
-        return _result(path, ok=False, error="샘플 .pptx 없음 — skip", skipped=True)
+    b64 = build_sample_pptx_b64()
+    expect_title: str | None = None
+    if b64:
+        payload = {"base64": b64}
+        expect_title = SMOKE_PPTX_TITLE
+    else:
+        sample = _find_sample_pptx()
+        if not sample:
+            return _result(path, ok=False, error="샘플 .pptx 없음 — skip", skipped=True)
+        payload = {"path": sample}
     try:
         code, body = _http_post(
             base.rstrip("/") + "/api/media/pptx-render",
-            {"path": sample},
+            payload,
             timeout=60.0,
         )
         if code != 200:
             return _result(path, ok=False, error=f"HTTP {code}")
         data = json.loads(body)
-        if "slides" not in data:
+        slides = data.get("slides")
+        if not isinstance(slides, list):
             return _result(path, ok=False, error="응답에 'slides' 없음")
+        if expect_title is not None:
+            got = slides[0].get("title") if slides and isinstance(slides[0], dict) else None
+            if got != expect_title:
+                return _result(path, ok=False, error=f"제목 왕복 불일치: {got!r} != {expect_title!r}")
         return _result(path, ok=True)
     except Exception as e:  # noqa: BLE001
         return _result(path, ok=False, error=str(e))

@@ -16179,16 +16179,30 @@ async def api_media_pptx_render(request: Request):
             return JSONResponse({"error": f"base64 디코드 실패: {str(_be)[:120]}"}, status_code=400)
     if not cand or not os.path.isfile(cand):
         return JSONResponse({"error": f"파일을 찾을 수 없습니다: {rel}"}, status_code=404)
+    def _discard_tmp_preview() -> None:
+        # base64 폴백이 만든 임시 .pptx 는 여기서만 쓰인다. 예전에는 지우지 않아 미리보기 폴백마다
+        # 시스템 임시 폴더에 ae_pptx_preview_*.pptx 가 쌓였다(2026-09-22 확인, Windows %TEMP% 는 자동 정리 없음).
+        if _tmp_preview:
+            try:
+                os.unlink(_tmp_preview)
+            except OSError:
+                pass
+
     try:
         from pptx import Presentation
         from pptx.enum.shapes import MSO_SHAPE_TYPE
         import base64 as _b64
     except Exception as e:
+        _discard_tmp_preview()
         return JSONResponse({"error": f"pptx 파서 로드 실패: {str(e)[:160]}"}, status_code=500)
     try:
         prs = Presentation(cand)
     except Exception as e:
+        _discard_tmp_preview()
         return JSONResponse({"error": f"pptx 열기 실패: {str(e)[:160]}"}, status_code=500)
+    # python-pptx 는 열 때 패키지 전체(이미지 blob 포함)를 메모리로 읽으므로 이후 파일은 필요 없다
+    # (2026-09-22 실측: 연 뒤 파일을 지워도 제목·이미지 blob 접근 정상).
+    _discard_tmp_preview()
 
     def _mime(blob: bytes, ext: str) -> str:
         if blob[:8] == b"\x89PNG\r\n\x1a\n":
