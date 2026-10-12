@@ -40,3 +40,4 @@ scripts/test_smoke_frozen_backend_utf8_stdio.py
 scripts/test_test_hygiene_no_module_global_clobber.py
 scripts/test_token_mask_property.py
 scripts/test_tool_sandbox_guards.py
+scripts/test_global_profile_prefix.py

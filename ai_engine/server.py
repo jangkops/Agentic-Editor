@@ -7844,6 +7844,9 @@ def _load_inference_types(aws_profile, bedrock_user):
 # 게이트웨이가 일부 모델만 활성화한 경우, _resolve_callable_model_id가 호출 시점에
 # us./eu. prefix 처리를 담당한다.
 _LATEST_OPUS_IDS = [
+    # 5.5: 게이트웨이 실측 활성(2026-10-12, us./global. 모두 ALLOW). 거부되는 계정은
+    # _model_is_denied 가 런타임에 걸러 다음 후보(4-7 …)로 내려간다.
+    "anthropic.claude-opus-5-5",
     "anthropic.claude-opus-4-7-20251015-v1:0",
     "anthropic.claude-opus-4-20250514-v1:0",
     "anthropic.claude-3-opus-20240229-v1:0",
@@ -7852,14 +7855,16 @@ _LATEST_OPUS_IDS = [
     "anthropic.claude-sonnet-4-5-20250929-v1:0",
 ]
 _LATEST_SONNET_IDS = [
-    # sonnet-4-5: 라이브 게이트웨이 실측 활성(2026-07). 4-6은 일부 계정에서
-    # model_denied 되므로 활성 확실한 4-5를 최우선 폴백으로 둔다.
+    # sonnet-5-5: 게이트웨이 실측 활성(2026-10-12). 그다음 sonnet-4-5: 라이브 실측
+    # 활성(2026-07). 4-6은 일부 계정에서 model_denied 되므로 활성 확실한 4-5를 그 뒤 폴백으로 둔다.
+    "anthropic.claude-sonnet-5-5",
     "anthropic.claude-sonnet-4-5-20250929-v1:0",
     "anthropic.claude-sonnet-4-6-20250929-v1:0",
     "anthropic.claude-sonnet-4-20250514-v1:0",
     "anthropic.claude-3-5-sonnet-20241022-v2:0",
 ]
 _LATEST_HAIKU_IDS = [
+    "anthropic.claude-haiku-5-5",  # 게이트웨이 실측 활성(2026-10-12)
     "anthropic.claude-haiku-4-5-20251001-v1:0",
     "anthropic.claude-3-5-haiku-20241022-v1:0",
 ]
@@ -8209,13 +8214,28 @@ def _module_is_vision_capable(model_id: str) -> bool:
     return False
 
 
+# 게이트웨이가 global 청구 기준으로 추가한 모델 — global. 프로필로 보낸다(us./global. 모두
+# ALLOW 실측 2026-10-12). 예전 모델은 게이트웨이 허용 목록이 us. 기준일 수 있어 일괄 전환하지
+# 않는다. 게이트웨이에 global 기준 모델을 추가하면 여기에 prefix 없는 base id 를 더한다.
+_GLOBAL_PROFILE_MODEL_IDS = frozenset({
+    "anthropic.claude-opus-5-5",
+    "anthropic.claude-sonnet-5-5",
+    "anthropic.claude-haiku-5-5",
+})
+
+
+def _profile_prefixed(raw_id: str) -> str:
+    """prefix 없는 base id 에 추론 프로필 prefix 부여 — 위 목록이면 global., 아니면 us."""
+    return f"global.{raw_id}" if raw_id in _GLOBAL_PROFILE_MODEL_IDS else f"us.{raw_id}"
+
+
 def _module_with_prefix(mid: str) -> str:
     """단순 us./eu. prefix 부여 — aws_profile/bedrock_user 없이 호출될 때 사용."""
     if not mid:
         return mid
     if mid.startswith("us.") or mid.startswith("eu.") or mid.startswith("global."):
         return mid
-    return f"us.{mid}"
+    return _profile_prefixed(mid)
 
 
 # task_type → 후보 ID 리스트 매핑.
@@ -8359,8 +8379,9 @@ def _specialized_model_for_task(
         print(f"[ModelRouter] task={task_type} user={user_pref or '∅'} → picked={picked} (matrix; dyn_extra={len(dynamic_extra)})")
         return picked
 
-    # 3) 매트릭스에도 없고 user_pref도 없으면 Sonnet 최종 fallback
-    fallback = _finalize(user_pref or _LATEST_SONNET_IDS[0])
+    # 3) 매트릭스에도 없고 user_pref도 없으면 Sonnet 최종 fallback (거부된 변형은 건너뜀)
+    _sonnet = next((c for c in _LATEST_SONNET_IDS if not _model_is_denied(c)), _LATEST_SONNET_IDS[0])
+    fallback = _finalize(user_pref or _sonnet)
     print(f"[ModelRouter] task={task_type} user={user_pref or '∅'} → picked={fallback} (final fallback)")
     return fallback
 
@@ -8437,6 +8458,7 @@ def _resolve_callable_model_id(model_id, aws_profile, bedrock_user):
     - ON_DEMAND only → prefix 제거 (prefix가 붙어있으면 떼어냄)
     - INFERENCE_PROFILE only → us. prefix 강제 (없으면 붙임)
     - 둘 다 / 알 수 없음 → prefix 있으면 유지, 없으면 us. 붙임 (기본값, 대부분 CRIS 커버)
+    - 단 _GLOBAL_PROFILE_MODEL_IDS(게이트웨이 global 기준 모델)는 us. 대신 global. 을 붙인다.
     """
     if not model_id:
         return model_id
@@ -8481,15 +8503,18 @@ def _resolve_callable_model_id(model_id, aws_profile, bedrock_user):
         # ON_DEMAND 전용 — prefix 제거
         return raw_id
     if has_inference_profile and not has_on_demand:
-        # INFERENCE_PROFILE 전용 — us. prefix 강제
+        # INFERENCE_PROFILE 전용 — us. prefix 강제 (global 기준 모델은 global.)
         if not any(model_id.startswith(p) for p in ("us.", "eu.", "global.")):
-            return f"us.{raw_id}"
+            return _profile_prefixed(raw_id)
         return model_id
     if has_on_demand and has_inference_profile:
         # 둘 다 지원 → 기본 CRIS (기존 동작 유지)
         if not any(model_id.startswith(p) for p in ("us.", "eu.", "global.")):
-            return f"us.{raw_id}"
+            return _profile_prefixed(raw_id)
         return model_id
+    # global 기준 모델은 INFERENCE_PROFILE 전용(실측) — 캐시가 비어도 global. 로 보낸다.
+    if raw_id in _GLOBAL_PROFILE_MODEL_IDS and model_id == raw_id:
+        return f"global.{raw_id}"
     # 캐시에 정보가 전혀 없음(unknown, types 빈 리스트) → 원본 model_id 그대로 반환.
     # 3P 신규 모델(nvidia/google/qwen/zai/minimax/moonshotai/mistral 신규/deepseek 등)은
     # bare ID로만 converse 200 OK 이며, us. 강제 시 'model identifier is invalid'로 거부된다.
@@ -15226,7 +15251,7 @@ async def run_agent_orchestrated(request: Request):
     gw = _get_gw(aws_profile, bedrock_user)
 
     def _with_prefix(mid: str) -> str:
-        return mid if mid.startswith("us.") or mid.startswith("eu.") else f"us.{mid}"
+        return mid if mid.startswith(("us.", "eu.", "global.")) else _profile_prefixed(mid)
 
     planner_id = _with_prefix(planner_model)
     worker_id = _with_prefix(worker_model)
