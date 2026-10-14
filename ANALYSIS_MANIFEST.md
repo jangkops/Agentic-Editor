@@ -927,7 +927,6 @@ docs/TEST_RESULTS_CHECKPOINT.md     테스트 결과 체크포인트
 docs/REFACTORING_PLAN.md            리팩터 계획
 docs/REFACTOR_PLAN.md               (중복 성격 — 둘 다 확인 필요)
 docs/PENDING_UI_FIXES.md            미해결 UI 이슈
-docs/INTERVIEW_PREP.md
 docs/screenshots/01.png ~ 14.png    UI 스크린샷 14장
 docs/screenshots/PLACEHOLDER.md
 ```
